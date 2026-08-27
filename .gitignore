@@ -1,0 +1,44 @@
+node_modules/
+dist/
+.artifacts/
+*.log
+.DS_Store
+*.tsbuildinfo
+# packages/*/node_modules/
+packages/*/dist/
+packages/*/dist-chrome/
+packages/*/dist-firefox/
+packages/ai/src/providers/data/
+packages/ai/src/providers/.model-generation-*/
+*.cpuprofile
+
+# Environment
+.env
+
+# Editor files
+.vscode/
+.zed/
+.idea/
+.claude/
+*.swp
+*.swo
+*~
+
+# Package specific
+.npm/
+coverage/
+.nyc_output/
+.smolt_config/
+tui-debug.log
+compaction-results/
+.opencode/
+syntax.jsonl
+out.jsonl
+smolt-*.html
+out.html
+packages/coding-agent/binaries/
+todo.md
+plans/
+.smolt/hf-sessions/
+.smolt/hf-sessions-backup/
+collect.sh

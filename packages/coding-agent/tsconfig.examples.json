@@ -1,0 +1,16 @@
+{
+	"extends": "../../tsconfig.base.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"paths": {
+			"@smolt/coding-agent": ["./src/index.ts"],
+			"@smolt/coding-agent/hooks": ["./src/core/hooks/index.ts"],
+			"@smolt/tui": ["../tui/src/index.ts"],
+			"@smolt/ai": ["../ai/src/index.ts"],
+			"typebox": ["../../node_modules/typebox"]
+		},
+		"skipLibCheck": true
+	},
+	"include": ["examples/**/*.ts"],
+	"exclude": ["node_modules", "dist"]
+}

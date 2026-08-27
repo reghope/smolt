@@ -1,0 +1,6 @@
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Smolt">
+  <!-- A single roe pearl: flat black bead with a comma-shaped specular highlight. -->
+  <circle cx="64" cy="64" r="56" fill="#000000"/>
+  <path d="M26 61 A38 38 0 0 1 51 28"
+        fill="none" stroke="#ffffff" stroke-width="16" stroke-linecap="round"/>
+</svg>

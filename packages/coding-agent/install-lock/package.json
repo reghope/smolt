@@ -1,0 +1,19 @@
+{
+	"name": "@smolt/coding-agent-install",
+	"version": "0.84.3",
+	"private": true,
+	"description": "Lockfile root used by the Smolt installer and updater.",
+	"dependencies": {
+		"@smolt/coding-agent": "0.84.3"
+	},
+	"overrides": {
+		"protobufjs": "7.6.5",
+		"rimraf": "6.1.2",
+		"gaxios": {
+			"rimraf": "6.1.2"
+		}
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	}
+}

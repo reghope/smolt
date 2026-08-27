@@ -1,0 +1,40 @@
+{
+	"extends": "./tsconfig.base.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"module": "NodeNext",
+		"moduleResolution": "NodeNext",
+		"paths": {
+			"*": ["./*"],
+			"@smolt/telemetry": ["./packages/telemetry/src/index.ts"],
+			"@smolt/telemetry/testing": ["./packages/telemetry/src/testing/index.ts"],
+			"@smolt/ai": ["./packages/ai/src/index.ts"],
+			"@smolt/ai/oauth": ["./packages/ai/src/oauth.ts"],
+			"@smolt/ai/*": ["./packages/ai/src/*.ts", "./packages/ai/src/providers/*.ts"],
+			"@smolt/ai/dist/*": ["./packages/ai/src/*"],
+			"@smolt/agent-core": ["./packages/agent/src/index.ts"],
+			"@smolt/agent-core/node": ["./packages/agent/src/node.ts"],
+			"@smolt/agent-core/session/testing": [
+				"./packages/agent/src/harness/session/testing/index.ts"
+			],
+			"@smolt/agent-core/*": ["./packages/agent/src/*"],
+			"@smolt/session-backend-sqlite-node": ["./packages/session-backends/sqlite-node/src/index.ts"],
+			"@smolt/coding-agent": ["./packages/coding-agent/src/index.ts"],
+			"@smolt/coding-agent/hooks": ["./packages/coding-agent/src/core/hooks/index.ts"],
+			"@smolt/coding-agent/*": ["./packages/coding-agent/src/*"],
+			"@smolt/protocol": ["./packages/protocol/src/index.ts"],
+			"@smolt/protocol/*": ["./packages/protocol/src/*"],
+			"@smolt/client": ["./packages/client/src/index.ts"],
+			"@smolt/client/*": ["./packages/client/src/*"],
+			"@smolt/server": ["./packages/server/src/index.ts"],
+			"@smolt/server/*": ["./packages/server/src/*"],
+			"typebox": ["./node_modules/typebox"],
+			"@smolt/tui": ["./packages/tui/src/index.ts"],
+			"@smolt/tui/*": ["./packages/tui/src/*"],
+			"@smolt/agent-old": ["./packages/agent-old/src/index.ts"],
+			"@smolt/agent-old/*": ["./packages/agent-old/src/*"]
+		}
+	},
+	"include": ["packages/*/src/**/*", "packages/*/test/**/*", "packages/session-backends/*/src/**/*", "packages/session-backends/*/test/**/*", "packages/coding-agent/examples/**/*"],
+	"exclude": ["**/dist/**", "packages/coding-agent/examples/extensions/gondolin/**"]
+}

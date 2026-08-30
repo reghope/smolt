@@ -34,6 +34,8 @@ const bridge = new AgentBridge();
  * that are still running.
  */
 interface AgentSlot {
+	/** Stable identity, so a forwarded event names the agent it came from. */
+	id: number;
 	bridge: AgentBridge;
 	/** Session file this agent currently holds; "" until first known. */
 	sessionPath: string;
@@ -45,7 +47,15 @@ interface AgentSlot {
 	/** The running turn used bash or another tool that can write anywhere. */
 	turnSwept: boolean;
 }
+/** How much of a stored transcript the window is asking for. */
+interface SessionWindow {
+	limit?: number;
+	before?: number;
+}
+
 const slots: AgentSlot[] = [];
+/** Hands out slot ids; only ever compared, never persisted. */
+let slotSeq = 0;
 /** Idle agents kept warm for quick switching, beyond the active one. */
 const MAX_SLOTS = 3;
 /**
@@ -412,6 +422,7 @@ app.whenReady().then(async () => {
 	const win = createWindow();
 
 	let active: AgentSlot = {
+		id: ++slotSeq,
 		bridge,
 		sessionPath: "",
 		busy: false,
@@ -427,6 +438,19 @@ app.whenReady().then(async () => {
 			"agent:busy",
 			slots.filter((slot) => slot.busy).map((slot) => slot.sessionPath),
 		);
+	};
+
+	/**
+	 * Name the agent the window is now attached to.
+	 *
+	 * The view moves before the agent does — the renderer paints the next
+	 * chat from disk while the switch is still in flight — so for a moment
+	 * the window is showing one conversation and the old agent is still the
+	 * one streaming. The renderer detaches for that moment and waits for
+	 * this, rather than reducing whatever arrives into the chat on screen.
+	 */
+	const announceActive = (): void => {
+		if (!win.isDestroyed()) win.webContents.send("agent:attached", active.id);
 	};
 
 	const refreshSlotPath = async (slot: AgentSlot): Promise<void> => {
@@ -501,7 +525,7 @@ app.whenReady().then(async () => {
 			}
 			if (win.isDestroyed()) return;
 			if (slot === active) {
-				win.webContents.send("agent:event", event);
+				win.webContents.send("agent:event", event, slot.id);
 			} else if (type === "agent_settled") {
 				win.webContents.send("agent:background-settled", { sessionPath: slot.sessionPath });
 			}
@@ -511,6 +535,7 @@ app.whenReady().then(async () => {
 
 	const spawnSlot = async (): Promise<AgentSlot> => {
 		const slot: AgentSlot = {
+			id: ++slotSeq,
 			bridge: new AgentBridge(),
 			sessionPath: "",
 			busy: false,
@@ -610,34 +635,55 @@ app.whenReady().then(async () => {
 	};
 
 	const debug = process.env.SMOLT_DESKTOP_DEBUG === "1";
+	/** A session change in flight, which every other call waits behind. */
+	let switching: Promise<unknown> | null = null;
 	ipcMain.handle("agent:call", async (_e, method: string, args: unknown[]) => {
 		try {
 			if (restarting) await restarting;
+			// Moving between chats is not instant — the agent takes about a second
+			// — and until it lands the active agent is still the one being left.
+			// A prompt sent into that gap would be answered by the wrong chat, so
+			// everything queues behind the move.
+			if (switching) await switching.catch(() => undefined);
 			const list = Array.isArray(args) ? args : [];
+			const movesSession =
+				method === "switchSession" || method === "newSession" || method === "clone" || method === "fork";
+			const dispatch = async (): Promise<unknown> => {
+				if (method === "switchSession") return await switchToPath(String(list[0] ?? ""));
+				if (method === "newSession" && active.busy) return await newSessionSlot();
+				const result = await active.bridge.call(method, list);
+				if (movesSession) await refreshSlotPath(active);
+				return result;
+			};
 			let value: unknown;
-			if (method === "switchSession") {
-				value = await switchToPath(String(list[0] ?? ""));
-			} else if (method === "newSession" && active.busy) {
-				value = await newSessionSlot();
-			} else {
-				value = await active.bridge.call(method, list);
-				if (method === "newSession" || method === "clone" || method === "fork") {
-					await refreshSlotPath(active);
+			if (movesSession) {
+				const move = dispatch();
+				switching = move;
+				try {
+					value = await move;
+				} finally {
+					if (switching === move) switching = null;
 				}
-			}
-			// A different conversation starts from a different tree.
-			if (method === "newSession" || method === "switchSession" || method === "clone" || method === "fork") {
+				// A different conversation starts from a different tree.
 				await rebaseline();
+				// The view may have landed on another agent; say so before the
+				// renderer reattaches, or it stays deaf to the chat it is showing.
+				announceActive();
+			} else {
+				value = await dispatch();
 			}
 			if (debug) console.log(`[call] ${method} ok ${JSON.stringify(value)?.slice(0, 120)}`);
 			return { ok: true, value };
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
+			// A switch that failed left the window detached; put it back.
+			announceActive();
 			if (debug) console.log(`[call] ${method} ERR ${message}`);
 			return { ok: false, error: message };
 		}
 	});
 	ipcMain.handle("agent:status", () => active.bridge.status);
+	ipcMain.handle("app:active-slot", () => active.id);
 	// The native window controls sit on the main-process side of the titlebar,
 	// so the renderer reports its resolved theme and the strip follows it.
 	ipcMain.handle("app:link-preview", async (_e, url: string) => {
@@ -739,6 +785,7 @@ app.whenReady().then(async () => {
 		warming = null;
 		activeCwd = cwd;
 		const slot: AgentSlot = {
+			id: ++slotSeq,
 			bridge: new AgentBridge(),
 			sessionPath: "",
 			busy: false,
@@ -766,6 +813,7 @@ app.whenReady().then(async () => {
 		signalReady();
 		ensureSpare();
 		await rebaseline();
+		announceActive();
 		if (!win.isDestroyed()) win.webContents.send("agent:started", slot.bridge.status);
 	};
 
@@ -816,15 +864,16 @@ app.whenReady().then(async () => {
 	 * path from the window can never remove anything else.
 	 */
 	/** The transcript straight off disk, so a switch need not wait for the agent. */
-	ipcMain.handle("app:session-messages", async (_e, path: string) => {
+	ipcMain.handle("app:session-messages", async (_e, path: string, options?: SessionWindow) => {
+		const empty = { messages: [], start: 0, userStart: 0 };
 		try {
 			const { resolve } = await import("node:path");
 			const { readSessionMessages, sessionsDir } = await import("./sessions.ts");
 			const target = resolve(String(path ?? ""));
-			if (!target.startsWith(resolve(sessionsDir())) || !target.endsWith(".jsonl")) return [];
-			return readSessionMessages(target);
+			if (!target.startsWith(resolve(sessionsDir())) || !target.endsWith(".jsonl")) return empty;
+			return readSessionMessages(target, options ?? {});
 		} catch {
-			return [];
+			return empty;
 		}
 	});
 
@@ -1212,6 +1261,7 @@ app.whenReady().then(async () => {
 		__dirname,
 	);
 	await refreshSlotPath(active);
+	announceActive();
 	await rebaseline();
 	if (!win.isDestroyed()) win.webContents.send("agent:started", bridge.status);
 	// The Telegram host follows the linked config: setup done in any pane is

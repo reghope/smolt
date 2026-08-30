@@ -153,23 +153,41 @@ function extractText(content: unknown): string {
 	}
 	return parts.join(" ");
 }
+/** A slice of a stored transcript, with enough context to ask for the one above it. */
+export interface SessionPage {
+	/** The window itself, oldest first. */
+	messages: Record<string, unknown>[];
+	/** Where the window begins in the whole chat; above 0 there is more above it. */
+	start: number;
+	/** User messages before the window, so a rewind still counts to the right one. */
+	userStart: number;
+}
 
 /**
- * The stored messages of one session, in the shape the agent's own
- * `getMessages` returns.
+ * A window onto a stored transcript: the newest messages, unless asked for the
+ * page before a given point.
  *
  * Reading the file directly is not a duplicate of asking the agent: switching
  * a session inside the agent takes seconds, and the transcript is on disk the
  * whole time. The window renders from here and lets the agent catch up.
+ *
+ * A long chat runs to thousands of messages, and handing the whole lot to the
+ * window so it can show the last few is both a slow read and a slow render.
+ * Only the window is kept; scrolling up asks for the page above it.
  */
-export function readSessionMessages(path: string, limit = 1000): Record<string, unknown>[] {
+export function readSessionMessages(path: string, options: { limit?: number; before?: number } = {}): SessionPage {
+	const limit = Math.max(1, options.limit ?? 60);
+	const before = options.before;
+	const first = before === undefined ? 0 : Math.max(0, before - limit);
 	let raw: string;
 	try {
 		raw = readFileSync(path, "utf-8");
 	} catch {
-		return [];
+		return { messages: [], start: 0, userStart: 0 };
 	}
-	const out: Record<string, unknown>[] = [];
+	const held: Record<string, unknown>[] = [];
+	let total = 0;
+	let userStart = 0;
 	for (const line of raw.split("\n")) {
 		if (line.trim() === "") continue;
 		let entry: { type?: string; message?: unknown };
@@ -179,10 +197,19 @@ export function readSessionMessages(path: string, limit = 1000): Record<string, 
 			continue;
 		}
 		if (entry.type !== "message") continue;
-		if (entry.message !== null && typeof entry.message === "object") {
-			out.push(entry.message as Record<string, unknown>);
+		if (entry.message === null || typeof entry.message !== "object") continue;
+		const message = entry.message as Record<string, unknown>;
+		const index = total++;
+		if (before === undefined) {
+			// Where the tail begins is not known until the end, so hold a rolling
+			// window and count what falls out of the front of it.
+			held.push(message);
+			if (held.length > limit && held.shift()?.role === "user") userStart += 1;
+		} else if (index < first) {
+			if (message.role === "user") userStart += 1;
+		} else if (index < before) {
+			held.push(message);
 		}
 	}
-	// Newest wins if a session outgrows the cap; the head is the least useful.
-	return out.length > limit ? out.slice(out.length - limit) : out;
+	return { messages: held, start: before === undefined ? total - held.length : first, userStart };
 }

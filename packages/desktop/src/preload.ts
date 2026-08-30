@@ -20,8 +20,11 @@ contextBridge.exposeInMainWorld("smolt", {
 	onPermissionRequest: (cb: (request: unknown) => void): void => {
 		ipcRenderer.on("permission:request", (_e, request) => cb(request));
 	},
-	sessionMessages: (path: string): Promise<Record<string, unknown>[]> =>
-		ipcRenderer.invoke("app:session-messages", path),
+	sessionMessages: (
+		path: string,
+		options?: { limit?: number; before?: number },
+	): Promise<{ messages: Record<string, unknown>[]; start: number; userStart: number }> =>
+		ipcRenderer.invoke("app:session-messages", path, options),
 	sessionDelete: (path: string): Promise<AgentCallResult> => ipcRenderer.invoke("app:session-delete", path),
 	titlebar: (theme: string): Promise<void> => ipcRenderer.invoke("app:titlebar", theme),
 	linkPreview: (url: string): Promise<unknown> => ipcRenderer.invoke("app:link-preview", url),
@@ -70,8 +73,12 @@ contextBridge.exposeInMainWorld("smolt", {
 	onSideEvent: (cb: (event: unknown) => void): void => {
 		ipcRenderer.on("side:event", (_e, event) => cb(event));
 	},
-	onEvent: (cb: (event: unknown) => void): void => {
-		ipcRenderer.on("agent:event", (_e, event) => cb(event));
+	activeSlot: (): Promise<number> => ipcRenderer.invoke("app:active-slot"),
+	onEvent: (cb: (event: unknown, slot: number) => void): void => {
+		ipcRenderer.on("agent:event", (_e, event, slot) => cb(event, slot));
+	},
+	onAttached: (cb: (slot: number) => void): void => {
+		ipcRenderer.on("agent:attached", (_e, slot) => cb(slot));
 	},
 	onStarted: (cb: (status: { running: boolean; error: string | null }) => void): void => {
 		ipcRenderer.on("agent:started", (_e, status) => cb(status));

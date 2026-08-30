@@ -18,6 +18,8 @@ import {
 	chooseModel,
 	chooseThinking,
 	clearQueued,
+	queuedHere,
+	sendQueuedNow,
 	compactNow,
 	ensureCommands,
 	pickProject,
@@ -507,17 +509,30 @@ function ApprovalCard() {
 }
 
 function QueuedBanner() {
-	const state = useApp();
-	if (state.queuedMessages.length === 0) return null;
-	const count = state.queuedMessages.length;
+	useApp();
+	// This chat's queue. Another chat's waiting messages are its own business.
+	const queued = queuedHere();
+	if (queued.length === 0) return null;
+	const count = queued.length;
 	return (
 		<div className="mb-1.5 flex items-center gap-2.5 rounded-xl border bg-card py-2 pr-2 pl-3">
 			<span className="flex-none text-sm font-semibold">
 				{count} message{count === 1 ? "" : "s"} queued
 			</span>
 			<span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-sm text-faint">
-				{state.queuedMessages[0] ?? ""}
+				{queued[0]?.label ?? ""}
 			</span>
+			{/* Queueing is the safe default; this is the way out of it when the
+			    reader can see their message should not wait for the turn. */}
+			<Button
+				variant="ghost"
+				size="sm"
+				className="h-6 flex-none px-2 text-xs text-muted-foreground hover:text-foreground"
+				title="Deliver now, interrupting the current turn"
+				onClick={() => void sendQueuedNow()}
+			>
+				Send now
+			</Button>
 			<Button variant="ghost" size="icon" className="size-6" title="Discard queued messages" onClick={() => void clearQueued()}>
 				<Icon name="close" />
 			</Button>

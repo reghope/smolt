@@ -141,7 +141,20 @@ interface AppState {
 	preexistingChanges: number;
 	/** The diff as it stood when the repo bar's × was clicked (path → hunks), or null when not dismissed. */
 	repoBarDismissed: Map<string, string> | null;
-	queuedMessages: string[];
+	/** Messages waiting on a turn, per chat: a queue belongs to its own conversation. */
+	queuedBySession: Map<string, QueuedMessage[]>;
+	/** Where the rendered window starts in the chat; above 0 there is more above it. */
+	historyStart: number;
+	/** User messages before the window, so a rewind still names the right one. */
+	historyUserStart: number;
+	/** Where the window was filled from, and so where the page above it comes from. */
+	historySource: "disk" | "agent";
+	/** An earlier page is on its way. */
+	historyLoading: boolean;
+	/** The chat is being read in; the transcript shows a spinner, not an empty state. */
+	chatLoading: boolean;
+	/** The agent whose events the window is currently reducing; null mid-switch. */
+	attachedSlot: number | null;
 	pendingApprovals: PermissionRequest[];
 	uiRequests: UiDialogRequest[];
 	confirm: ConfirmRequest | null;
@@ -208,7 +221,13 @@ export const app: AppState = {
 	diffFiles: [],
 	preexistingChanges: 0,
 	repoBarDismissed: null,
-	queuedMessages: [],
+	queuedBySession: new Map(),
+	historyStart: 0,
+	historyUserStart: 0,
+	historySource: "disk",
+	historyLoading: false,
+	chatLoading: false,
+	attachedSlot: null,
 	pendingApprovals: [],
 	uiRequests: [],
 	confirm: null,
@@ -266,6 +285,19 @@ export function bump(): void {
 // ---------------------------------------------------------------------------
 // RPC plumbing
 // ---------------------------------------------------------------------------
+
+/**
+ * A message waiting for the turn to finish.
+ *
+ * The whole payload is kept, not just the line the banner shows: sending
+ * it now has to reproduce the message the agent was given, attachments
+ * included, and the label is a shortened form with the images named.
+ */
+export interface QueuedMessage {
+	label: string;
+	text: string;
+	images: { type: "image"; data: string; mimeType: string }[];
+}
 
 export async function call<T>(method: string, ...args: unknown[]): Promise<T | null> {
 	const result = await api.call(method, ...args);
@@ -579,7 +611,16 @@ export async function refreshState(): Promise<void> {
 		const m = rpcState.model as Record<string, unknown> | undefined;
 		app.model = m ? `${m.provider ?? ""}/${m.id ?? ""}`.replace(/^\//, "") : String(rpcState.modelId ?? "");
 		app.thinking = String(rpcState.thinkingLevel ?? "");
-		app.currentSessionPath = String(rpcState.sessionFile ?? "");
+		const path = String(rpcState.sessionFile ?? "");
+		// A chat's first turn is where its file appears, so anything queued
+		// before then was filed under the empty path; move it with the chat
+		// rather than stranding it under a key nothing reads again.
+		const early = app.queuedBySession.get("");
+		if (early && path !== "" && app.currentSessionPath === "") {
+			app.queuedBySession.delete("");
+			app.queuedBySession.set(path, early);
+		}
+		app.currentSessionPath = path;
 		app.sessionName = String(rpcState.sessionName ?? "");
 		app.autoCompaction = rpcState.autoCompactionEnabled !== false;
 		app.deliverAllQueued = rpcState.steeringMode === "all";
@@ -605,19 +646,85 @@ export async function refreshContextUsage(): Promise<void> {
 	bump();
 }
 
+/**
+ * How much of a chat is rendered at once.
+ *
+ * A long conversation runs to thousands of messages; drawing the lot to
+ * show the last few is slow to load and slow to scroll. Only a page is
+ * held, and scrolling to the top asks for the one above it.
+ */
+const PAGE = 60;
+
+/** Stored messages in the shape the transcript draws, tool results folded in. */
+function toChatMessages(raw: Record<string, unknown>[]): typeof app.chat.messages {
+	const messages: typeof app.chat.messages = [];
+	for (const entry of raw) {
+		if (entry.role === "toolResult") {
+			attachToolResult(messages, entry);
+			continue;
+		}
+		const mapped = fromAgentMessage(entry);
+		if (mapped && mapped.blocks.length > 0) messages.push(mapped);
+	}
+	return messages;
+}
+
+const countUsers = (raw: Record<string, unknown>[]): number => raw.filter((entry) => entry.role === "user").length;
+
+/**
+ * The transcript as the agent holds it — needed when a turn is in flight,
+ * since the file cannot show a message still being written. Only the last
+ * page is drawn, the same as a read from disk.
+ */
 export async function loadMessages(): Promise<void> {
 	const messages = await call<Record<string, unknown>[]>("getMessages");
 	if (!messages) return;
-	app.chat.messages = [];
-	for (const raw of messages) {
-		if (raw.role === "toolResult") {
-			attachToolResult(app.chat.messages, raw);
-			continue;
-		}
-		const mapped = fromAgentMessage(raw);
-		if (mapped && mapped.blocks.length > 0) app.chat.messages.push(mapped);
-	}
+	const start = Math.max(0, messages.length - PAGE);
+	app.chat.messages = toChatMessages(messages.slice(start));
+	app.historyStart = start;
+	app.historyUserStart = countUsers(messages.slice(0, start));
+	app.historySource = "agent";
 	bump();
+}
+
+/**
+ * Add the page above the one on screen.
+ *
+ * It comes from wherever the window was filled from: mixing the two would
+ * mean lining up two lists that need not agree, since the agent can hold a
+ * message the file has not been given yet.
+ */
+export async function loadEarlier(): Promise<void> {
+	if (app.historyLoading || app.historyStart <= 0) return;
+	const path = app.currentSessionPath;
+	app.historyLoading = true;
+	bump();
+	try {
+		const start = Math.max(0, app.historyStart - PAGE);
+		let older: Record<string, unknown>[];
+		let userStart: number;
+		if (app.historySource === "agent") {
+			const all = (await call<Record<string, unknown>[]>("getMessages")) ?? [];
+			older = all.slice(start, app.historyStart);
+			userStart = countUsers(all.slice(0, start));
+		} else {
+			const page = await api.sessionMessages(path, { limit: PAGE, before: app.historyStart });
+			older = page.messages;
+			userStart = page.userStart;
+		}
+		// A switch may have overtaken this read; that chat owns the view now.
+		if (app.currentSessionPath !== path || older.length === 0) return;
+		// The pages are mapped apart, so a tool call left at the end of one
+		// keeps its output in the next; only the join itself can lose a result.
+		app.chat.messages = [...toChatMessages(older), ...app.chat.messages];
+		app.historyStart = start;
+		app.historyUserStart = userStart;
+	} catch {
+		// Nothing added; the top of the transcript still offers another go.
+	} finally {
+		app.historyLoading = false;
+		bump();
+	}
 }
 
 export async function refreshStats(): Promise<void> {
@@ -676,7 +783,7 @@ export async function send(): Promise<void> {
 		const label =
 			images.length > 0 ? `${images.length === 1 ? "[Image]" : `[${images.length} images]`} ${text}`.trim() : text;
 		if (label !== "") {
-			app.queuedMessages = [...app.queuedMessages, label];
+			app.queuedBySession.set(app.currentSessionPath, [...queuedHere(), { label, text, images }]);
 			bump();
 		}
 		// Queued, not steered: a message typed while the agent works waits for
@@ -745,8 +852,40 @@ function titleFrom(text: string): string {
 	return `${(lastSpace > 24 ? cut.slice(0, lastSpace) : cut).replace(/[,;:.]$/, "")}…`;
 }
 
+/** What this chat has waiting — never another chat's queue. */
+export function queuedHere(): QueuedMessage[] {
+	return app.queuedBySession.get(app.currentSessionPath) ?? [];
+}
+
+/**
+ * Deliver what is waiting straight into the running turn.
+ *
+ * Queueing is the safe default — a half-formed thought should not
+ * redirect work already under way — but once it is typed the reader can
+ * see it is not half-formed, and waiting out a long turn to say so is
+ * its own kind of wrong. This takes the message out of the agent's queue
+ * and steers it in instead.
+ */
+export async function sendQueuedNow(): Promise<void> {
+	const waiting = queuedHere();
+	if (waiting.length === 0) return;
+	// Take it out of the agent's queue first, so a failure here leaves the
+	// message queued rather than delivering it twice.
+	const cleared = await call("clearQueue");
+	if (cleared === null) return;
+	app.queuedBySession.delete(app.currentSessionPath);
+	bump();
+	const text = waiting
+		.map((message) => message.text)
+		.filter((line) => line !== "")
+		.join("\n\n");
+	const images = waiting.flatMap((message) => message.images);
+	if (text === "" && images.length === 0) return;
+	await call("steer", text, images);
+}
+
 export async function clearQueued(): Promise<void> {
-	app.queuedMessages = [];
+	app.queuedBySession.delete(app.currentSessionPath);
 	bump();
 	await call("clearQueue");
 }
@@ -760,53 +899,99 @@ export async function clearQueued(): Promise<void> {
  * own agent process and finishes in the background (the main process runs a
  * pool), the way the reference apps behave. Only the view moves.
  */
+/**
+ * Which agent the window is listening to.
+ *
+ * The main process runs an agent per busy chat and announces the one on
+ * screen; this is the renderer's side of that. It is asked for directly
+ * after a switch as well, so a dropped announcement cannot leave the
+ * window permanently deaf.
+ */
+async function reattach(): Promise<void> {
+	if (typeof api.activeSlot !== "function") return;
+	try {
+		app.attachedSlot = await api.activeSlot();
+	} catch {
+		// Nothing to attach to; the announcement is the other way in.
+	}
+	bump();
+}
+
 export async function switchToSession(path: string): Promise<void> {
 	if (path === app.currentSessionPath) return;
 	// Move the view first. The agent's own switch takes about a second and the
 	// transcript another half, so waiting for both before anything changes on
 	// screen reads as a hang rather than a load.
+	// Stop listening before the view moves. The old agent may still be
+	// streaming, and for the second it takes the switch to land its words
+	// would otherwise be reduced into the chat now on screen.
+	app.attachedSlot = null;
 	app.currentSessionPath = path;
 	app.chat.messages = [];
 	app.chat.usage = null;
+	resetHistory(true);
+	// The pool tells the window which chats are working, so a turn in flight
+	// says so at once. Asking the agent instead means waiting on a process
+	// that is busy answering, which is what left the line missing for seconds.
+	app.chat.streaming = app.busySessions.has(path);
+	syncRunStart();
 	bump();
 	// Render from the stored transcript first. Switching inside the agent takes
 	// seconds, and the same messages are already on disk; waiting for the agent
 	// before showing anything is what made opening a chat feel broken.
 	await loadStoredMessages(path);
+	if (app.currentSessionPath === path) {
+		app.chatLoading = false;
+		bump();
+	}
 
 	const result = await call<{ cancelled: boolean }>("switchSession", path);
+	await reattach();
 	if (!result || result.cancelled) return;
-	// The agent is authoritative once it arrives: it knows about a turn still
-	// in flight, which the file cannot show.
-	await loadMessages();
-	void refreshState();
+	// The agent is authoritative only for a turn still in flight, which the
+	// file cannot show — so a working chat is asked first, before the state
+	// round-trip, and a settled one is spared the fetch altogether.
+	let asked = false;
+	if (app.busySessions.has(path)) {
+		await loadMessages();
+		asked = true;
+	}
+	await refreshState();
+	if (app.chat.streaming && !asked) await loadMessages();
+}
+
+/** Forget the window; a different chat is about to fill it. */
+function resetHistory(loading: boolean): void {
+	app.historyStart = 0;
+	app.historyUserStart = 0;
+	app.historySource = "disk";
+	app.historyLoading = false;
+	app.chatLoading = loading;
 }
 
 /** Fill the transcript from the session file, without troubling the agent. */
 async function loadStoredMessages(path: string): Promise<void> {
-	let stored: Record<string, unknown>[];
+	let page: { messages: Record<string, unknown>[]; start: number; userStart: number };
 	try {
-		stored = await api.sessionMessages(path);
+		page = await api.sessionMessages(path, { limit: PAGE });
 	} catch {
 		return;
 	}
 	// A later switch may have overtaken this read; it owns the view now.
-	if (app.currentSessionPath !== path || stored.length === 0) return;
-	const messages: typeof app.chat.messages = [];
-	for (const raw of stored) {
-		if (raw.role === "toolResult") {
-			attachToolResult(messages, raw);
-			continue;
-		}
-		const mapped = fromAgentMessage(raw);
-		if (mapped && mapped.blocks.length > 0) messages.push(mapped);
-	}
-	app.chat.messages = messages;
+	if (app.currentSessionPath !== path || page.messages.length === 0) return;
+	app.chat.messages = toChatMessages(page.messages);
+	app.historyStart = page.start;
+	app.historyUserStart = page.userStart;
+	app.historySource = "disk";
 	bump();
 }
 
 export async function newSession(): Promise<void> {
+	// As with a switch: the chat being left may still be talking.
+	app.attachedSlot = null;
+	resetHistory(false);
 	await call("newSession");
+	await reattach();
 	// A fresh chat starts at the effort chosen in settings, not at whatever the
 	// last one was left on.
 	if (app.defaultThinking !== "") await call("setThinkingLevel", app.defaultThinking, false);
@@ -1162,7 +1347,8 @@ export async function rewindToUserMessage(userIndex: number, currentText: string
 		if (!sure) return;
 	}
 	const forkable = (await call<{ entryId: string; text: string }[]>("getForkMessages")) ?? [];
-	let target = forkable[userIndex];
+	// The window may start part-way down the chat; the agent counts from the top.
+	let target = forkable[app.historyUserStart + userIndex];
 	if (!target || (currentText !== "" && target.text !== currentText)) {
 		target = forkable.filter((entry) => entry.text === currentText).at(-1) ?? target;
 	}
@@ -1275,7 +1461,18 @@ export function boot(): void {
 	applyTheme(storedPreference("smolt.theme", "system") as ThemeChoice);
 	applySerif(storedPreference("smolt.serif", "0") === "1");
 
-	api.onEvent((event) => {
+	const slotAware = typeof api.onAttached === "function" && typeof api.activeSlot === "function";
+	api.onAttached?.((slot) => {
+		app.attachedSlot = slot;
+		bump();
+	});
+	void reattach();
+
+	api.onEvent((event, slot) => {
+		// Only the chat on screen. Anything else is a background turn, or the
+		// tail of the one just left, and reducing it here is what used to leak
+		// one conversation's words into another's transcript.
+		if (slotAware && slot !== app.attachedSlot) return;
 		const raw = event as { type?: string; id?: string; method?: string };
 		if (raw.type === "extension_ui_request" && typeof raw.id === "string" && typeof raw.method === "string") {
 			handleExtensionUiRequest(raw as Parameters<typeof handleExtensionUiRequest>[0]);
@@ -1285,6 +1482,7 @@ export function boot(): void {
 			// The agent switched sessions on its own (e.g. a Telegram message
 			// opened its own chat): reset the transcript and follow it.
 			app.chat = initialState();
+			resetHistory(false);
 			void refreshState();
 			void loadMessages();
 			bump();
@@ -1300,7 +1498,7 @@ export function boot(): void {
 		const type = (event as { type?: string }).type;
 		if (type === "agent_settled") {
 			// Whatever was waiting has been delivered by the time a turn settles.
-			app.queuedMessages = [];
+			app.queuedBySession.delete(app.currentSessionPath);
 			void refreshState();
 			// The turn probably touched files, so refresh the diff either way:
 			// the composer's repository bar reads it even when the pane is shut.

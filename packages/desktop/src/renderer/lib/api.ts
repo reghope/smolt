@@ -35,7 +35,10 @@ export interface SmoltApi {
 	speechPrepare(): Promise<AgentCallResult>;
 	speechTranscribe(samples: ArrayBuffer): Promise<AgentCallResult>;
 	onSpeechProgress(cb: (progress: unknown) => void): void;
-	sessionMessages(path: string): Promise<Record<string, unknown>[]>;
+	sessionMessages(
+		path: string,
+		options?: { limit?: number; before?: number },
+	): Promise<{ messages: Record<string, unknown>[]; start: number; userStart: number }>;
 	sessionDelete(path: string): Promise<{ ok: boolean; error?: string }>;
 	titlebar(theme: string): Promise<void>;
 	linkPreview(url: string): Promise<LinkPreview | null>;
@@ -68,7 +71,9 @@ export interface SmoltApi {
 	sideCall(method: string, ...args: unknown[]): Promise<AgentCallResult>;
 	sideStop(): Promise<{ ok: boolean; error?: string }>;
 	onSideEvent(cb: (event: unknown) => void): void;
-	onEvent(cb: (event: unknown) => void): void;
+	activeSlot(): Promise<number>;
+	onEvent(cb: (event: unknown, slot: number) => void): void;
+	onAttached(cb: (slot: number) => void): void;
 	onStarted(cb: (status: { running: boolean; error: string | null }) => void): void;
 	onBusySessions(cb: (paths: string[]) => void): void;
 	onBackgroundSettled(cb: (info: { sessionPath: string }) => void): void;

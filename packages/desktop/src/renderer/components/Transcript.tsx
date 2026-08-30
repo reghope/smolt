@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { icon } from "../icons.ts";
 import { api } from "../lib/api.ts";
 import { cn } from "../lib/cn.ts";
 import { EmptyChat } from "./EmptyChat.tsx";
 import { formatElapsed, formatTokens } from "../lib/format.ts";
 import { renderMarkdown } from "../markdown.ts";
-import { app, rewindToUserMessage, toast } from "../state/app.ts";
+import { app, loadEarlier, rewindToUserMessage, toast } from "../state/app.ts";
 import { useApp } from "../state/useApp.ts";
 import type { ChatMessage, ToolBlock } from "../store.ts";
 import { thinkingSummary } from "../thinking.ts";
@@ -326,7 +326,7 @@ function currentActivity(message: ChatMessage | undefined): string {
  * turn finishes, minus the activity, so the cost of an answer is still
  * readable after the fact.
  */
-function WorkingLine({ message, running }: { message: ChatMessage; running: boolean }) {
+function WorkingLine({ message, running }: { message: ChatMessage | undefined; running: boolean }) {
 	const [, setTick] = useState(0);
 	useEffect(() => {
 		if (!running) return;
@@ -356,11 +356,11 @@ function WorkingLine({ message, running }: { message: ChatMessage; running: bool
  * sized to the context meter's ring so a turn in flight and the context it is
  * spending read as one family rather than two unrelated ornaments.
  */
-function TurnSpinner() {
+function TurnSpinner({ size = 16 }: { size?: number }) {
 	return (
 		<svg
-			width="16"
-			height="16"
+			width={size}
+			height={size}
 			viewBox="0 0 18 18"
 			className="flex-none animate-spin text-salmon [animation-duration:0.7s]"
 			aria-hidden="true"
@@ -487,9 +487,16 @@ type Segment =
 	| { kind: "prose"; text: string; streaming: boolean }
 	| { kind: "picture"; data: string; mimeType: string }
 	| { kind: "tools"; blocks: ToolBlock[]; scope: string }
-	| { kind: "footer"; message: ChatMessage };
+	| { kind: "footer"; message: ChatMessage | undefined };
 
-function buildSegments(messages: ChatMessage[]): Segment[] {
+/**
+ * The transcript as rows to draw.
+ *
+ * `running` is the turn's own state rather than any message's: a chat
+ * switched into mid-turn is drawn from its file, which cannot hold a
+ * message still being written, and the working line belongs to the turn.
+ */
+function buildSegments(messages: ChatMessage[], running: boolean): Segment[] {
 	const segments: Segment[] = [];
 	let run: ToolBlock[] = [];
 	let runScope = "";
@@ -534,6 +541,9 @@ function buildSegments(messages: ChatMessage[]): Segment[] {
 		}
 	});
 	flushTools();
+	if (running && !segments.some((segment) => segment.kind === "footer")) {
+		segments.push({ kind: "footer", message: undefined });
+	}
 	return segments;
 }
 
@@ -544,6 +554,33 @@ export function Transcript() {
 	const stickRef = useRef(true);
 	/** Where we last parked the view, to tell our own jumps from the reader's. */
 	const parkedTop = useRef(0);
+	/** Distance from the bottom banked before an earlier page is prepended. */
+	const anchor = useRef<number | null>(null);
+	const heldCount = useRef(0);
+
+	// A chat opens at its newest message, whatever the last one was left at.
+	useEffect(() => {
+		stickRef.current = true;
+		anchor.current = null;
+	}, [state.currentSessionPath]);
+
+	/**
+	 * Keep the reader still when the page above arrives.
+	 *
+	 * Messages added at the top push everything down by their own height, so
+	 * the view is put back the same distance from the bottom it was banked at.
+	 * It waits for the count to change: the render that only marks the fetch
+	 * as running has not moved anything yet.
+	 */
+	useLayoutEffect(() => {
+		const node = scroller.current;
+		const count = state.chat.messages.length;
+		if (node && anchor.current !== null && count !== heldCount.current) {
+			node.scrollTop = node.scrollHeight - anchor.current;
+			anchor.current = null;
+		}
+		heldCount.current = count;
+	});
 
 	// Stick to the bottom while streaming, unless the reader scrolled away.
 	useEffect(() => {
@@ -579,14 +616,32 @@ export function Transcript() {
 		if (!movedUp && distance <= 8) stickRef.current = true;
 		parkedTop.current = node.scrollTop;
 		setAwayFromEnd(distance >= 120);
+		// Near the top with more above it: fetch the page before this one.
+		if (node.scrollTop < 240 && app.historyStart > 0 && !app.historyLoading) {
+			anchor.current = node.scrollHeight - node.scrollTop;
+			void loadEarlier();
+		}
 	};
 
 	return (
 		<div className="relative min-h-0 flex-1">
 			<div ref={scroller} onScroll={onScroll} onWheel={onWheel} className="h-full overflow-y-auto">
 				<div className="mx-auto max-w-[740px] px-8 pt-6 pb-10">
-					{state.chat.messages.length === 0 && <EmptyChat />}
-					{buildSegments(state.chat.messages).map((segment, position) => {
+					{/* A chat being read in says so with the same spinner a turn uses,
+					    rather than flashing the empty state on its way to a transcript. */}
+					{state.chatLoading && (
+						<div className="flex h-[60vh] items-center justify-center">
+							<TurnSpinner size={22} />
+						</div>
+					)}
+					{!state.chatLoading && state.chat.messages.length === 0 && <EmptyChat />}
+					{state.historyLoading && (
+						<div className="mb-6 flex justify-center">
+							<TurnSpinner />
+						</div>
+					)}
+					{buildSegments(state.chat.messages, state.chat.streaming && !state.chatLoading).map(
+						(segment, position) => {
 						if (segment.kind === "user") {
 							const prose = messageProse(segment.message);
 							return (
@@ -619,9 +674,7 @@ export function Transcript() {
 							return <ToolGroup key={`t${segment.scope}-${position}`} blocks={segment.blocks} scope={segment.scope} index={position} />;
 						}
 						if (segment.kind === "footer") {
-							return (
-								<WorkingLine key={`f${position}`} message={segment.message} running={segment.message.streaming === true} />
-							);
+							return <WorkingLine key={`f${position}`} message={segment.message} running />;
 						}
 						if (segment.kind === "picture") {
 							return <ImageCard key={`pic${position}`} data={segment.data} mimeType={segment.mimeType} />;

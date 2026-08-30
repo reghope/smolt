@@ -1,8 +1,9 @@
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, session, shell, systemPreferences } from "electron";
-import { AgentBridge } from "./agent-bridge.ts";
+import { AgentBridge, findCliPath } from "./agent-bridge.ts";
 import { pendingPermissionRequests, watchPermissionRequests, writePermissionReply } from "./approvals.ts";
 import {
 	captureDiffBaseline,
@@ -67,7 +68,16 @@ const PANE_ENV = { SMOLT_TELEGRAM_POLL: "off" };
  */
 const agentExecPath = (): string | undefined => (app.isPackaged ? process.execPath : undefined);
 const agentEnv = (extra: Record<string, string>): Record<string, string> =>
-	app.isPackaged ? { ...extra, ELECTRON_RUN_AS_NODE: "1" } : extra;
+	app.isPackaged
+		? {
+				...extra,
+				ELECTRON_RUN_AS_NODE: "1",
+				// Say where the agent lives rather than letting it guess: bundled, it
+				// would walk up from resources looking for a package root and land
+				// somewhere arbitrary, then fail to find its own theme files.
+				SMOLT_PACKAGE_DIR: join(process.resourcesPath, "agent"),
+			}
+		: extra;
 let telegramBridge: AgentBridge | null = null;
 let telegramSync: Promise<void> = Promise.resolve();
 
@@ -854,6 +864,73 @@ app.whenReady().then(async () => {
 	ipcMain.handle("app:recent-projects", () => readProjectState().recent);
 
 	ipcMain.handle("app:folders", () => projectFolders);
+
+	/**
+	 * Which providers already have a credential.
+	 *
+	 * Only the names: the window never needs a key, and a key that reaches the
+	 * renderer is a key that can end up in a screenshot or a log.
+	 */
+	ipcMain.handle("app:auth-list", async () => {
+		try {
+			// The names only, straight from the file the CLI shares. Reading keys
+			// rather than credentials keeps the secrets out of this process's reply.
+			const raw: unknown = JSON.parse(readFileSync(join(dirname(projectFile()), "auth.json"), "utf-8"));
+			if (raw === null || typeof raw !== "object") return [];
+			return Object.keys(raw as Record<string, unknown>);
+		} catch {
+			return [];
+		}
+	});
+
+	/**
+	 * Store an API key for a provider, then restart so the agent picks it up.
+	 *
+	 * Written through the agent's own store rather than by hand: it takes the
+	 * lock and creates the file 0600, and the CLI reads the same file.
+	 */
+	ipcMain.handle("app:auth-set", async (_e, provider: string, key: string) => {
+		try {
+			const name = String(provider ?? "").trim();
+			const secret = String(key ?? "").trim();
+			if (name === "" || secret === "") return { ok: false, error: "Both a provider and a key are needed." };
+			const { AuthStorage } = await import("../../../coding-agent/src/core/auth-storage.ts");
+			await AuthStorage.create().modify(name, async () => ({ type: "api_key", key: secret }));
+			void restartAgentIn(homeCwd());
+			return { ok: true };
+		} catch (err) {
+			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+		}
+	});
+
+	/**
+	 * Open the bundled CLI in a terminal, for logins the window cannot do.
+	 *
+	 * OAuth sign-in lives in the CLI's own interface, and the desktop ships that
+	 * CLI; handing the reader straight to it beats telling them to find it.
+	 */
+	ipcMain.handle("app:open-cli", () => {
+		try {
+			const cli = findCliPath(__dirname);
+			if (!cli) return { ok: false, error: "The bundled agent could not be found." };
+			const runner = agentExecPath() ?? "node";
+			const env = { ...process.env, ...agentEnv({}) };
+			if (process.platform === "win32") {
+				spawn("cmd.exe", ["/c", "start", "", "cmd.exe", "/k", runner, cli], {
+					cwd: homeCwd(),
+					env,
+					detached: true,
+				}).unref();
+			} else if (process.platform === "darwin") {
+				spawn("open", ["-a", "Terminal", runner, "--args", cli], { cwd: homeCwd(), env, detached: true }).unref();
+			} else {
+				spawn("x-terminal-emulator", ["-e", ` `], { cwd: homeCwd(), env, detached: true }).unref();
+			}
+			return { ok: true };
+		} catch (err) {
+			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+		}
+	});
 
 	/**
 	 * Add a folder alongside the ones already open.

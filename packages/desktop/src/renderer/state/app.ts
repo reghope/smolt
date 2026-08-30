@@ -134,6 +134,8 @@ interface AppState {
 	recentProjects: string[];
 	/** Folders open now, the working directory first. */
 	folders: string[];
+	/** The add-a-provider dialog, shown when there are no models yet. */
+	providerDialogOpen: boolean;
 	/** Chats picked out for a bulk action, by session path. */
 	selectedSessions: Set<string>;
 	/** How often each slash command has been run, for palette ordering. */
@@ -205,6 +207,7 @@ export const app: AppState = {
 	appInfo: { cwd: "", version: "", hasProject: false },
 	recentProjects: [],
 	folders: [],
+	providerDialogOpen: false,
 	selectedSessions: new Set<string>(),
 	commandUse: readCommandUse(),
 	repoBranch: "",

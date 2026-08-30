@@ -30,6 +30,10 @@ contextBridge.exposeInMainWorld("smolt", {
 	recentProjects: (): Promise<string[]> => ipcRenderer.invoke("app:recent-projects"),
 	closeProject: (): Promise<AgentCallResult> => ipcRenderer.invoke("app:close-project"),
 	folders: (): Promise<string[]> => ipcRenderer.invoke("app:folders"),
+	authList: (): Promise<string[]> => ipcRenderer.invoke("app:auth-list"),
+	authSet: (provider: string, key: string): Promise<AgentCallResult> =>
+		ipcRenderer.invoke("app:auth-set", provider, key),
+	openCli: (): Promise<AgentCallResult> => ipcRenderer.invoke("app:open-cli"),
 	addFolder: (path: string): Promise<AgentCallResult> => ipcRenderer.invoke("app:add-folder", path),
 	popupMenu: (x: number, y: number): Promise<AgentCallResult> => ipcRenderer.invoke("app:menu-popup", x, y),
 	onMenuCommand: (cb: (command: string) => void): void => {

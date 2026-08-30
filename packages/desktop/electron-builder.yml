@@ -26,14 +26,26 @@ files:
   - "!node_modules/onnxruntime-node/bin/napi-v6/linux${/*}"
   - "!node_modules/onnxruntime-node/bin/napi-v6/win32${/*}"
   - "node_modules/onnxruntime-node/bin/napi-v6/${platform}${/*}"
+  # The agent ships as an unpacked resource below; bundling the package as
+  # well would carry its whole dependency tree a second time.
+  - "!node_modules/smolt${/*}"
 
 # The agent is a separate process the app spawns. It ships unpacked so it can
 # be executed directly, and the app finds it under resources/agent.
+# The agent keeps its own data files — themes, docs — beside its bundle and
+# finds them by walking up for a package root. Ship the whole dist so that
+# walk lands here rather than in the user's home directory.
 extraResources:
-  - from: ../coding-agent/dist/bundle
-    to: agent
+  - from: ../coding-agent/dist
+    to: agent/dist
     filter:
       - "**/*"
+  - from: ../coding-agent/docs
+    to: agent/docs
+    filter:
+      - "**/*"
+  - from: ../coding-agent/package.json
+    to: agent/package.json
 
 asar: true
 # Native bindings cannot be read from inside an asar archive.

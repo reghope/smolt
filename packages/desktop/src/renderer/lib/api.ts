@@ -35,6 +35,9 @@ export interface SmoltApi {
 	recentProjects(): Promise<string[]>;
 	closeProject(): Promise<{ ok: boolean; error?: string }>;
 	folders(): Promise<string[]>;
+	authList(): Promise<string[]>;
+	authSet(provider: string, key: string): Promise<{ ok: boolean; error?: string }>;
+	openCli(): Promise<{ ok: boolean; error?: string }>;
 	addFolder(path: string): Promise<{ ok: boolean; value?: unknown; error?: string }>;
 	popupMenu(x: number, y: number): Promise<{ ok: boolean }>;
 	onMenuCommand(cb: (command: string) => void): void;

@@ -143,7 +143,20 @@ function ModelMenu() {
 			</DropdownMenuTrigger>
 			<DropdownMenuContent align="end" className="max-h-80 w-80" onKeyDown={pickByNumber}>
 				{state.availableModels.length === 0 ? (
-					<div className="px-2.5 py-2 text-sm text-faint">No models available — run /login in the CLI.</div>
+					<div className="flex flex-col gap-2 px-2.5 py-2.5">
+						<p className="text-sm leading-relaxed text-muted-foreground">
+							No models yet. Add a provider and smolt will pick its models up.
+						</p>
+						<Button
+							size="sm"
+							onClick={() => {
+								app.providerDialogOpen = true;
+								bump();
+							}}
+						>
+							Add a provider
+						</Button>
+					</div>
 				) : (
 					rows
 				)}

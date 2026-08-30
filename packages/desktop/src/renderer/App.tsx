@@ -18,6 +18,7 @@ import { useApp } from "./state/useApp.ts";
 import { toggleVoice } from "./state/voice.ts";
 import { Composer } from "./components/Composer.tsx";
 import { ConfirmDialog } from "./components/ConfirmDialog.tsx";
+import { ProviderDialog } from "./components/ProviderDialog.tsx";
 import { ExtensionDialog } from "./components/ExtensionDialog.tsx";
 import { RightRail } from "./components/RightRail.tsx";
 import { SettingsDialog } from "./components/SettingsDialog.tsx";
@@ -168,6 +169,7 @@ export function App() {
 			<ShortcutsDialog />
 			<ExtensionDialog />
 			<ConfirmDialog />
+			<ProviderDialog />
 		</TooltipProvider>
 	);
 }

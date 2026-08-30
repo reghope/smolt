@@ -64,7 +64,7 @@ export function findCliPath(appDir: string, explicit?: string): string | undefin
 		explicit,
 		process.env.SMOLT_CLI_PATH,
 		// Packaged: the agent ships beside the app as an unpacked resource.
-		process.resourcesPath ? join(process.resourcesPath, "agent", "cli.js") : undefined,
+		process.resourcesPath ? join(process.resourcesPath, "agent", "dist", "bundle", "cli.js") : undefined,
 		// In the workspace: the built CLI, then the installed package.
 		join(appDir, "..", "..", "coding-agent", "dist", "cli.js"),
 		join(appDir, "..", "node_modules", "smolt", "dist", "bundle", "cli.js"),

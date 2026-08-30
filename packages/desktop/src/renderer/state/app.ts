@@ -943,7 +943,13 @@ export async function send(): Promise<void> {
  */
 async function adoptNewChat(text: string): Promise<void> {
 	const title = titleFrom(text);
-	if (app.currentSessionPath === "" || title === "") return;
+	if (title === "") return;
+	// A chat has no file until its first message is written, and the write
+	// lands just after the prompt is accepted. Without this the row waited
+	// for the next full refresh — which on a long first turn is the whole
+	// turn, and the chat appears to be missing from the sidebar for minutes.
+	if (app.currentSessionPath === "") await waitForSessionFile();
+	if (app.currentSessionPath === "") return;
 	// Name it for real rather than leaning on the lister's fallback, which only
 	// ever shows the opening words: a stored name survives, and a chat opened
 	// with boilerplate (a skill's preamble) still reads as itself.
@@ -964,6 +970,24 @@ async function adoptNewChat(text: string): Promise<void> {
 		...app.sessionRows,
 	];
 	bump();
+}
+
+/**
+ * Wait, briefly, for the agent to write the session file.
+ *
+ * Asking its state is a millisecond, so this costs nothing when the file
+ * is already there and gives up quickly when something has gone wrong.
+ */
+async function waitForSessionFile(): Promise<void> {
+	for (let attempt = 0; attempt < 12; attempt++) {
+		const state = await call<{ sessionFile?: unknown }>("getState");
+		const path = String(state?.sessionFile ?? "");
+		if (path !== "") {
+			app.currentSessionPath = path;
+			return;
+		}
+		await new Promise((resolve) => setTimeout(resolve, 150));
+	}
 }
 
 /**
@@ -1492,7 +1516,14 @@ export async function rewindToUserMessage(userIndex: number, currentText: string
 		target = forkable.filter((entry) => entry.text === currentText).at(-1) ?? target;
 	}
 	if (!target) {
-		toast("Could not find that message to rewind to.", "error");
+		// toast() only reaches the console, and a button that silently does
+		// nothing reads as a broken button.
+		await requestConfirm({
+			title: "Could not edit from there",
+			message:
+				"That message could not be found in the chat's history, so there is nothing to rewind to. This can happen after the conversation has been compacted.",
+			actionLabel: "OK",
+		});
 		return;
 	}
 	const result = await call<{ text: string; cancelled: boolean }>("fork", target.entryId);

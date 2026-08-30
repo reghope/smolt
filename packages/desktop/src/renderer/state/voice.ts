@@ -19,6 +19,8 @@ interface VoiceSession {
 	peak: number;
 	/** The device this clip came from, for saying which one heard nothing. */
 	device: string;
+	/** When the microphone last heard something loud enough to be speech. */
+	lastSpokeAt: number;
 }
 
 /**
@@ -63,6 +65,14 @@ const SPEECH_INTERVAL_MS = 1800;
  * more audio has arrived is what keeps the committed text from churning.
  */
 const UNSETTLED_TAIL = 2;
+/**
+ * Quiet for this long and the sentence is over.
+ *
+ * Nothing more is coming to revise the tail, so it is committed rather
+ * than held — otherwise the last word or two only appeared once dictation
+ * was stopped, which is exactly when it is too late to be useful.
+ */
+const SETTLE_AFTER_SILENCE_MS = 900;
 
 /** The draft as it now stands: what was typed before, plus what was said. */
 function draftFromWords(): string {
@@ -117,7 +127,9 @@ async function refreshTranscript(final = false): Promise<void> {
 		if (!voice && !final) return;
 		if (result.ok) {
 			const before = settled.length;
-			commitWords(String(result.value ?? "").trim(), final);
+			// A pause is as good as an ending for the words already spoken.
+			const quiet = voice !== null && Date.now() - voice.lastSpokeAt > SETTLE_AFTER_SILENCE_MS;
+			commitWords(String(result.value ?? "").trim(), final || quiet);
 			// Show the words in the composer as they are recognised, so there is
 			// no second place to look while speaking.
 			if (settled.length !== before) {
@@ -202,6 +214,7 @@ export async function startVoice(): Promise<void> {
 		timer: null,
 		peak: 0,
 		device: stream.getAudioTracks()[0]?.label ?? "",
+		lastSpokeAt: Date.now(),
 	};
 	collector.onaudioprocess = (event) => {
 		const input = event.inputBuffer.getChannelData(0);
@@ -213,6 +226,7 @@ export async function startVoice(): Promise<void> {
 			if (size > loudest) loudest = size;
 		}
 		if (loudest > session.peak) session.peak = loudest;
+		if (loudest >= SILENCE_PEAK) session.lastSpokeAt = Date.now();
 		if (session.peak >= SILENCE_PEAK && app.voiceSilent !== "") {
 			app.voiceSilent = "";
 			bump();

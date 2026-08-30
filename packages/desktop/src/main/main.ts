@@ -738,7 +738,10 @@ app.whenReady().then(async () => {
 				} finally {
 					if (switching === move) switching = null;
 				}
-				// A different conversation starts from a different tree.
+				// A different conversation starts from a different tree. Outside the
+				// gate: this walks the working tree, and holding every other call
+				// behind a git scan is what made the window feel stuck after a
+				// switch on a large repository.
 				await rebaseline();
 				// The view may have landed on another agent; say so before the
 				// renderer reattaches, or it stays deaf to the chat it is showing.

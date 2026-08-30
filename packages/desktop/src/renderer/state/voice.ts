@@ -36,7 +36,16 @@ interface VoiceSession {
 const SILENCE_PEAK = 0.02;
 
 let voice: VoiceSession | null = null;
-let voiceText = "";
+/**
+ * The words already written into the composer.
+ *
+ * Whisper re-reads the whole clip each pass, and a later pass will happily
+ * rephrase what an earlier one produced — so writing its output straight
+ * to the draft made the text rewrite itself every couple of seconds. These
+ * are kept instead, and only ever added to: a word that has been shown
+ * stays put, and each pass contributes whatever it has found beyond it.
+ */
+let settled: string[] = [];
 /** True while a transcription is in flight, so passes never overlap. */
 let voiceBusy = false;
 /** Text already in the composer when dictation started. */
@@ -46,6 +55,34 @@ let voiceBase = "";
 const SPEECH_RATE = 16000;
 /** How often the partial transcript is refreshed while speaking. */
 const SPEECH_INTERVAL_MS = 1800;
+/**
+ * Words held back from the end of each pass.
+ *
+ * The last word or two of a clip are the ones still being spoken, and the
+ * ones the next pass is most likely to change. Holding them back until
+ * more audio has arrived is what keeps the committed text from churning.
+ */
+const UNSETTLED_TAIL = 2;
+
+/** The draft as it now stands: what was typed before, plus what was said. */
+function draftFromWords(): string {
+	const spoken = settled.join(" ");
+	if (spoken === "") return voiceBase;
+	return voiceBase === "" ? spoken : `${voiceBase} ${spoken}`;
+}
+
+/**
+ * Take from a pass only what it adds.
+ *
+ * On the last pass everything counts, including the tail — the sentence is
+ * over, so nothing more is coming to change it.
+ */
+function commitWords(text: string, final: boolean): void {
+	const words = text.split(/\s+/).filter((word) => word !== "");
+	const usable = final ? words.length : Math.max(0, words.length - UNSETTLED_TAIL);
+	if (usable <= settled.length) return;
+	settled = settled.concat(words.slice(settled.length, usable));
+}
 
 export function voiceRunning(): boolean {
 	return voice !== null;
@@ -79,11 +116,14 @@ async function refreshTranscript(final = false): Promise<void> {
 		const result = await api.speechTranscribe(joinSamples(voice).buffer as ArrayBuffer);
 		if (!voice && !final) return;
 		if (result.ok) {
-			voiceText = String(result.value ?? "").trim();
+			const before = settled.length;
+			commitWords(String(result.value ?? "").trim(), final);
 			// Show the words in the composer as they are recognised, so there is
 			// no second place to look while speaking.
-			app.draft = voiceBase === "" ? voiceText : `${voiceBase} ${voiceText}`;
-			bump();
+			if (settled.length !== before) {
+				app.draft = draftFromWords();
+				bump();
+			}
 		} else if (final) {
 			toast(result.error ?? "Could not transcribe that", "error");
 		}
@@ -95,7 +135,7 @@ async function refreshTranscript(final = false): Promise<void> {
 export async function startVoice(): Promise<void> {
 	if (voice) return;
 	const status = (await api.speechStatus()) as { ready: boolean };
-	voiceText = "";
+	settled = [];
 	// Dictation appends to whatever is already typed rather than replacing it.
 	voiceBase = app.draft.replace(/\s+$/, "");
 	if (!status.ready) {
@@ -217,7 +257,7 @@ export async function finishVoice(insert: boolean): Promise<void> {
 	const session = stopCapture();
 	if (!session) return;
 	if (!insert) {
-		voiceText = "";
+		settled = [];
 		bump();
 		return;
 	}
@@ -225,7 +265,7 @@ export async function finishVoice(insert: boolean): Promise<void> {
 	// naming the device, is the difference between a mystery and a setting:
 	// the machine may have several inputs and only one of them live.
 	if (session.peak < SILENCE_PEAK) {
-		voiceText = "";
+		settled = [];
 		const which = session.device.trim();
 		app.voiceSilent = which === "" ? "the microphone" : which;
 		bump();
@@ -241,9 +281,8 @@ export async function finishVoice(insert: boolean): Promise<void> {
 	app.voiceActive = false;
 
 	app.voiceFinishing = false;
-	const text = voiceText.trim();
-	app.draft = text === "" ? voiceBase : voiceBase === "" ? text : `${voiceBase} ${text}`;
-	voiceText = "";
+	app.draft = draftFromWords();
+	settled = [];
 	voiceBase = "";
 	bump();
 }

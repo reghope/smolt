@@ -54,6 +54,8 @@ export interface BridgeOptions {
 	args?: string[];
 	/** Extra environment for the agent process (e.g. SMOLT_TELEGRAM_POLL). */
 	env?: Record<string, string>;
+	/** Executable to run the CLI with; Electron's own Node once packaged. */
+	execPath?: string;
 }
 
 /** Locate the workspace CLI build relative to the desktop package. */
@@ -61,8 +63,11 @@ export function findCliPath(appDir: string, explicit?: string): string | undefin
 	const candidates = [
 		explicit,
 		process.env.SMOLT_CLI_PATH,
+		// Packaged: the agent ships beside the app as an unpacked resource.
+		process.resourcesPath ? join(process.resourcesPath, "agent", "cli.js") : undefined,
+		// In the workspace: the built CLI, then the installed package.
 		join(appDir, "..", "..", "coding-agent", "dist", "cli.js"),
-		join(appDir, "..", "node_modules", "@smolt", "coding-agent", "dist", "cli.js"),
+		join(appDir, "..", "node_modules", "smolt", "dist", "bundle", "cli.js"),
 	].filter((candidate): candidate is string => !!candidate);
 	return candidates.find((candidate) => existsSync(candidate));
 }
@@ -86,6 +91,7 @@ export class AgentBridge {
 				model: options.model,
 				args: options.args,
 				env: options.env,
+				execPath: options.execPath,
 			});
 			client.onEvent((event) => {
 				for (const listener of this.listeners) listener(event);

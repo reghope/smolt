@@ -38,6 +38,14 @@ export interface RpcClientOptions {
 	model?: string;
 	/** Additional CLI arguments */
 	args?: string[];
+	/**
+	 * Executable to run the CLI with, when plain `node` will not do.
+	 *
+	 * A packaged desktop app cannot assume Node is installed, but it ships one
+	 * inside Electron; pointing this at that binary is how it starts the agent
+	 * on a machine that has no Node of its own.
+	 */
+	execPath?: string;
 }
 
 export interface ModelInfo {
@@ -91,7 +99,7 @@ export class RpcClient {
 			args.push(...this.options.args);
 		}
 
-		const childProcess = spawn("node", [cliPath, ...args], {
+		const childProcess = spawn(this.options.execPath ?? "node", [cliPath, ...args], {
 			cwd: this.options.cwd,
 			env: { ...process.env, ...this.options.env },
 			stdio: ["pipe", "pipe", "pipe"],

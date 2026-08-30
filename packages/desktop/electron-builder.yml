@@ -1,0 +1,70 @@
+# Packaging for the desktop app's installers, built by hand and published to
+# smolt.dev. There is no CI here on purpose: a release is a deliberate act.
+appId: dev.smolt.desktop
+productName: smolt
+# The package name is scoped, which is not a legal executable name on Linux.
+executableName: smolt
+copyright: © smolt
+
+directories:
+  output: release
+  buildResources: build
+
+# The renderer and main process are bundled by build.mjs; only their output
+# and the runtime dependencies esbuild deliberately left external ship here.
+files:
+  - dist/**
+  - package.json
+  - node_modules/@huggingface/**
+  - node_modules/onnxruntime-node/**
+  - node_modules/onnxruntime-common/**
+  - node_modules/sharp/**
+  - node_modules/@img/**
+  # onnxruntime carries a binary for every platform, three times the size of
+  # the one it will use. Keep the host's and drop the rest.
+  - "!node_modules/onnxruntime-node/bin/napi-v6/darwin${/*}"
+  - "!node_modules/onnxruntime-node/bin/napi-v6/linux${/*}"
+  - "!node_modules/onnxruntime-node/bin/napi-v6/win32${/*}"
+  - "node_modules/onnxruntime-node/bin/napi-v6/${platform}${/*}"
+
+# The agent is a separate process the app spawns. It ships unpacked so it can
+# be executed directly, and the app finds it under resources/agent.
+extraResources:
+  - from: ../coding-agent/dist/bundle
+    to: agent
+    filter:
+      - "**/*"
+
+asar: true
+# Native bindings cannot be read from inside an asar archive.
+asarUnpack:
+  - node_modules/onnxruntime-node/**
+  - node_modules/sharp/**
+  - node_modules/@img/**
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: smolt-${version}-windows-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+
+mac:
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+  category: public.app-category.developer-tools
+  artifactName: smolt-${version}-macos-${arch}.${ext}
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+  category: Development
+  artifactName: smolt-${version}-linux-${arch}.${ext}

@@ -58,6 +58,16 @@ let sideBridge: AgentBridge | null = null;
  * phone conversation instead, so both can run at the same time.
  */
 const PANE_ENV = { SMOLT_TELEGRAM_POLL: "off" };
+
+/**
+ * How to start an agent process.
+ *
+ * Packaged, there may be no Node on the machine at all, but Electron carries
+ * one: run our own binary with ELECTRON_RUN_AS_NODE and it behaves as node.
+ */
+const agentExecPath = (): string | undefined => (app.isPackaged ? process.execPath : undefined);
+const agentEnv = (extra: Record<string, string>): Record<string, string> =>
+	app.isPackaged ? { ...extra, ELECTRON_RUN_AS_NODE: "1" } : extra;
 let telegramBridge: AgentBridge | null = null;
 let telegramSync: Promise<void> = Promise.resolve();
 
@@ -91,7 +101,8 @@ function syncTelegramHost(): void {
 					cwd: homeCwd(),
 					provider: process.env.SMOLT_DESKTOP_PROVIDER,
 					model: process.env.SMOLT_DESKTOP_MODEL,
-					env: { SMOLT_TELEGRAM_POLL: "on" },
+					env: agentEnv({ SMOLT_TELEGRAM_POLL: "on" }),
+					execPath: agentExecPath(),
 				},
 				__dirname,
 			);
@@ -498,7 +509,8 @@ app.whenReady().then(async () => {
 				cwd: activeCwd,
 				provider: process.env.SMOLT_DESKTOP_PROVIDER,
 				model: process.env.SMOLT_DESKTOP_MODEL,
-				env: PANE_ENV,
+				env: agentEnv(PANE_ENV),
+				execPath: agentExecPath(),
 			},
 			__dirname,
 		);
@@ -656,7 +668,8 @@ app.whenReady().then(async () => {
 						cwd: process.env.SMOLT_DESKTOP_CWD || process.cwd(),
 						provider: process.env.SMOLT_DESKTOP_PROVIDER,
 						model: process.env.SMOLT_DESKTOP_MODEL,
-						env: PANE_ENV,
+						env: agentEnv(PANE_ENV),
+						execPath: agentExecPath(),
 					},
 					__dirname,
 				);
@@ -728,7 +741,8 @@ app.whenReady().then(async () => {
 				model: process.env.SMOLT_DESKTOP_MODEL,
 				// With no folder open the agent must not guess a destination.
 				args: agentNotes(),
-				env: PANE_ENV,
+				env: agentEnv(PANE_ENV),
+				execPath: agentExecPath(),
 			},
 			__dirname,
 		);
@@ -1100,7 +1114,8 @@ app.whenReady().then(async () => {
 			provider: process.env.SMOLT_DESKTOP_PROVIDER,
 			model: process.env.SMOLT_DESKTOP_MODEL,
 			args: process.env.SMOLT_DESKTOP_CONTINUE === "1" ? ["--continue"] : undefined,
-			env: PANE_ENV,
+			env: agentEnv(PANE_ENV),
+			execPath: agentExecPath(),
 		},
 		__dirname,
 	);

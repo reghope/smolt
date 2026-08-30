@@ -43,3 +43,6 @@ plans/
 .smolt/hf-sessions-backup/
 collect.sh
 dist-npm/
+
+# Installers built by electron-builder; published by hand, never committed.
+packages/desktop/release/

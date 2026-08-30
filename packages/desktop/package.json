@@ -10,7 +10,11 @@
 		"dev": "node build.mjs && electron .",
 		"start": "electron .",
 		"test": "tsgo --noEmit -p tsconfig.renderer.json && vitest --run",
-		"clean": "shx rm -rf dist"
+		"clean": "shx rm -rf dist",
+		"release": "node build.mjs && electron-builder --publish never",
+		"release:win": "node build.mjs && electron-builder --win --publish never",
+		"release:linux": "node build.mjs && electron-builder --linux --publish never",
+		"release:mac": "node build.mjs && electron-builder --mac --publish never"
 	},
 	"dependencies": {
 		"@huggingface/transformers": "4.2.0",
@@ -28,6 +32,7 @@
 		"@types/react": "19.2.18",
 		"@types/react-dom": "19.2.5",
 		"electron": "40.10.2",
+		"electron-builder": "26.15.3",
 		"esbuild": "0.28.1",
 		"shx": "0.4.0",
 		"tailwindcss": "4.3.3",

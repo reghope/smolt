@@ -1,4 +1,4 @@
-import { api, type SessionRow } from "../lib/api.ts";
+import { api, type SessionRow, type UpdateState } from "../lib/api.ts";
 import { storedPreference, storePreference } from "../lib/prefs.ts";
 import { attachToolResult, fromAgentMessage, initialState, reduce, type UiState } from "../store.ts";
 
@@ -124,7 +124,7 @@ interface AppState {
 	canTranscribe: boolean;
 	permissionMode: string;
 	runStartedAt: number;
-	appInfo: { cwd: string; version: string; hasProject: boolean };
+	appInfo: { cwd: string; version: string; hasProject: boolean; packaged: boolean };
 	/** Folders worked in before, newest first, for the folder switcher. */
 	recentProjects: string[];
 	/** Folders open now, the working directory first. */
@@ -190,6 +190,12 @@ interface AppState {
 	voiceSilent: string;
 	/** A stop has been asked for and not yet taken effect. */
 	aborting: boolean;
+	/** What the updater is doing, shared by the footer notice and settings. */
+	update: UpdateState;
+	/** A check the reader asked for is still running. */
+	updateChecking: boolean;
+	/** A check has been made this session, so "nothing new" can be said. */
+	updateChecked: boolean;
 	holdToRecord: boolean;
 	/** Composer text lives here so dictation and history can write it. */
 	draft: string;
@@ -218,7 +224,7 @@ export const app: AppState = {
 	canTranscribe: false,
 	permissionMode: "auto",
 	runStartedAt: 0,
-	appInfo: { cwd: "", version: "", hasProject: false },
+	appInfo: { cwd: "", version: "", hasProject: false, packaged: false },
 	recentProjects: [],
 	folders: [],
 	providerDialogOpen: false,
@@ -265,6 +271,9 @@ export const app: AppState = {
 	voiceLevel: 0,
 	voiceSilent: "",
 	aborting: false,
+	update: { status: "idle" },
+	updateChecking: false,
+	updateChecked: false,
 	holdToRecord: false,
 	draft: "",
 	busySessions: new Set<string>(),
@@ -860,6 +869,33 @@ export async function abortTurn(): Promise<void> {
 	app.aborting = true;
 	bump();
 	await call("abort");
+}
+
+/**
+ * Look for a new build now, because the reader asked.
+ *
+ * The app checks on its own every few hours; this is for the moment
+ * somebody wants to know rather than wait. It always settles into a
+ * definite answer, so an unchanged status still reads as "nothing new".
+ */
+export async function checkForUpdate(): Promise<void> {
+	if (app.updateChecking) return;
+	app.updateChecking = true;
+	bump();
+	try {
+		await api.updateCheck();
+	} finally {
+		// The feed answers quickly; anything still moving reports itself
+		// through the state events above.
+		app.updateChecking = false;
+		app.updateChecked = true;
+		bump();
+	}
+}
+
+/** Restart into the build that has been fetched. */
+export async function installUpdate(): Promise<void> {
+	await api.updateInstall();
 }
 
 /** Prompts already sent, newest last; Up/Down walk this like a shell history. */
@@ -1685,6 +1721,21 @@ export function boot(): void {
 	// Optional-called: during development the window can reload onto a newer
 	// renderer than the preload it booted with, and a missing bridge method
 	// must degrade to a missing feature, not a dead app.
+	// The updater reports from the main process; keep the latest word in one
+	// place rather than having every surface subscribe for itself.
+	void api
+		.updateState()
+		.then((next) => {
+			app.update = next;
+			bump();
+		})
+		.catch(() => undefined);
+	api.onUpdateState?.((next) => {
+		app.update = next;
+		app.updateChecking = next.status === "checking";
+		bump();
+	});
+
 	api.onBusySessions?.((paths) => {
 		app.busySessions = new Set(paths.filter((path) => path !== ""));
 		bump();
@@ -1705,7 +1756,12 @@ export function boot(): void {
 		await applyRememberedSettings();
 		const info = await api.info();
 		app.canTranscribe = info.canTranscribe === true;
-		app.appInfo = { cwd: info.cwd ?? "", version: info.version ?? "", hasProject: info.hasProject === true };
+		app.appInfo = {
+			cwd: info.cwd ?? "",
+			version: info.version ?? "",
+			hasProject: info.hasProject === true,
+			packaged: info.packaged === true,
+		};
 		await refreshRecentProjects();
 		const mode = await api.permissionMode();
 		if (mode.ok) app.permissionMode = String(mode.value ?? "auto");

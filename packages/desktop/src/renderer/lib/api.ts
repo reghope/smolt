@@ -27,6 +27,7 @@ export interface SmoltApi {
 		folders?: string[];
 		continueLatest?: boolean;
 		canTranscribe?: boolean;
+		packaged?: boolean;
 	}>;
 	transcribe(audio: ArrayBuffer, mimeType: string): Promise<AgentCallResult>;
 	stats(): Promise<AgentCallResult>;

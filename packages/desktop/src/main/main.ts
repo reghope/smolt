@@ -790,6 +790,8 @@ app.whenReady().then(async () => {
 		version: app.getVersion(),
 		continueLatest: process.env.SMOLT_DESKTOP_CONTINUE === "1",
 		canTranscribe: findTranscriptionProvider() !== undefined,
+		// Only an installed build has an installer the updater can replace.
+		packaged: app.isPackaged,
 	}));
 	ipcMain.handle("side:call", async (_e, method: string, args: unknown[]) => {
 		try {

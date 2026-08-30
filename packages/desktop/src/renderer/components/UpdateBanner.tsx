@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { api, type UpdateState } from "../lib/api.ts";
+import { api } from "../lib/api.ts";
+import { useApp } from "../state/useApp.ts";
 import { Icon } from "./ui/icon.tsx";
 
 /**
@@ -13,15 +13,9 @@ import { Icon } from "./ui/icon.tsx";
  * The agent travels inside the app, so this updates the CLI it runs too.
  */
 export function UpdateBanner() {
-	const [state, setState] = useState<UpdateState>({ status: "idle" });
-
-	useEffect(() => {
-		void api
-			.updateState()
-			.then(setState)
-			.catch(() => undefined);
-		api.onUpdateState?.(setState);
-	}, []);
+	// The store holds the updater`s word for it, subscribed once at boot, so
+	// this and the settings row can never disagree about what is happening.
+	const state = useApp().update;
 
 	if (state.status === "idle" || state.status === "checking" || state.status === "error") return null;
 

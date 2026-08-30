@@ -8,10 +8,12 @@ import {
 	applyTheme,
 	bump,
 	call,
+	checkForUpdate,
 	chooseModel,
 	compactNow,
 	ensureModels,
 	ensureThinkingLevels,
+	installUpdate,
 	refreshState,
 	requestConfirm,
 	setDefaultThinking,
@@ -34,6 +36,69 @@ const SECTIONS = [
 ] as const;
 
 type SectionId = (typeof SECTIONS)[number]["id"];
+
+/**
+ * Updates, and a way to ask for one now.
+ *
+ * The app looks on its own every few hours, which is right for something
+ * nobody wants to think about — but leaves no answer for the moment
+ * somebody does. This says where things stand and checks on request.
+ */
+function UpdateSection() {
+	const state = useApp();
+	const update = state.update;
+	const version = "version" in update ? update.version : "";
+	const status =
+		state.updateChecking || update.status === "checking"
+			? "Checking…"
+			: update.status === "downloading"
+				? `Fetching v${version}${update.percent > 0 ? ` — ${update.percent}%` : "…"}`
+				: update.status === "ready"
+					? `v${version} is ready`
+					: update.status === "installing"
+						? `Updating to v${version} — restarting`
+						: update.status === "available"
+							? `v${version} is available`
+							: update.status === "error"
+								? update.message
+								: !state.appInfo.packaged
+									? `smolt ${state.appInfo.version} — updates apply to the installed app`
+									: state.updateChecked
+										? `You are on the latest version (${state.appInfo.version})`
+										: `smolt ${state.appInfo.version}`;
+	return (
+		<div className="flex flex-col gap-1.5">
+			<FieldLabel>Updates</FieldLabel>
+			<div className="flex items-center gap-2">
+				<span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-sm text-muted-foreground">
+					{status}
+				</span>
+				{update.status === "ready" ? (
+					<Button size="sm" onClick={() => void installUpdate()}>
+						Relaunch to update
+					</Button>
+				) : (
+					<Button
+						variant="outline"
+						size="sm"
+						disabled={
+							!state.appInfo.packaged ||
+							state.updateChecking ||
+							update.status === "downloading" ||
+							update.status === "installing"
+						}
+						onClick={() => void checkForUpdate()}
+					>
+						Check for updates
+					</Button>
+				)}
+			</div>
+			<p className="text-xs leading-relaxed text-faint">
+				Checked automatically every few hours. The agent travels inside the app, so this updates it too.
+			</p>
+		</div>
+	);
+}
 
 function FieldLabel({ children }: { children: React.ReactNode }) {
 	return <span className="text-xs font-medium tracking-wide text-faint uppercase">{children}</span>;
@@ -462,15 +527,11 @@ export function SettingsDialog() {
 											>
 												{state.appInfo.cwd}
 											</span>
-											<span>
-												smolt {state.appInfo.version}
-												{state.canTranscribe
-													? " · dictation ready"
-													: " · dictation needs OPENAI_API_KEY or GROQ_API_KEY"}
-											</span>
+											<span>smolt {state.appInfo.version}</span>
 										</div>
 									</div>
 								)}
+								{matches(query, "update version check upgrade release") && <UpdateSection />}
 								{matches(query, "shortcuts keyboard help") && (
 									<div className="flex flex-col gap-1.5">
 										<FieldLabel>Help</FieldLabel>

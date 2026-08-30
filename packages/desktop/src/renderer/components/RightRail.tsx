@@ -26,51 +26,6 @@ function PaneHead({ title, children }: { title: string; children: React.ReactNod
 	);
 }
 
-/** Live figures for the conversation in the main pane. */
-function SessionSummary() {
-	const state = useApp();
-	const row = state.sessionRows.find((entry) => entry.path === app.currentSessionPath);
-	const usage = state.chat.usage;
-	const context = state.contextUsage;
-	return (
-		<div className="flex-none border-b px-4 py-2.5">
-			<div className="flex items-baseline justify-between gap-2">
-				<span
-					className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-sm font-semibold"
-					title={row?.title}
-				>
-					{row?.title ?? "This session"}
-				</span>
-				<span className="flex-none font-mono text-xs text-faint">{state.model.split("/").pop()}</span>
-			</div>
-			<div className="mt-1 flex items-center gap-1.5 text-xs text-faint">
-				<span>{state.chat.messages.length} messages</span>
-				{usage && (
-					<span>
-						· {shortTokens(usage.input)} in / {shortTokens(usage.output)} out
-					</span>
-				)}
-				{usage && usage.cost > 0 && <span>· {formatCost(usage.cost)}</span>}
-			</div>
-			{context && context.percent !== null && (
-				<div className="mt-2">
-					<div className="h-1 overflow-hidden rounded-full bg-secondary">
-						<div
-							className="h-full rounded-full bg-salmon transition-[width]"
-							style={{ width: `${Math.min(100, context.percent)}%` }}
-						/>
-					</div>
-					<div className="mt-1 flex justify-between text-[11px] text-faint">
-						<span>Context</span>
-						<span className="tabular-nums">
-							{Math.round(context.percent)}% of {shortTokens(context.contextWindow)}
-						</span>
-					</div>
-				</div>
-			)}
-		</div>
-	);
-}
 
 /** Working-tree changes beside the conversation. */
 function DiffPane() {
@@ -339,7 +294,6 @@ export function RightRail() {
 					hidden && "opacity-0",
 				)}
 			>
-				<SessionSummary />
 				{state.diffOpen && <DiffPane />}
 				{state.diffOpen && state.sideOpen && <div className="h-px flex-none bg-border" />}
 				{state.sideOpen && <SidePane />}

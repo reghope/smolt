@@ -9,12 +9,12 @@ import {
 	bump,
 	call,
 	chooseModel,
-	chooseThinking,
 	compactNow,
 	ensureModels,
 	ensureThinkingLevels,
 	refreshState,
 	requestConfirm,
+	setDefaultThinking,
 	toast,
 	type ThemeChoice,
 	type WorktreeInfo,
@@ -398,20 +398,21 @@ export function SettingsDialog() {
 								)}
 								{matches(query, "effort thinking reasoning") && (
 									<div className="flex flex-col gap-1.5">
-										<FieldLabel>Effort</FieldLabel>
+										<FieldLabel>Default effort</FieldLabel>
 										<div className="flex flex-wrap gap-1.5">
 											{state.availableThinking.map((level) => (
 												<Button
 													key={level}
 													variant="outline"
 													size="sm"
-													className={cn("capitalize", level === state.thinking && "bg-primary/10 text-foreground")}
-													onClick={() => void chooseThinking(level)}
+													className={cn("capitalize", level === state.defaultThinking && "bg-primary/10 text-foreground")}
+													onClick={() => setDefaultThinking(level)}
 												>
 													{level}
 												</Button>
 											))}
 										</div>
+										<p className="text-xs leading-relaxed text-faint">Where new chats start. The composer changes this chat only.</p>
 									</div>
 								)}
 							</>

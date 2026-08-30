@@ -109,6 +109,8 @@ interface AppState {
 	side: UiState;
 	model: string;
 	thinking: string;
+	/** The effort new chats start at; the composer changes only this chat. */
+	defaultThinking: string;
 	sessionRows: SessionRow[];
 	currentSessionPath: string;
 	sessionName: string;
@@ -181,6 +183,7 @@ export const app: AppState = {
 	side: initialState(),
 	model: "",
 	thinking: "",
+	defaultThinking: storedPreference("smolt.defaultEffort", ""),
 	sessionRows: [],
 	currentSessionPath: "",
 	sessionName: "",
@@ -804,6 +807,9 @@ async function loadStoredMessages(path: string): Promise<void> {
 
 export async function newSession(): Promise<void> {
 	await call("newSession");
+	// A fresh chat starts at the effort chosen in settings, not at whatever the
+	// last one was left on.
+	if (app.defaultThinking !== "") await call("setThinkingLevel", app.defaultThinking, false);
 	app.chat.messages = [];
 	app.chat.usage = null;
 	await refreshState();
@@ -945,6 +951,19 @@ export async function chooseModel(provider: string, id: string, remember = true)
 export async function chooseThinking(level: string, remember = true): Promise<void> {
 	await call("setThinkingLevel", level, remember);
 	app.thinking = level;
+	bump();
+}
+
+/**
+ * The effort a new chat starts at.
+ *
+ * Kept apart from the level in play: settings describe how the next chat
+ * should begin, and changing that should not reach into a conversation
+ * already under way.
+ */
+export function setDefaultThinking(level: string): void {
+	app.defaultThinking = level;
+	storePreference("smolt.defaultEffort", level);
 	bump();
 }
 

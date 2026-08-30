@@ -7,7 +7,7 @@
  * - /timed-signal - Shows confirm using AbortSignal (manual approach)
  */
 
-import type { ExtensionAPI } from "@smolt/coding-agent";
+import type { ExtensionAPI } from "smolt";
 
 export default function (smolt: ExtensionAPI) {
 	// Simple approach: use timeout option (recommended)

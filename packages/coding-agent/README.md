@@ -1,14 +1,14 @@
 <p align="center">
-  <a href="https://pi.dev">
-    <img alt="smolt logo" src="https://pi.dev/logo-auto.svg" width="128">
+  <a href="https://github.com/reghope/smolt">
+    <img alt="smolt logo" src="https://raw.githubusercontent.com/reghope/smolt/main/assets/smolt.svg" width="128">
   </a>
 </p>
 <p align="center">
-  <a href="https://discord.com/invite/3cU7Bz4UPx"><img alt="Discord" src="https://img.shields.io/badge/discord-community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
-  <a href="https://www.npmjs.com/package/@smolt/coding-agent"><img alt="npm" src="https://img.shields.io/npm/v/@smolt/coding-agent?style=flat-square" /></a>
+  <a href="https://www.npmjs.com/package/@smolt/cli"><img alt="npm" src="https://img.shields.io/npm/v/%40smolt%2Fcli?style=flat-square" /></a>
+  <a href="https://github.com/reghope/smolt/blob/main/LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-b45f43?style=flat-square" /></a>
 </p>
 
-> New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](../../CONTRIBUTING.md).
+<p align="center"><em>The coding agent that keeps what it learns. A fork of the <a href="https://github.com/earendil-works/pi">Pi agent harness</a>.</em></p>
 
 ---
 
@@ -17,22 +17,6 @@ Smolt is a minimal terminal coding harness. Adapt smolt to your workflows, not t
 Smolt ships with powerful defaults but skips features like sub agents and plan mode. Instead, you can ask smolt to build what you want or install a third party smolt package that matches your workflow.
 
 Smolt runs in four modes: interactive, print or JSON, RPC for process integration, and an SDK for embedding in your own apps.
-
-## Share your OSS coding agent sessions
-
-If you use smolt for open source work, please share your coding agent sessions.
-
-Public OSS session data helps improve models, prompts, tools, and evaluations using real development workflows.
-
-For the full explanation, see [this post on X](https://x.com/badlogicgames/status/2037811643774652911).
-
-To publish sessions, use [`badlogic/smolt-share-hf`](https://github.com/badlogic/smolt-share-hf). Read its README.md for setup instructions. All you need is a Hugging Face account, the Hugging Face CLI, and `smolt-share-hf`.
-
-You can also watch [this video](https://x.com/badlogicgames/status/2041151967695634619), where I show how I publish my `smolt-mono` sessions.
-
-I regularly publish my own `smolt-mono` work sessions here:
-
-- [badlogicgames/smolt-mono on Hugging Face](https://huggingface.co/datasets/badlogicgames/smolt-mono)
 
 ## Table of Contents
 
@@ -63,16 +47,10 @@ I regularly publish my own `smolt-mono` work sessions here:
 ## Quick Start
 
 ```bash
-npm install -g --ignore-scripts @smolt/coding-agent
+npm install -g --ignore-scripts @smolt/cli
 ```
 
 `--ignore-scripts` disables dependency lifecycle scripts during install. Smolt does not require install scripts for normal npm installs.
-
-Installer alternative:
-
-```bash
-curl -fsSL https://pi.dev/install.sh | sh
-```
 
 Authenticate with an API key:
 
@@ -311,10 +289,10 @@ Use `/trust` in interactive mode to save a project trust decision for future ses
 
 Smolt has two separate startup features:
 
-- **Update check:** fetches `https://pi.dev/api/latest-version` to check whether a newer Smolt version exists. Disable it with `PI_SKIP_VERSION_CHECK=1`. Disabling update checks only turns off this check.
-- **Install/update telemetry:** after first install or a changelog-detected update, sends an anonymous version ping to `https://pi.dev/api/report-install`. This setting also controls optional provider attribution headers for OpenRouter, Cloudflare, and direct NVIDIA NIM requests. Opt out by setting `enableInstallTelemetry` to `false` in `settings.json`, or by setting `PI_TELEMETRY=0`. This does not disable update checks; Smolt may still contact `pi.dev` for the latest version unless update checks are disabled or offline mode is enabled.
+- **Update check:** disabled in this fork. There is no smolt release endpoint yet, and smolt never contacts the upstream project's servers. `SMOLT_SKIP_VERSION_CHECK=1` remains accepted for compatibility.
+- **Install/update telemetry:** disabled in this fork; no version pings are sent anywhere. The `enableInstallTelemetry` setting now only controls optional provider attribution headers for OpenRouter, Cloudflare, and direct NVIDIA NIM requests.
 
-Use `--offline` or `PI_OFFLINE=1` to disable all startup network operations described here, including update checks, package update checks, and install/update telemetry.
+Use `--offline` or `SMOLT_OFFLINE=1` to disable all startup network operations described here, including update checks, package update checks, and install/update telemetry.
 
 ---
 
@@ -407,7 +385,7 @@ Place in `~/.smolt/agent/themes/`, `.smolt/themes/`, or a [smolt package](#smolt
 
 ### Smolt Packages
 
-Bundle and share extensions, skills, prompts, and themes via npm or git. Find packages on [npmjs.com](https://www.npmjs.com/search?q=keywords%3Api-package) or [Discord](https://discord.com/channels/1456806362351669492/1457744485428629628).
+Bundle and share extensions, skills, prompts, and themes via npm or git.
 
 > **Security:** Smolt packages run with full system access. Extensions execute arbitrary code, and skills can instruct the model to perform any action including running executables. Review source code before installing third-party packages.
 
@@ -463,7 +441,7 @@ See [docs/packages.md](docs/packages.md).
 ### SDK
 
 ```typescript
-import { createAgentSession, ModelRuntime, SessionManager } from "@smolt/coding-agent";
+import { createAgentSession, ModelRuntime, SessionManager } from "smolt";
 
 const modelRuntime = await ModelRuntime.create();
 const { session } = await createAgentSession({
@@ -673,25 +651,25 @@ smolt --thinking high "Solve this complex problem"
 | Variable | Description |
 |----------|-------------|
 | `AI_AGENT` | Set to `smolt` by the CLI and RPC entry points so generic tooling can attribute child processes to Smolt |
-| `PI_CODING_AGENT` | Set to `true` by the CLI and RPC entry points so child processes can detect that they run inside Smolt |
-| `PI_CODING_AGENT_DIR` | Override config directory (default: `~/.smolt/agent`) |
-| `PI_CODING_AGENT_SESSION_DIR` | Override session storage directory (overridden by `--session-dir`) |
-| `PI_PACKAGE_DIR` | Override package directory (useful for Nix/Guix where store paths tokenize poorly) |
-| `PI_OFFLINE` | Disable startup network operations, including update checks, package update checks, and install/update telemetry |
-| `PI_SKIP_VERSION_CHECK` | Skip the Smolt version update check at startup. This prevents the `pi.dev` latest-version request |
-| `PI_TELEMETRY` | Override install/update telemetry and provider attribution headers. Use `1`/`true`/`yes` to enable or `0`/`false`/`no` to disable. This does not disable update checks |
-| `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache (Anthropic: 1h, OpenAI: 24h) |
+| `SMOLT_CODING_AGENT` | Set to `true` by the CLI and RPC entry points so child processes can detect that they run inside Smolt |
+| `SMOLT_CODING_AGENT_DIR` | Override config directory (default: `~/.smolt/agent`) |
+| `SMOLT_CODING_AGENT_SESSION_DIR` | Override session storage directory (overridden by `--session-dir`) |
+| `SMOLT_PACKAGE_DIR` | Override package directory (useful for Nix/Guix where store paths tokenize poorly) |
+| `SMOLT_OFFLINE` | Disable startup network operations, including update checks, package update checks, and install/update telemetry |
+| `SMOLT_SKIP_VERSION_CHECK` | Accepted for compatibility; the update check is disabled in this fork |
+| `SMOLT_TELEMETRY` | Override install/update telemetry and provider attribution headers. Use `1`/`true`/`yes` to enable or `0`/`false`/`no` to disable. This does not disable update checks |
+| `SMOLT_CACHE_RETENTION` | Set to `long` for extended prompt cache (Anthropic: 1h, OpenAI: 24h) |
 | `VISUAL`, `EDITOR` | Fallback external editor for Ctrl+G when `externalEditor` is unset; defaults to Notepad on Windows and `nano` elsewhere |
 
 Commands run by the LLM-callable `bash` and `powershell` tools also receive current session metadata:
 
 | Variable | Description |
 |----------|-------------|
-| `PI_SESSION_ID` | Current session ID |
-| `PI_SESSION_FILE` | Absolute session JSONL path; unset for ephemeral sessions |
-| `PI_PROVIDER` | Currently selected model provider |
-| `PI_MODEL` | Currently selected model ID |
-| `PI_REASONING_LEVEL` | Current effective reasoning level |
+| `SMOLT_SESSION_ID` | Current session ID |
+| `SMOLT_SESSION_FILE` | Absolute session JSONL path; unset for ephemeral sessions |
+| `SMOLT_PROVIDER` | Currently selected model provider |
+| `SMOLT_MODEL` | Currently selected model ID |
+| `SMOLT_REASONING_LEVEL` | Current effective reasoning level |
 
 These values are resolved when each command starts. See [Environment Variables](docs/environment-variables.md#shell-tool-session-environment) for semantics, examples, and custom-tool opt-out.
 
@@ -707,12 +685,5 @@ MIT
 
 ## See Also
 
-- [@smolt/ai](https://www.npmjs.com/package/@smolt/ai): Core LLM toolkit
-- [@smolt/agent-core](https://www.npmjs.com/package/@smolt/agent-core): Agent framework
-- [@smolt/tui](https://www.npmjs.com/package/@smolt/tui): Terminal UI components
-
-<p align="center">
-  <a href="https://pi.dev">pi.dev</a> domain graciously donated by
-  <br /><br />
-  <a href="https://exe.dev"><img src="docs/images/exy.png" alt="Exy mascot" width="48" /><br />exe.dev</a>
-</p>
+- [smolt on GitHub](https://github.com/reghope/smolt) - the full workspace: agent runtime, LLM toolkit, TUI, and the self-learning module
+- [Pi agent harness](https://github.com/earendil-works/pi) - the upstream project this fork builds on

@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import { DynamicBorder, type ExtensionAPI, type ExtensionContext } from "@smolt/coding-agent";
+import { DynamicBorder, type ExtensionAPI, type ExtensionContext } from "smolt";
 import { Container, hyperlink, Text } from "@smolt/tui";
 
 const PR_PROMPT_PATTERN = /^\s*You are given one or more GitHub PR URLs:\s*(\S+)/im;

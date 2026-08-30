@@ -16,7 +16,7 @@
  *   /working-indicator reset     Restore smolt's default spinner
  */
 
-import type { ExtensionAPI, ExtensionContext, WorkingIndicatorOptions } from "@smolt/coding-agent";
+import type { ExtensionAPI, ExtensionContext, WorkingIndicatorOptions } from "smolt";
 
 type WorkingIndicatorMode = "dot" | "none" | "pulse" | "spinner" | "default";
 

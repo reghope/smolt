@@ -1,6 +1,6 @@
 {
 	"name": "@smolt/evals",
-	"version": "0.84.3",
+	"version": "0.1.0",
 	"private": true,
 	"type": "module",
 	"scripts": {
@@ -9,8 +9,8 @@
 		"test": "vitest run --config vitest.test.config.ts"
 	},
 	"devDependencies": {
-		"@smolt/ai": "^0.84.3",
-		"@smolt/coding-agent": "^0.84.3",
+		"@smolt/ai": "^0.1.0",
+		"smolt": "^0.1.0",
 		"@types/node": "22.19.19",
 		"shx": "0.4.0",
 		"typescript": "5.9.3",

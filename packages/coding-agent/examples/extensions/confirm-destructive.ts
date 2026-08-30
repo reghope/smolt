@@ -5,7 +5,7 @@
  * Demonstrates how to cancel session events using the before_* events.
  */
 
-import type { ExtensionAPI, SessionBeforeSwitchEvent, SessionMessageEntry } from "@smolt/coding-agent";
+import type { ExtensionAPI, SessionBeforeSwitchEvent, SessionMessageEntry } from "smolt";
 
 export default function (smolt: ExtensionAPI) {
 	smolt.on("session_before_switch", async (event: SessionBeforeSwitchEvent, ctx) => {

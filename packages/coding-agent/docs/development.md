@@ -5,8 +5,8 @@ See [AGENTS.md](https://github.com/earendil-works/pi-mono/blob/main/AGENTS.md) f
 ## Setup
 
 ```bash
-git clone https://github.com/earendil-works/pi-mono
-cd smolt-mono
+git clone https://github.com/reghope/smolt
+cd smolt
 npm install
 npm run build
 ```
@@ -14,7 +14,7 @@ npm run build
 Run from source:
 
 ```bash
-/path/to/smolt-mono/smolt-test.sh
+/path/to/smolt/smolt-test.sh
 ```
 
 The script can be run from any directory. Smolt keeps the caller's current working directory.

@@ -112,7 +112,7 @@ export function hasAuthForProvider(provider: string): boolean {
 }
 
 /** Path to the real smolt agent config directory */
-export const PI_AGENT_DIR = join(homedir(), ".smolt", "agent");
+export const SMOLT_AGENT_DIR = join(homedir(), ".smolt", "agent");
 
 /**
  * Get an AuthStorage instance backed by ~/.smolt/agent/auth.json

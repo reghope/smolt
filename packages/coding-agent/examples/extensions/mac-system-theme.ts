@@ -7,7 +7,7 @@
 
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
-import type { ExtensionAPI } from "@smolt/coding-agent";
+import type { ExtensionAPI } from "smolt";
 
 const execAsync = promisify(exec);
 

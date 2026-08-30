@@ -10,7 +10,7 @@
  * 3. When enabled, the agent will respond like a pirate
  */
 
-import type { ExtensionAPI } from "@smolt/coding-agent";
+import type { ExtensionAPI } from "smolt";
 
 export default function pirateExtension(smolt: ExtensionAPI) {
 	let pirateMode = false;

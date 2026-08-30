@@ -43,7 +43,7 @@ function getDefaultAttributionHeaders(
 
 	if (isOpenRouterModel(model)) {
 		return {
-			"HTTP-Referer": "https://pi.dev",
+			"HTTP-Referer": "https://github.com/reghope/smolt",
 			"X-OpenRouter-Title": "smolt",
 			"X-OpenRouter-Categories": "cli-agent",
 		};

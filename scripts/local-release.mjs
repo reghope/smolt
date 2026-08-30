@@ -14,7 +14,7 @@ const packages = [
 	{ directory: "packages/client", name: "@smolt/client" },
 	{ directory: "packages/session-backends/sqlite-node", name: "@smolt/session-backend-sqlite-node" },
 	{ directory: "packages/server", name: "@smolt/server" },
-	{ directory: "packages/coding-agent", name: "@smolt/coding-agent" },
+	{ directory: "packages/coding-agent", name: "smolt" },
 ];
 
 function printUsage() {

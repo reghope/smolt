@@ -8,8 +8,8 @@
  * - Edge case tests (wide chars, styled text, emoji)
  */
 
-import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@smolt/coding-agent";
 import { CURSOR_MARKER, type Focusable, matchesKey, visibleWidth } from "@smolt/tui";
+import type { ExtensionAPI, ExtensionCommandContext, Theme } from "smolt";
 
 export default function (smolt: ExtensionAPI) {
 	smolt.registerCommand("overlay-test", {

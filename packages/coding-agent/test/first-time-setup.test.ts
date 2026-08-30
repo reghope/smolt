@@ -7,7 +7,7 @@ import { ENV_AGENT_DIR } from "../src/config.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
 describe("shouldRunFirstTimeSetup", () => {
-	const originalSmoltExperimental = process.env.PI_EXPERIMENTAL;
+	const originalSmoltExperimental = process.env.SMOLT_EXPERIMENTAL;
 	const originalAgentDir = process.env[ENV_AGENT_DIR];
 	let tempDir: string;
 	let settingsPath: string;
@@ -15,16 +15,16 @@ describe("shouldRunFirstTimeSetup", () => {
 	beforeEach(() => {
 		tempDir = mkdtempSync(join(tmpdir(), "smolt-first-time-setup-"));
 		settingsPath = join(tempDir, "settings.json");
-		process.env.PI_EXPERIMENTAL = "1";
+		process.env.SMOLT_EXPERIMENTAL = "1";
 		delete process.env[ENV_AGENT_DIR];
 	});
 
 	afterEach(() => {
 		rmSync(tempDir, { recursive: true, force: true });
 		if (originalSmoltExperimental === undefined) {
-			delete process.env.PI_EXPERIMENTAL;
+			delete process.env.SMOLT_EXPERIMENTAL;
 		} else {
-			process.env.PI_EXPERIMENTAL = originalSmoltExperimental;
+			process.env.SMOLT_EXPERIMENTAL = originalSmoltExperimental;
 		}
 		if (originalAgentDir === undefined) {
 			delete process.env[ENV_AGENT_DIR];
@@ -38,7 +38,7 @@ describe("shouldRunFirstTimeSetup", () => {
 	});
 
 	it("returns false when experimental features are disabled", () => {
-		delete process.env.PI_EXPERIMENTAL;
+		delete process.env.SMOLT_EXPERIMENTAL;
 
 		expect(shouldRunFirstTimeSetup(settingsPath)).toBe(false);
 	});

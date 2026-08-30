@@ -5,7 +5,7 @@
  * Useful for preventing accidental modifications to sensitive files.
  */
 
-import type { ExtensionAPI } from "@smolt/coding-agent";
+import type { ExtensionAPI } from "smolt";
 
 export default function (smolt: ExtensionAPI) {
 	const protectedPaths = [".env", ".git/", "node_modules/"];

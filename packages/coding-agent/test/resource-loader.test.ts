@@ -853,7 +853,7 @@ Content`,
 			writeFileSync(
 				join(ext1Dir, "index.ts"),
 				`
-import type { ExtensionAPI } from "@smolt/coding-agent";
+import type { ExtensionAPI } from "smolt";
 import { Type } from "typebox";
 export default function(smolt: ExtensionAPI) {
   smolt.registerTool({
@@ -868,7 +868,7 @@ export default function(smolt: ExtensionAPI) {
 			writeFileSync(
 				join(ext2Dir, "index.ts"),
 				`
-import type { ExtensionAPI } from "@smolt/coding-agent";
+import type { ExtensionAPI } from "smolt";
 import { Type } from "typebox";
 export default function(smolt: ExtensionAPI) {
   smolt.registerTool({
@@ -895,7 +895,7 @@ export default function(smolt: ExtensionAPI) {
 			writeFileSync(
 				join(globalExtDir, "global.ts"),
 				`
-import type { ExtensionAPI } from "@smolt/coding-agent";
+import type { ExtensionAPI } from "smolt";
 import { Type } from "typebox";
 export default function(smolt: ExtensionAPI) {
   smolt.registerTool({
@@ -914,7 +914,7 @@ export default function(smolt: ExtensionAPI) {
 			writeFileSync(
 				explicitExtPath,
 				`
-import type { ExtensionAPI } from "@smolt/coding-agent";
+import type { ExtensionAPI } from "smolt";
 import { Type } from "typebox";
 export default function(smolt: ExtensionAPI) {
   smolt.registerTool({

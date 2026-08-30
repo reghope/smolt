@@ -39,7 +39,7 @@ import {
   ModelRuntime,
   SessionManager,
   SettingsManager,
-} from "@smolt/coding-agent";
+} from "smolt";
 
 const modelRuntime = await ModelRuntime.create();
 

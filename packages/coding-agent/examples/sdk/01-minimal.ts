@@ -5,7 +5,7 @@
  * from cwd and ~/.smolt/agent. Model chosen from settings or first available.
  */
 
-import { createAgentSession } from "@smolt/coding-agent";
+import { createAgentSession } from "smolt";
 
 const { session } = await createAgentSession();
 

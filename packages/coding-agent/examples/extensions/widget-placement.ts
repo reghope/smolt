@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@smolt/coding-agent";
+import type { ExtensionAPI } from "smolt";
 
 export default function widgetPlacementExtension(smolt: ExtensionAPI) {
 	smolt.on("session_start", (_event, ctx) => {

@@ -52,7 +52,11 @@ export async function getLatestSmoltRelease(
 	currentVersion: string,
 	options: { timeoutMs?: number; retry?: boolean } = {},
 ): Promise<LatestSmoltRelease | undefined> {
-	if (process.env.PI_OFFLINE) return undefined;
+	// This fork has no release endpoint of its own yet; the inherited URL
+	// belongs to the upstream project and would report the wrong versions.
+	// Keep the plumbing, skip the network call.
+	if (LATEST_VERSION_URL.includes("pi.dev")) return undefined;
+	if (process.env.SMOLT_OFFLINE) return undefined;
 
 	const response = await fetchWithRetry(
 		LATEST_VERSION_URL,
@@ -95,7 +99,7 @@ export async function getLatestSmoltVersion(
 }
 
 export async function checkForNewSmoltVersion(currentVersion: string): Promise<LatestSmoltRelease | undefined> {
-	if (process.env.PI_SKIP_VERSION_CHECK) return undefined;
+	if (process.env.SMOLT_SKIP_VERSION_CHECK) return undefined;
 
 	try {
 		const latestRelease = await getLatestSmoltRelease(currentVersion);

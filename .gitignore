@@ -42,3 +42,4 @@ plans/
 .smolt/hf-sessions/
 .smolt/hf-sessions-backup/
 collect.sh
+dist-npm/

@@ -16,7 +16,7 @@ See [examples/sdk/](../examples/sdk/) for working examples from minimal to full 
 ## Quick Start
 
 ```typescript
-import { createAgentSession, ModelRuntime, SessionManager } from "@smolt/coding-agent";
+import { createAgentSession, ModelRuntime, SessionManager } from "smolt";
 
 const modelRuntime = await ModelRuntime.create();
 const { session } = await createAgentSession({
@@ -36,7 +36,7 @@ await session.prompt("What files are in the current directory?");
 ## Installation
 
 ```bash
-npm install @smolt/coding-agent
+npm install smolt
 ```
 
 The SDK is included in the main package. No separate installation needed.
@@ -50,7 +50,7 @@ The main factory function for a single `AgentSession`.
 `createAgentSession()` uses a `ResourceLoader` to supply extensions, skills, prompt templates, themes, and context files. If you do not provide one, it uses `DefaultResourceLoader` with standard discovery.
 
 ```typescript
-import { createAgentSession, SessionManager } from "@smolt/coding-agent";
+import { createAgentSession, SessionManager } from "smolt";
 
 // Minimal: defaults with DefaultResourceLoader
 const { session } = await createAgentSession();
@@ -128,7 +128,7 @@ import {
   createAgentSessionServices,
   getAgentDir,
   SessionManager,
-} from "@smolt/coding-agent";
+} from "smolt";
 
 const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
   const services = await createAgentSessionServices({ cwd });
@@ -368,7 +368,7 @@ When you pass a custom `ResourceLoader`, `cwd` and `agentDir` no longer control 
 
 ```typescript
 import { getModel } from "@smolt/ai";
-import { ModelRuntime } from "@smolt/coding-agent";
+import { ModelRuntime } from "smolt";
 
 const modelRuntime = await ModelRuntime.create();
 
@@ -409,7 +409,7 @@ If no model is provided:
 2. Uses default from settings
 3. Falls back to first available model
 
-Remote catalogs are persisted locally so later runtimes can restore them without a network request. The default file is `~/.smolt/agent/models-store.json`; set `modelsStorePath` to choose another location, or inject `modelsStore` to control persistence. Network refreshes are throttled to once per provider every four hours unless forced. To force an immediate refresh, call `await modelRuntime.refresh({ allowNetwork: true, force: true, signal })`. Setting `PI_OFFLINE` disables model network access.
+Remote catalogs are persisted locally so later runtimes can restore them without a network request. The default file is `~/.smolt/agent/models-store.json`; set `modelsStorePath` to choose another location, or inject `modelsStore` to control persistence. Network refreshes are throttled to once per provider every four hours unless forced. To force an immediate refresh, call `await modelRuntime.refresh({ allowNetwork: true, force: true, signal })`. Setting `SMOLT_OFFLINE` disables model network access.
 
 To match CLI model parsing, use the exported resolver helpers:
 
@@ -417,7 +417,7 @@ To match CLI model parsing, use the exported resolver helpers:
 import {
   resolveCliModel,
   resolveModelScopeWithDiagnostics,
-} from "@smolt/coding-agent";
+} from "smolt";
 
 const cliModel = resolveCliModel({
   cliModel: "anthropic/claude-opus-4-5:high",
@@ -449,7 +449,7 @@ Authentication resolution priority (handled by `ModelRuntime`):
 
 ```typescript
 import { InMemoryCredentialStore } from "@smolt/ai";
-import { createAgentSession, ModelRuntime } from "@smolt/coding-agent";
+import { createAgentSession, ModelRuntime } from "smolt";
 
 // Default: uses ~/.smolt/agent/auth.json and ~/.smolt/agent/models.json
 const modelRuntime = await ModelRuntime.create();
@@ -503,7 +503,7 @@ A failed or timed-out network refresh does not undo a successful credential oper
 Use a `ResourceLoader` to override the system prompt:
 
 ```typescript
-import { createAgentSession, DefaultResourceLoader } from "@smolt/coding-agent";
+import { createAgentSession, DefaultResourceLoader } from "smolt";
 
 const loader = new DefaultResourceLoader({
   systemPromptOverride: () => "You are a helpful assistant.",
@@ -528,7 +528,7 @@ Specify which built-in tools to enable:
 The `edit` tool returns `details.diff` for Smolt's TUI display and `details.patch` as a standard unified patch for SDK consumers.
 
 ```typescript
-import { createAgentSession } from "@smolt/coding-agent";
+import { createAgentSession } from "smolt";
 
 // Read-only mode
 const { session } = await createAgentSession({
@@ -556,7 +556,7 @@ const { session } = await createAgentSession({
 When you pass a custom `cwd`, `createAgentSession()` builds selected built-in tools for that cwd.
 
 ```typescript
-import { createAgentSession, SessionManager } from "@smolt/coding-agent";
+import { createAgentSession, SessionManager } from "smolt";
 
 const cwd = "/path/to/project";
 
@@ -580,7 +580,7 @@ const { session } = await createAgentSession({
 
 ```typescript
 import { Type } from "typebox";
-import { createAgentSession, defineTool } from "@smolt/coding-agent";
+import { createAgentSession, defineTool } from "smolt";
 
 // Inline custom tool
 const myTool = defineTool({
@@ -615,7 +615,7 @@ If you pass `tools`, include each custom or extension tool name you want enabled
 Extensions are loaded by the `ResourceLoader`. `DefaultResourceLoader` discovers extensions from `~/.smolt/agent/extensions/`, `.smolt/extensions/`, and settings.json extension sources.
 
 ```typescript
-import { createAgentSession, DefaultResourceLoader } from "@smolt/coding-agent";
+import { createAgentSession, DefaultResourceLoader } from "smolt";
 
 const loader = new DefaultResourceLoader({
   additionalExtensionPaths: ["/path/to/my-extension.ts"],
@@ -637,7 +637,7 @@ Extensions can register tools, subscribe to events, add commands, and more. See 
 **Named inline extensions:** By default, inline factories display as `<inline:1>`, `<inline:2>`, etc. in the startup Extensions list. To show a descriptive name instead, wrap the factory:
 
 ```typescript
-import type { InlineExtension } from "@smolt/coding-agent";
+import type { InlineExtension } from "smolt";
 
 const myProvider: InlineExtension = {
   name: "my-provider",
@@ -658,7 +658,7 @@ This displays as `<inline:my-provider>` instead of `<inline:1>`. Bare factory fu
 **Event Bus:** Extensions can communicate via `smolt.events`. Pass a shared `eventBus` to `DefaultResourceLoader` if you need to emit or listen from outside:
 
 ```typescript
-import { createEventBus, DefaultResourceLoader } from "@smolt/coding-agent";
+import { createEventBus, DefaultResourceLoader } from "smolt";
 
 const eventBus = createEventBus();
 const loader = new DefaultResourceLoader({
@@ -678,7 +678,7 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   type Skill,
-} from "@smolt/coding-agent";
+} from "smolt";
 
 const customSkill: Skill = {
   name: "my-skill",
@@ -704,7 +704,7 @@ const { session } = await createAgentSession({ resourceLoader: loader });
 ### Context Files
 
 ```typescript
-import { createAgentSession, DefaultResourceLoader } from "@smolt/coding-agent";
+import { createAgentSession, DefaultResourceLoader } from "smolt";
 
 const loader = new DefaultResourceLoader({
   agentsFilesOverride: (current) => ({
@@ -728,7 +728,7 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   type PromptTemplate,
-} from "@smolt/coding-agent";
+} from "smolt";
 
 const customCommand: PromptTemplate = {
   name: "deploy",
@@ -763,7 +763,7 @@ import {
   createAgentSessionServices,
   getAgentDir,
   SessionManager,
-} from "@smolt/coding-agent";
+} from "smolt";
 
 // In-memory (no persistence)
 const { session } = await createAgentSession({
@@ -857,7 +857,7 @@ sm.createBranchedSession(leafId);       // Extract path to new file
 ### Settings Management
 
 ```typescript
-import { createAgentSession, SettingsManager, SessionManager } from "@smolt/coding-agent";
+import { createAgentSession, SettingsManager, SessionManager } from "smolt";
 
 // Default: loads from files (global + project merged)
 const { session } = await createAgentSession({
@@ -913,7 +913,7 @@ Use `DefaultResourceLoader` to discover extensions, skills, prompts, themes, and
 import {
   DefaultResourceLoader,
   getAgentDir,
-} from "@smolt/coding-agent";
+} from "smolt";
 
 const loader = new DefaultResourceLoader({
   cwd,
@@ -963,7 +963,7 @@ import {
   ModelRuntime,
   SessionManager,
   SettingsManager,
-} from "@smolt/coding-agent";
+} from "smolt";
 
 const modelRuntime = await ModelRuntime.create({
   authPath: "/custom/agent/auth.json",
@@ -1044,7 +1044,7 @@ import {
   getAgentDir,
   InteractiveMode,
   SessionManager,
-} from "@smolt/coding-agent";
+} from "smolt";
 
 const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
   const services = await createAgentSessionServices({ cwd });
@@ -1084,7 +1084,7 @@ import {
   getAgentDir,
   runPrintMode,
   SessionManager,
-} from "@smolt/coding-agent";
+} from "smolt";
 
 const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
   const services = await createAgentSessionServices({ cwd });
@@ -1121,7 +1121,7 @@ import {
   getAgentDir,
   runRpcMode,
   SessionManager,
-} from "@smolt/coding-agent";
+} from "smolt";
 
 const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
   const services = await createAgentSessionServices({ cwd });

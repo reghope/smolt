@@ -647,21 +647,27 @@ describe("InteractiveMode.showLoadedResources", () => {
 			},
 			{
 				path: "/tmp/project/.smolt/npm/node_modules/smolt-markdown-preview/extensions/index.ts",
-				sourceInfo: createSourceInfo("/tmp/project/.smolt/npm/node_modules/smolt-markdown-preview/extensions/index.ts", {
-					source: "npm:smolt-markdown-preview",
-					scope: "project",
-					origin: "package",
-					baseDir: "/tmp/project/.smolt/npm/node_modules/smolt-markdown-preview",
-				}),
+				sourceInfo: createSourceInfo(
+					"/tmp/project/.smolt/npm/node_modules/smolt-markdown-preview/extensions/index.ts",
+					{
+						source: "npm:smolt-markdown-preview",
+						scope: "project",
+						origin: "package",
+						baseDir: "/tmp/project/.smolt/npm/node_modules/smolt-markdown-preview",
+					},
+				),
 			},
 			{
 				path: "/tmp/project/.smolt/npm/node_modules/@scope/smolt-scoped/extensions/index.ts",
-				sourceInfo: createSourceInfo("/tmp/project/.smolt/npm/node_modules/@scope/smolt-scoped/extensions/index.ts", {
-					source: "npm:@scope/smolt-scoped",
-					scope: "project",
-					origin: "package",
-					baseDir: "/tmp/project/.smolt/npm/node_modules/@scope/smolt-scoped",
-				}),
+				sourceInfo: createSourceInfo(
+					"/tmp/project/.smolt/npm/node_modules/@scope/smolt-scoped/extensions/index.ts",
+					{
+						source: "npm:@scope/smolt-scoped",
+						scope: "project",
+						origin: "package",
+						baseDir: "/tmp/project/.smolt/npm/node_modules/@scope/smolt-scoped",
+					},
+				),
 			},
 			{
 				path: "/tmp/project/.smolt/git/github.com/HazAT/smolt-interactive-subagents/extensions/index.ts",
@@ -1027,12 +1033,15 @@ describe("InteractiveMode.showLoadedResources", () => {
 		const extensions: ExtensionFixture[] = [
 			{
 				path: "/tmp/project/.smolt/npm/node_modules/smolt-markdown-preview/extensions/index.ts",
-				sourceInfo: createSourceInfo("/tmp/project/.smolt/npm/node_modules/smolt-markdown-preview/extensions/index.ts", {
-					source: "npm:smolt-markdown-preview",
-					scope: "project",
-					origin: "package",
-					baseDir: "/tmp/project/.smolt/npm/node_modules/smolt-markdown-preview",
-				}),
+				sourceInfo: createSourceInfo(
+					"/tmp/project/.smolt/npm/node_modules/smolt-markdown-preview/extensions/index.ts",
+					{
+						source: "npm:smolt-markdown-preview",
+						scope: "project",
+						origin: "package",
+						baseDir: "/tmp/project/.smolt/npm/node_modules/smolt-markdown-preview",
+					},
+				),
 			},
 		];
 
@@ -1164,7 +1173,10 @@ describe("InteractiveMode.showLoadedResources", () => {
 		const fakeThis = createShowLoadedResourcesThis({
 			quietStartup: false,
 			cwd,
-			contextFiles: [{ path: path.join(home, ".smolt", "agent", "AGENTS.md") }, { path: path.join(cwd, "AGENTS.md") }],
+			contextFiles: [
+				{ path: path.join(home, ".smolt", "agent", "AGENTS.md") },
+				{ path: path.join(cwd, "AGENTS.md") },
+			],
 		});
 
 		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
@@ -1203,7 +1215,10 @@ describe("InteractiveMode.showLoadedResources", () => {
 			quietStartup: false,
 			toolOutputExpanded: true,
 			cwd,
-			contextFiles: [{ path: path.join(home, ".smolt", "agent", "AGENTS.md") }, { path: path.join(cwd, "AGENTS.md") }],
+			contextFiles: [
+				{ path: path.join(home, ".smolt", "agent", "AGENTS.md") },
+				{ path: path.join(cwd, "AGENTS.md") },
+			],
 		});
 
 		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {

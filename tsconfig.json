@@ -19,9 +19,9 @@
 			],
 			"@smolt/agent-core/*": ["./packages/agent/src/*"],
 			"@smolt/session-backend-sqlite-node": ["./packages/session-backends/sqlite-node/src/index.ts"],
-			"@smolt/coding-agent": ["./packages/coding-agent/src/index.ts"],
-			"@smolt/coding-agent/hooks": ["./packages/coding-agent/src/core/hooks/index.ts"],
-			"@smolt/coding-agent/*": ["./packages/coding-agent/src/*"],
+			"smolt": ["./packages/coding-agent/src/index.ts"],
+			"smolt/hooks": ["./packages/coding-agent/src/core/hooks/index.ts"],
+			"smolt/*": ["./packages/coding-agent/src/*"],
 			"@smolt/protocol": ["./packages/protocol/src/index.ts"],
 			"@smolt/protocol/*": ["./packages/protocol/src/*"],
 			"@smolt/client": ["./packages/client/src/index.ts"],
@@ -36,5 +36,9 @@
 		}
 	},
 	"include": ["packages/*/src/**/*", "packages/*/test/**/*", "packages/session-backends/*/src/**/*", "packages/session-backends/*/test/**/*", "packages/coding-agent/examples/**/*"],
-	"exclude": ["**/dist/**", "packages/coding-agent/examples/extensions/gondolin/**"]
+	"exclude": [
+		"**/dist/**",
+		"packages/coding-agent/examples/extensions/gondolin/**",
+		"packages/desktop/src/renderer/**"
+	]
 }

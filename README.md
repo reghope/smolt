@@ -19,6 +19,7 @@ Upstream is by Mario Zechner and the Pi contributors, MIT licensed. This fork ke
 | **[ai](packages/ai)** | Unified multi-provider LLM API (OpenAI, Anthropic, Google, etc.) |
 | **[tui](packages/tui)** | Terminal UI library with differential rendering |
 | **[telemetry](packages/telemetry)** | Vendor-neutral telemetry contracts, reference adapter, conformance tests, typed schemas |
+| **[desktop](packages/desktop)** | Minimalist desktop app (Electron + TypeScript) over the agent's RPC mode |
 
 ## Self-learning
 

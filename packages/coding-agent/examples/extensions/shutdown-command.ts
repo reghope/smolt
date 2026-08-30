@@ -5,7 +5,7 @@
  * Demonstrates how extensions can use ctx.shutdown() to exit smolt cleanly.
  */
 
-import type { ExtensionAPI } from "@smolt/coding-agent";
+import type { ExtensionAPI } from "smolt";
 import { Type } from "typebox";
 
 export default function (smolt: ExtensionAPI) {

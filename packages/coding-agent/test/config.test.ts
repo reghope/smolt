@@ -12,7 +12,7 @@ import {
 
 const execPathDescriptor = Object.getOwnPropertyDescriptor(process, "execPath");
 const originalPath = process.env.PATH;
-const originalSmoltPackageDir = process.env.PI_PACKAGE_DIR;
+const originalSmoltPackageDir = process.env.SMOLT_PACKAGE_DIR;
 const originalArgv1 = process.argv[1];
 let tempDir: string | undefined;
 
@@ -33,9 +33,9 @@ afterEach(() => {
 		process.env.PATH = originalPath;
 	}
 	if (originalSmoltPackageDir === undefined) {
-		delete process.env.PI_PACKAGE_DIR;
+		delete process.env.SMOLT_PACKAGE_DIR;
 	} else {
-		process.env.PI_PACKAGE_DIR = originalSmoltPackageDir;
+		process.env.SMOLT_PACKAGE_DIR = originalSmoltPackageDir;
 	}
 	if (originalArgv1 === undefined) {
 		process.argv.splice(1, 1);
@@ -56,7 +56,7 @@ function createNpmPrefixInstall(template = "smolt-prefix-"): { prefix: string; p
 	const packageDir = join(scopeDir, "smolt-coding-agent");
 	mkdirSync(packageDir, { recursive: true });
 	tempDir = prefix;
-	process.env.PI_PACKAGE_DIR = packageDir;
+	process.env.SMOLT_PACKAGE_DIR = packageDir;
 	setExecPath(join(packageDir, "dist", "cli.js"));
 	return { prefix, packageDir };
 }
@@ -72,7 +72,7 @@ function createPnpmGlobalInstall(): { root: string; packageDir: string } {
 	chmodSync(join(binDir, process.platform === "win32" ? "pnpm.cmd" : "pnpm"), 0o755);
 	tempDir = temp;
 	process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
-	process.env.PI_PACKAGE_DIR = packageDir;
+	process.env.SMOLT_PACKAGE_DIR = packageDir;
 	setExecPath(
 		join(
 			root,
@@ -99,7 +99,7 @@ function createYarnGlobalInstall(): { globalDir: string; packageDir: string } {
 	chmodSync(join(binDir, process.platform === "win32" ? "yarn.cmd" : "yarn"), 0o755);
 	tempDir = temp;
 	process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
-	process.env.PI_PACKAGE_DIR = packageDir;
+	process.env.SMOLT_PACKAGE_DIR = packageDir;
 	setExecPath(join(globalDir, ".yarn", "@mariozechner", "smolt-coding-agent", "dist", "cli.js"));
 	return { globalDir, packageDir };
 }
@@ -117,7 +117,7 @@ function createBunGlobalInstall(): { packageDir: string } {
 	chmodSync(join(bunBin, process.platform === "win32" ? "bun.cmd" : "bun"), 0o755);
 	tempDir = temp;
 	process.env.PATH = `${bunBin}${delimiter}${originalPath ?? ""}`;
-	process.env.PI_PACKAGE_DIR = packageDir;
+	process.env.SMOLT_PACKAGE_DIR = packageDir;
 	setExecPath(join(packageDir, "dist", "cli.js"));
 	return { packageDir };
 }
@@ -166,8 +166,8 @@ describe("detectInstallMethod", () => {
 		);
 
 		expect(detectInstallMethod()).toBe("pnpm");
-		expect(getUpdateInstruction("@smolt/coding-agent")).toBe(
-			"Run: pnpm install -g --ignore-scripts --config.minimumReleaseAge=0 @smolt/coding-agent",
+		expect(getUpdateInstruction("smolt")).toBe(
+			"Run: pnpm install -g --ignore-scripts --config.minimumReleaseAge=0 smolt",
 		);
 	});
 
@@ -175,53 +175,37 @@ describe("detectInstallMethod", () => {
 		setExecPath("/usr/local/bin/node");
 
 		expect(detectInstallMethod()).toBe("unknown");
-		expect(getSelfUpdateCommand("@smolt/coding-agent")).toBeUndefined();
-		expect(getUpdateInstruction("@smolt/coding-agent")).toBe(
-			"Update @smolt/coding-agent using the package manager, wrapper, or source checkout that provides this installation.",
+		expect(getSelfUpdateCommand("smolt")).toBeUndefined();
+		expect(getUpdateInstruction("smolt")).toBe(
+			"Update smolt using the package manager, wrapper, or source checkout that provides this installation.",
 		);
 	});
 
 	test("self-updates npm installs from custom prefixes", () => {
 		const { prefix } = createNpmPrefixInstall();
 
-		const command = getSelfUpdateCommand("@smolt/coding-agent");
+		const command = getSelfUpdateCommand("smolt");
 
 		expect(detectInstallMethod()).toBe("npm");
 		expect(command).toEqual({
 			command: "npm",
-			args: [
-				"--prefix",
-				prefix,
-				"install",
-				"-g",
-				"--ignore-scripts",
-				"--min-release-age=0",
-				"@smolt/coding-agent",
-			],
-			display: `npm --prefix ${prefix} install -g --ignore-scripts --min-release-age=0 @smolt/coding-agent`,
+			args: ["--prefix", prefix, "install", "-g", "--ignore-scripts", "--min-release-age=0", "smolt"],
+			display: `npm --prefix ${prefix} install -g --ignore-scripts --min-release-age=0 smolt`,
 		});
 	});
 
 	test("self-updates exact npm versions without uninstalling the current package", () => {
 		const { prefix } = createNpmPrefixInstall();
 
-		const command = getSelfUpdateCommand("@smolt/coding-agent", undefined, {
-			packageName: "@smolt/coding-agent",
-			installSpec: "@smolt/coding-agent@1.2.3",
+		const command = getSelfUpdateCommand("smolt", undefined, {
+			packageName: "smolt",
+			installSpec: "smolt@1.2.3",
 		});
 
 		expect(command).toEqual({
 			command: "npm",
-			args: [
-				"--prefix",
-				prefix,
-				"install",
-				"-g",
-				"--ignore-scripts",
-				"--min-release-age=0",
-				"@smolt/coding-agent@1.2.3",
-			],
-			display: `npm --prefix ${prefix} install -g --ignore-scripts --min-release-age=0 @smolt/coding-agent@1.2.3`,
+			args: ["--prefix", prefix, "install", "-g", "--ignore-scripts", "--min-release-age=0", "smolt@1.2.3"],
+			display: `npm --prefix ${prefix} install -g --ignore-scripts --min-release-age=0 smolt@1.2.3`,
 		});
 	});
 
@@ -242,7 +226,15 @@ describe("detectInstallMethod", () => {
 				},
 				{
 					command: "npm",
-					args: ["--prefix", prefix, "install", "-g", "--ignore-scripts", "--min-release-age=0", "@new-scope/smolt"],
+					args: [
+						"--prefix",
+						prefix,
+						"install",
+						"-g",
+						"--ignore-scripts",
+						"--min-release-age=0",
+						"@new-scope/smolt",
+					],
 					display: `npm --prefix ${prefix} install -g --ignore-scripts --min-release-age=0 @new-scope/smolt`,
 				},
 			],
@@ -252,27 +244,19 @@ describe("detectInstallMethod", () => {
 	test("self-update respects configured npmCommand", () => {
 		const { prefix } = createNpmPrefixInstall();
 
-		const command = getSelfUpdateCommand("@smolt/coding-agent", ["npm", "--prefix", prefix]);
+		const command = getSelfUpdateCommand("smolt", ["npm", "--prefix", prefix]);
 
 		expect(command).toEqual({
 			command: "npm",
-			args: [
-				"--prefix",
-				prefix,
-				"install",
-				"-g",
-				"--ignore-scripts",
-				"--min-release-age=0",
-				"@smolt/coding-agent",
-			],
-			display: `npm --prefix ${prefix} install -g --ignore-scripts --min-release-age=0 @smolt/coding-agent`,
+			args: ["--prefix", prefix, "install", "-g", "--ignore-scripts", "--min-release-age=0", "smolt"],
+			display: `npm --prefix ${prefix} install -g --ignore-scripts --min-release-age=0 smolt`,
 		});
 	});
 
 	test("self-update treats empty npmCommand as unset", () => {
 		const { prefix } = createNpmPrefixInstall();
 
-		const command = getSelfUpdateCommand("@smolt/coding-agent", []);
+		const command = getSelfUpdateCommand("smolt", []);
 
 		expect(command?.args).toEqual([
 			"--prefix",
@@ -281,41 +265,37 @@ describe("detectInstallMethod", () => {
 			"-g",
 			"--ignore-scripts",
 			"--min-release-age=0",
-			"@smolt/coding-agent",
+			"smolt",
 		]);
 	});
 
 	test("quotes npm self-update display paths", () => {
 		const { prefix } = createNpmPrefixInstall("smolt prefix ");
 
-		const command = getSelfUpdateCommand("@smolt/coding-agent");
+		const command = getSelfUpdateCommand("smolt");
 
-		expect(command?.display).toBe(
-			`npm --prefix "${prefix}" install -g --ignore-scripts --min-release-age=0 @smolt/coding-agent`,
-		);
+		expect(command?.display).toBe(`npm --prefix "${prefix}" install -g --ignore-scripts --min-release-age=0 smolt`);
 	});
 
 	test("does not infer Windows npm custom prefixes from package paths", () => {
 		const packageDir = "C:\\Users\\Admin\\npm prefix\\node_modules\\@earendil-works\\smolt-coding-agent";
-		process.env.PI_PACKAGE_DIR = packageDir;
+		process.env.SMOLT_PACKAGE_DIR = packageDir;
 		setExecPath(`${packageDir}\\dist\\cli.js`);
 
 		expect(detectInstallMethod()).toBe("npm");
-		expect(getUpdateInstruction("@smolt/coding-agent")).toBe(
-			"Run: npm install -g --ignore-scripts --min-release-age=0 @smolt/coding-agent",
-		);
+		expect(getUpdateInstruction("smolt")).toBe("Run: npm install -g --ignore-scripts --min-release-age=0 smolt");
 	});
 
 	test("self-updates bun global installs from bun pm bin", () => {
 		createBunGlobalInstall();
 
-		const command = getSelfUpdateCommand("@smolt/coding-agent");
+		const command = getSelfUpdateCommand("smolt");
 
 		expect(detectInstallMethod()).toBe("bun");
 		expect(command).toEqual({
 			command: "bun",
-			args: ["install", "-g", "--ignore-scripts", "--minimum-release-age=0", "@smolt/coding-agent"],
-			display: "bun install -g --ignore-scripts --minimum-release-age=0 @smolt/coding-agent",
+			args: ["install", "-g", "--ignore-scripts", "--minimum-release-age=0", "smolt"],
+			display: "bun install -g --ignore-scripts --minimum-release-age=0 smolt",
 		});
 	});
 
@@ -349,7 +329,7 @@ describe("detectInstallMethod", () => {
 		const temp = mkdtempSync(join(tmpdir(), "smolt-pnpm11-"));
 		const binDir = join(temp, "bin");
 		const root = join(temp, "Library", "pnpm", "global", "v11");
-		const packageName = "@smolt/coding-agent";
+		const packageName = "smolt";
 		const globalPackageDir = join(root, "11e9a", "node_modules", "@earendil-works", "smolt-coding-agent");
 		const storePackageDir = join(
 			temp,
@@ -374,7 +354,7 @@ describe("detectInstallMethod", () => {
 		chmodSync(join(binDir, process.platform === "win32" ? "pnpm.cmd" : "pnpm"), 0o755);
 		tempDir = temp;
 		process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
-		process.env.PI_PACKAGE_DIR = storePackageDir;
+		process.env.SMOLT_PACKAGE_DIR = storePackageDir;
 		process.argv[1] = join(globalPackageDir, "dist", "cli.js");
 		setExecPath(join(storePackageDir, "dist", "cli.js"));
 
@@ -397,7 +377,8 @@ describe("detectInstallMethod", () => {
 		expect(command).toEqual({
 			command: "yarn",
 			args: ["global", "add", "--ignore-scripts", "@new-scope/smolt"],
-			display: "yarn global remove @mariozechner/smolt-coding-agent && yarn global add --ignore-scripts @new-scope/smolt",
+			display:
+				"yarn global remove @mariozechner/smolt-coding-agent && yarn global add --ignore-scripts @new-scope/smolt",
 			steps: [
 				{
 					command: "yarn",
@@ -443,9 +424,7 @@ describe("detectInstallMethod", () => {
 		const { packageDir } = createNpmPrefixInstall();
 		chmodSync(packageDir, 0o500);
 
-		expect(getSelfUpdateCommand("@smolt/coding-agent")).toBeUndefined();
-		expect(getSelfUpdateUnavailableInstruction("@smolt/coding-agent")).toContain(
-			"the install path is not writable",
-		);
+		expect(getSelfUpdateCommand("smolt")).toBeUndefined();
+		expect(getSelfUpdateUnavailableInstruction("smolt")).toContain("the install path is not writable");
 	});
 });

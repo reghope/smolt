@@ -34,7 +34,7 @@ Extensions can register either a complete smolt-ai `Provider` or use the legacy 
 
 ```typescript
 import { createProvider, openAICompletionsApi } from "@smolt/ai";
-import type { ExtensionAPI } from "@smolt/coding-agent";
+import type { ExtensionAPI } from "smolt";
 
 export default function (smolt: ExtensionAPI) {
   smolt.registerProvider(createProvider({
@@ -125,7 +125,7 @@ To add a completely new provider, specify `models` along with the required confi
 If the model list comes from a remote endpoint, use an async extension factory:
 
 ```typescript
-import type { ExtensionAPI } from "@smolt/coding-agent";
+import type { ExtensionAPI } from "smolt";
 
 export default async function (smolt: ExtensionAPI) {
   const response = await fetch("http://localhost:1234/v1/models");

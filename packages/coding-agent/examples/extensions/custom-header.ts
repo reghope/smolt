@@ -5,8 +5,8 @@
  * (logo + keybinding hints) with a custom component showing the smolt mascot.
  */
 
-import type { ExtensionAPI, Theme } from "@smolt/coding-agent";
-import { VERSION } from "@smolt/coding-agent";
+import type { ExtensionAPI, Theme } from "smolt";
+import { VERSION } from "smolt";
 
 // --- SMOLT MASCOT ---
 // Based on smolt_mascot.ts - the smolt agent character

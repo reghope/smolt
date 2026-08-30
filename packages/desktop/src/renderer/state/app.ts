@@ -1,0 +1,1429 @@
+import { api, type SessionRow } from "../lib/api.ts";
+import { storedPreference, storePreference } from "../lib/prefs.ts";
+import { attachToolResult, fromAgentMessage, initialState, reduce, type UiState } from "../store.ts";
+
+/**
+ * The renderer's domain state and actions, kept outside React.
+ *
+ * Components read through `useApp()` (see useApp.ts), which subscribes to
+ * `bump()`. Actions here are ports of the pre-React renderer's handlers; the
+ * streaming reducer itself (store.ts) is untouched and fully unit-tested.
+ */
+
+export interface Attachment {
+	/** base64 payload the agent accepts, without the data: prefix */
+	data: string;
+	mimeType: string;
+	/** full data URL, for the composer thumbnail */
+	url: string;
+	name: string;
+}
+
+export interface ModelOption {
+	provider: string;
+	id: string;
+	reasoning: boolean;
+	/** Total context the model accepts, for the composer's context ring. */
+	contextWindow?: number;
+}
+
+export interface SlashCommand {
+	name: string;
+	description?: string;
+	source: "extension" | "prompt" | "skill";
+}
+
+/** An extension dialog forwarded from the agent (extension_ui_request). */
+export interface UiDialogRequest {
+	id: string;
+	method: "select" | "confirm" | "input";
+	title: string;
+	message?: string;
+	options?: string[];
+	placeholder?: string;
+}
+
+export interface PermissionRequest {
+	id: string;
+	tool: string;
+	summary: string;
+	mode: string;
+	/** Why the command looks destructive, when it does. */
+	danger?: string;
+	createdAt: number;
+}
+
+export interface DiffFile {
+	path: string;
+	hunks: string;
+	added: number;
+	removed: number;
+	status: string;
+}
+
+export interface UsageStats {
+	sessions: number;
+	messages: number;
+	tokens: number;
+	cost: number;
+	activeDays: number;
+	currentStreak: number;
+	longestStreak: number;
+	peakHour: number | null;
+	/** Replies per hour of the day, 0–23, for the busiest-hours chart. */
+	byHour: number[];
+	favouriteModel: string | null;
+	byDay: Record<string, number>;
+	byModel: { model: string; messages: number; tokens: number; input: number; output: number }[];
+	byDayModel: Record<string, Record<string, number>>;
+}
+
+/** The agent's own context accounting, as the TUI footer shows it. */
+export interface ContextUsage {
+	tokens: number | null;
+	contextWindow: number;
+	percent: number | null;
+}
+
+export interface WorktreeInfo {
+	isRepo: boolean;
+	activeCwd: string;
+	isolated: boolean;
+	worktrees: { name: string; branch: string; path: string }[];
+}
+
+export interface TerminalEntry {
+	kind: "cmd" | "out" | "status";
+	text: string;
+	/** For status rows: failed / cancelled / note. */
+	tone?: "fail" | "cancelled" | "note";
+}
+
+export type ThemeChoice = "system" | "light" | "dark";
+
+/** A transient, self-dismissing notification card. */
+/** An in-app confirmation, in place of the operating system's dialog. */
+export interface ConfirmRequest {
+	title: string;
+	message: string;
+	actionLabel: string;
+	destructive: boolean;
+	resolve: (confirmed: boolean) => void;
+}
+
+interface AppState {
+	chat: UiState;
+	side: UiState;
+	model: string;
+	thinking: string;
+	sessionRows: SessionRow[];
+	currentSessionPath: string;
+	sessionName: string;
+	attachments: Attachment[];
+	availableModels: ModelOption[];
+	availableThinking: string[];
+	slashCommands: SlashCommand[];
+	autoCompaction: boolean;
+	autoRetry: boolean;
+	deliverAllQueued: boolean;
+	canTranscribe: boolean;
+	permissionMode: string;
+	runStartedAt: number;
+	appInfo: { cwd: string; version: string; hasProject: boolean };
+	/** Folders worked in before, newest first, for the folder switcher. */
+	recentProjects: string[];
+	/** Folders open now, the working directory first. */
+	folders: string[];
+	/** Chats picked out for a bulk action, by session path. */
+	selectedSessions: Set<string>;
+	/** How often each slash command has been run, for palette ordering. */
+	commandUse: Record<string, number>;
+	repoBranch: string;
+	contextUsage: ContextUsage | null;
+	diffFiles: DiffFile[];
+	preexistingChanges: number;
+	/** The diff as it stood when the repo bar's × was clicked (path → hunks), or null when not dismissed. */
+	repoBarDismissed: Map<string, string> | null;
+	queuedMessages: string[];
+	pendingApprovals: PermissionRequest[];
+	uiRequests: UiDialogRequest[];
+	confirm: ConfirmRequest | null;
+	stats: UsageStats | null;
+	statsTab: "overview" | "models" | "rhythm";
+	statsWindow: number;
+	terminalLog: TerminalEntry[];
+	terminalBusy: boolean;
+	sideSeeded: boolean;
+	sideError: string | null;
+	// UI surfaces the keyboard shortcuts also need to reach.
+	sidebarHidden: boolean;
+	sessionSearchOpen: boolean;
+	sessionQuery: string;
+	diffOpen: boolean;
+	sideOpen: boolean;
+	terminalOpen: boolean;
+	settingsOpen: boolean;
+	shortcutsOpen: boolean;
+	modelMenuOpen: boolean;
+	modeMenuOpen: boolean;
+	effortOpen: boolean;
+	serif: boolean;
+	themeChoice: ThemeChoice;
+	// Dictation surface state; the audio machinery lives in voice.ts.
+	voiceActive: boolean;
+	voicePreparing: boolean;
+	voiceFinishing: boolean;
+	voiceDenied: boolean;
+	micDeviceId: string;
+	holdToRecord: boolean;
+	/** Composer text lives here so dictation and history can write it. */
+	draft: string;
+	busySessions: Set<string>;
+	pinned: Set<string>;
+	archived: Set<string>;
+	collapsedGroups: Set<string>;
+}
+
+export const app: AppState = {
+	chat: initialState(),
+	side: initialState(),
+	model: "",
+	thinking: "",
+	sessionRows: [],
+	currentSessionPath: "",
+	sessionName: "",
+	attachments: [],
+	availableModels: [],
+	availableThinking: [],
+	slashCommands: [],
+	autoCompaction: true,
+	autoRetry: true,
+	deliverAllQueued: false,
+	canTranscribe: false,
+	permissionMode: "auto",
+	runStartedAt: 0,
+	appInfo: { cwd: "", version: "", hasProject: false },
+	recentProjects: [],
+	folders: [],
+	selectedSessions: new Set<string>(),
+	commandUse: readCommandUse(),
+	repoBranch: "",
+	contextUsage: null,
+	diffFiles: [],
+	preexistingChanges: 0,
+	repoBarDismissed: null,
+	queuedMessages: [],
+	pendingApprovals: [],
+	uiRequests: [],
+	confirm: null,
+	stats: null,
+	statsTab: "overview",
+	statsWindow: 0,
+	terminalLog: [],
+	terminalBusy: false,
+	sideSeeded: false,
+	sideError: null,
+	sidebarHidden: false,
+	sessionSearchOpen: false,
+	sessionQuery: "",
+	diffOpen: false,
+	sideOpen: false,
+	terminalOpen: false,
+	settingsOpen: false,
+	shortcutsOpen: false,
+	modelMenuOpen: false,
+	modeMenuOpen: false,
+	effortOpen: false,
+	serif: false,
+	themeChoice: "system",
+	voiceActive: false,
+	voicePreparing: false,
+	voiceFinishing: false,
+	voiceDenied: false,
+	micDeviceId: "",
+	holdToRecord: false,
+	draft: "",
+	busySessions: new Set<string>(),
+	pinned: new Set<string>(),
+	archived: new Set<string>(),
+	collapsedGroups: new Set<string>(),
+};
+
+// ---------------------------------------------------------------------------
+// Subscription
+// ---------------------------------------------------------------------------
+
+const listeners = new Set<() => void>();
+let version = 0;
+
+export function subscribe(listener: () => void): () => void {
+	listeners.add(listener);
+	return () => listeners.delete(listener);
+}
+
+export function getVersion(): number {
+	return version;
+}
+
+export function bump(): void {
+	version += 1;
+	for (const listener of listeners) listener();
+}
+
+// ---------------------------------------------------------------------------
+// RPC plumbing
+// ---------------------------------------------------------------------------
+
+export async function call<T>(method: string, ...args: unknown[]): Promise<T | null> {
+	const result = await api.call(method, ...args);
+	if (!result.ok) {
+		reportAgentError(result.error ?? "unknown error");
+		bump();
+		return null;
+	}
+	reportAgentError(null);
+	return result.value as T;
+}
+
+/** The last one surfaced, so a run of identical failures only toasts once. */
+let lastAgentError: string | null = null;
+
+/**
+ * Agent failures have no reserved line in the layout, so they arrive as toasts.
+ * Repeats are swallowed: a broken agent fails every call, and one card per
+ * failure would bury the rest of the interface.
+ */
+export function reportAgentError(message: string | null): void {
+	if (message === lastAgentError) return;
+	lastAgentError = message;
+	if (message !== null && message !== "") toast(message, "error");
+}
+
+/** Show a transient card that dismisses itself; errors linger a little longer. */
+export function toast(message: string, tone: "default" | "error" = "default"): void {
+	if (message.trim() === "") return;
+	// Nothing pops up any more: the cards were more intrusive than the things
+	// they reported. Failures go to the console so they can still be traced,
+	// and the call sites stay put should a quieter surface ever be wanted.
+	if (tone === "error") console.error(message);
+	else console.info(message);
+}
+
+/** Ask the user to confirm in an in-app dialog, never the OS one. */
+export function requestConfirm(options: {
+	title: string;
+	message: string;
+	actionLabel?: string;
+	destructive?: boolean;
+}): Promise<boolean> {
+	return new Promise((resolve) => {
+		// A second request while one is open would orphan the first answer;
+		// resolve the earlier one as declined and move on.
+		app.confirm?.resolve(false);
+		app.confirm = {
+			title: options.title,
+			message: options.message,
+			actionLabel: options.actionLabel ?? "Confirm",
+			destructive: options.destructive ?? false,
+			resolve,
+		};
+		bump();
+	});
+}
+
+export function resolveConfirm(confirmed: boolean): void {
+	const pending = app.confirm;
+	app.confirm = null;
+	bump();
+	pending?.resolve(confirmed);
+}
+
+/** Answer one extension dialog and remove it from the queue. */
+export function answerUiRequest(response: {
+	id: string;
+	value?: string;
+	confirmed?: boolean;
+	cancelled?: boolean;
+}): void {
+	app.uiRequests = app.uiRequests.filter((request) => request.id !== response.id);
+	bump();
+	void call("respondExtensionUI", response);
+}
+
+function handleExtensionUiRequest(request: {
+	id: string;
+	method: string;
+	title?: string;
+	message?: string;
+	options?: string[];
+	placeholder?: string;
+	notifyType?: string;
+}): void {
+	switch (request.method) {
+		case "select":
+		case "confirm":
+		case "input":
+			app.uiRequests.push({
+				id: request.id,
+				method: request.method,
+				title: request.title ?? "",
+				message: request.message,
+				options: request.options,
+				placeholder: request.placeholder,
+			});
+			bump();
+			return;
+		case "editor":
+			// No extension editor surface here; cancel so the extension isn't stuck.
+			void call("respondExtensionUI", { id: request.id, cancelled: true });
+			return;
+		case "notify":
+			// Only failures interrupt; an extension telling us it is fine can stay quiet.
+			if (request.notifyType === "error") toast(request.message ?? "", "error");
+			return;
+		default:
+			// setStatus / setWidget / setTitle / set_editor_text: fire-and-forget
+			// with no desktop surface yet.
+			return;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Data loading
+// ---------------------------------------------------------------------------
+
+/**
+ * Work in a different folder.
+ *
+ * The agent is a subprocess rooted at one directory, so changing project means
+ * restarting it there; sessions, statistics and the diff are all scoped to the
+ * working directory and follow on their own once the state is refreshed.
+ */
+/**
+ * Slash command tallies, so the palette leads with what gets used.
+ *
+ * Cosmetic and per-machine, which is why it lives beside the other
+ * localStorage preferences rather than in the agent's own state.
+ */
+function readCommandUse(): Record<string, number> {
+	try {
+		const parsed: unknown = JSON.parse(storedPreference("smolt.commandUse", "{}"));
+		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+		const out: Record<string, number> = {};
+		for (const [name, count] of Object.entries(parsed as Record<string, unknown>)) {
+			if (typeof count === "number" && Number.isFinite(count)) out[name] = count;
+		}
+		return out;
+	} catch {
+		return {};
+	}
+}
+
+/** Count one run of a command, so the palette can lead with the popular ones. */
+export function noteCommandUse(name: string): void {
+	if (name === "") return;
+	app.commandUse = { ...app.commandUse, [name]: (app.commandUse[name] ?? 0) + 1 };
+	storePreference("smolt.commandUse", JSON.stringify(app.commandUse));
+}
+
+export async function openProject(path: string): Promise<void> {
+	// Show the destination before asking for it. Moving folders restarts the
+	// agent, which takes a couple of seconds, and leaving the old folder on
+	// screen throughout reads as nothing having happened.
+	const previous = { ...app.appInfo };
+	const previousFolders = app.folders;
+	app.appInfo = { ...app.appInfo, cwd: path, hasProject: true };
+	app.folders = [path];
+	app.chat.messages = [];
+	app.chat.usage = null;
+	bump();
+
+	const result = await api.openProject(path);
+	if (!result.ok) {
+		toast(result.error ?? "Could not open that folder", "error");
+		app.appInfo = previous;
+		app.folders = previousFolders;
+		bump();
+		return;
+	}
+	const info = await api.info();
+	app.appInfo = { ...app.appInfo, cwd: String(info?.cwd ?? path), hasProject: info?.hasProject !== false };
+	// Nothing is awaited past this point. The agent is still starting in the new
+	// folder, and its first answer takes a couple of seconds; the chat is empty
+	// by definition of having just moved, so there is nothing worth waiting for.
+	void refreshRecentProjects();
+	void (async () => {
+		await refreshState();
+		await loadMessages();
+	})();
+}
+
+/**
+ * Work with no folder open.
+ *
+ * This is the state the app starts in, and it is a real choice rather than a
+ * gap: the agent has nowhere the reader has chosen, so it asks before it puts
+ * a file anywhere.
+ */
+export async function closeProject(): Promise<void> {
+	// Closing restarts the agent in its scratch directory, which takes as long
+	// as opening one; the screen should not sit on the old folder meanwhile.
+	const previous = { ...app.appInfo };
+	const previousFolders = app.folders;
+	app.appInfo = { ...app.appInfo, hasProject: false };
+	app.folders = [];
+	app.chat.messages = [];
+	app.chat.usage = null;
+	bump();
+
+	const result = await api.closeProject();
+	if (!result.ok) {
+		toast(result.error ?? "Could not close the folder", "error");
+		app.appInfo = previous;
+		app.folders = previousFolders;
+		bump();
+		return;
+	}
+	const info = await api.info();
+	app.appInfo = { ...app.appInfo, cwd: String(info?.cwd ?? ""), hasProject: false };
+	void refreshRecentProjects();
+	void (async () => {
+		await refreshState();
+		await loadMessages();
+	})();
+}
+
+/** Reload the folder lists behind the switcher and the chips. */
+export async function refreshRecentProjects(): Promise<void> {
+	try {
+		app.recentProjects = await api.recentProjects();
+		app.folders = await api.folders();
+	} catch {
+		app.recentProjects = [];
+		app.folders = [];
+	}
+	bump();
+}
+
+/**
+ * Add a folder beside the ones already open.
+ *
+ * The first folder opened stays the working directory; the rest are extra
+ * places the agent is told it may use, so adding one never restarts a turn.
+ */
+export async function addFolder(): Promise<void> {
+	const picked = await api.pickFolder();
+	if (!picked.ok) {
+		toast(picked.error ?? "Could not open the folder picker", "error");
+		return;
+	}
+	const path = String(picked.value ?? "");
+	if (path === "") return;
+	const result = await api.addFolder(path);
+	if (!result.ok) {
+		toast(result.error ?? "Could not add that folder", "error");
+		return;
+	}
+	const info = await api.info();
+	app.appInfo = { ...app.appInfo, cwd: String(info?.cwd ?? ""), hasProject: info?.hasProject === true };
+	await refreshRecentProjects();
+	await refreshState();
+}
+
+/** Choose a folder, then work in it. */
+export async function pickProject(): Promise<void> {
+	const picked = await api.pickFolder();
+	if (!picked.ok) {
+		toast(picked.error ?? "Could not open the folder picker", "error");
+		return;
+	}
+	const path = String(picked.value ?? "");
+	if (path === "") return;
+	await openProject(path);
+}
+
+/**
+ * Just the sidebar list, without the rest of a full state refresh.
+ *
+ * Used when a chat first becomes real: the list is the only thing that has
+ * changed, and reloading state, stats and the diff for it would cost a second.
+ */
+export async function refreshSessionRows(): Promise<void> {
+	app.sessionRows = (await api.sessions()) ?? [];
+	bump();
+}
+
+/**
+ * When each chat's turn began, kept by session so a switch does not restart it.
+ *
+ * The elapsed time was anchored to the moment the window first saw a turn, so
+ * looking away and back made a five-minute turn look like a fresh one.
+ */
+const turnStarts = new Map<string, number>();
+
+/** Note that this chat's turn is under way, if its start is not already known. */
+function markTurnStart(path: string): void {
+	if (path === "" || turnStarts.has(path)) return;
+	turnStarts.set(path, Date.now());
+}
+
+/** Anchor the footer's clock to when the turn actually began. */
+function syncRunStart(): void {
+	if (!app.chat.streaming) {
+		turnStarts.delete(app.currentSessionPath);
+		app.runStartedAt = 0;
+		return;
+	}
+	markTurnStart(app.currentSessionPath);
+	// An unknown chat (a turn that began before this window saw it) starts now,
+	// which undercounts rather than inventing a time it cannot know.
+	app.runStartedAt = turnStarts.get(app.currentSessionPath) ?? Date.now();
+}
+
+export async function refreshState(): Promise<void> {
+	const rpcState = await call<Record<string, unknown>>("getState");
+	if (rpcState) {
+		const m = rpcState.model as Record<string, unknown> | undefined;
+		app.model = m ? `${m.provider ?? ""}/${m.id ?? ""}`.replace(/^\//, "") : String(rpcState.modelId ?? "");
+		app.thinking = String(rpcState.thinkingLevel ?? "");
+		app.currentSessionPath = String(rpcState.sessionFile ?? "");
+		app.sessionName = String(rpcState.sessionName ?? "");
+		app.autoCompaction = rpcState.autoCompactionEnabled !== false;
+		app.deliverAllQueued = rpcState.steeringMode === "all";
+		// The view may have just landed on an agent mid-turn; mirror its truth.
+		app.chat.streaming = rpcState.isStreaming === true;
+		syncRunStart();
+	}
+	app.sessionRows = (await api.sessions()) ?? [];
+	void refreshStats();
+	void refreshDiff();
+	void refreshContextUsage();
+	bump();
+}
+
+/**
+ * The context figure is the agent's own — the same accounting the TUI footer
+ * shows and auto-compaction acts on — so the dial is cumulative, survives
+ * session switches, and honestly reads unknown right after a compaction.
+ */
+export async function refreshContextUsage(): Promise<void> {
+	const stats = await call<{ contextUsage?: ContextUsage }>("getSessionStats");
+	app.contextUsage = stats?.contextUsage ?? null;
+	bump();
+}
+
+export async function loadMessages(): Promise<void> {
+	const messages = await call<Record<string, unknown>[]>("getMessages");
+	if (!messages) return;
+	app.chat.messages = [];
+	for (const raw of messages) {
+		if (raw.role === "toolResult") {
+			attachToolResult(app.chat.messages, raw);
+			continue;
+		}
+		const mapped = fromAgentMessage(raw);
+		if (mapped && mapped.blocks.length > 0) app.chat.messages.push(mapped);
+	}
+	bump();
+}
+
+export async function refreshStats(): Promise<void> {
+	const result = await api.stats();
+	if (result.ok) {
+		app.stats = result.value as UsageStats;
+		bump();
+	}
+}
+
+export async function refreshDiff(): Promise<void> {
+	const result = await api.diff();
+	if (!result.ok) {
+		app.diffFiles = [];
+		bump();
+		return;
+	}
+	const { files, branch, preexisting } = (result.value ?? {}) as {
+		files?: DiffFile[];
+		unavailable?: string;
+		branch?: string;
+		preexisting?: number;
+	};
+	app.preexistingChanges = preexisting ?? 0;
+	app.repoBranch = branch ?? "";
+	const next = files ?? [];
+	// The × holds until a genuinely new change appears: a file the dismissal
+	// never saw, or one whose diff has moved since. Changes merely vanishing
+	// (a commit, a revert) keep the bar hidden.
+	if (app.repoBarDismissed && next.some((file) => app.repoBarDismissed?.get(file.path) !== file.hunks)) {
+		app.repoBarDismissed = null;
+	}
+	app.diffFiles = next;
+	bump();
+}
+
+// ---------------------------------------------------------------------------
+// Sending
+// ---------------------------------------------------------------------------
+
+/** Prompts already sent, newest last; Up/Down walk this like a shell history. */
+export const promptHistory: string[] = [];
+
+export async function send(): Promise<void> {
+	const text = app.draft.trim();
+	const images = app.attachments.map(({ data, mimeType }) => ({ type: "image" as const, data, mimeType }));
+	if (text === "" && images.length === 0) return;
+	app.draft = "";
+	if (text !== "") {
+		promptHistory.push(text);
+		if (promptHistory.length > 200) promptHistory.shift();
+	}
+	app.attachments = [];
+	bump();
+	if (app.chat.streaming) {
+		const label =
+			images.length > 0 ? `${images.length === 1 ? "[Image]" : `[${images.length} images]`} ${text}`.trim() : text;
+		if (label !== "") {
+			app.queuedMessages = [...app.queuedMessages, label];
+			bump();
+		}
+		// Queued, not steered: a message typed while the agent works waits for
+		// the turn to finish rather than cutting into it, so a half-finished
+		// thought never redirects work already under way.
+		await call("followUp", text, images);
+	} else {
+		// A first message is what turns a scratch chat into a stored one. Put the
+		// row in the sidebar now, titled from the message, rather than leaving the
+		// chat unlisted until the agent has written its file and a refresh lands.
+		const firstMessage = app.chat.messages.length === 0;
+		await call("prompt", text, images);
+		if (firstMessage) await adoptNewChat(text);
+	}
+}
+
+/**
+ * List the chat that has just been started, before the agent's file exists.
+ *
+ * The row is provisional: the next refresh replaces it with the stored one,
+ * which carries the same path and so takes its place rather than doubling it.
+ */
+async function adoptNewChat(text: string): Promise<void> {
+	const title = titleFrom(text);
+	if (app.currentSessionPath === "" || title === "") return;
+	// Name it for real rather than leaning on the lister's fallback, which only
+	// ever shows the opening words: a stored name survives, and a chat opened
+	// with boilerplate (a skill's preamble) still reads as itself.
+	void call("setSessionName", title);
+	app.sessionName = title;
+	await refreshSessionRows();
+	if (app.sessionRows.some((row) => row.path === app.currentSessionPath)) return;
+	app.sessionRows = [
+		{
+			path: app.currentSessionPath,
+			id: app.currentSessionPath,
+			cwd: app.appInfo.cwd,
+			title,
+			preview: text.trim().slice(0, 120),
+			lastActive: Date.now(),
+			messageCount: 1,
+		},
+		...app.sessionRows,
+	];
+	bump();
+}
+
+/**
+ * A chat's name, from the message that started it.
+ *
+ * Kept to the first sentence and a whole word, so the sidebar reads as a list
+ * of subjects rather than of severed openings.
+ */
+function titleFrom(text: string): string {
+	const firstLine =
+		text
+			.trim()
+			.split("\n")
+			.find((line) => line.trim() !== "") ?? "";
+	// A slash command is how the chat was invoked, not what it is about.
+	const body = firstLine.replace(/^\/\S+\s*/, "").trim() || firstLine.trim();
+	const sentence = (body.split(/(?<=[.!?])\s/)[0] ?? body).replace(/\s+/g, " ").trim();
+	if (sentence.length <= 48) return sentence;
+	const cut = sentence.slice(0, 48);
+	const lastSpace = cut.lastIndexOf(" ");
+	return `${(lastSpace > 24 ? cut.slice(0, lastSpace) : cut).replace(/[,;:.]$/, "")}…`;
+}
+
+export async function clearQueued(): Promise<void> {
+	app.queuedMessages = [];
+	bump();
+	await call("clearQueue");
+}
+
+// ---------------------------------------------------------------------------
+// Sessions
+// ---------------------------------------------------------------------------
+
+/**
+ * Switching chats never interrupts a working agent: a busy session keeps its
+ * own agent process and finishes in the background (the main process runs a
+ * pool), the way the reference apps behave. Only the view moves.
+ */
+export async function switchToSession(path: string): Promise<void> {
+	if (path === app.currentSessionPath) return;
+	// Move the view first. The agent's own switch takes about a second and the
+	// transcript another half, so waiting for both before anything changes on
+	// screen reads as a hang rather than a load.
+	app.currentSessionPath = path;
+	app.chat.messages = [];
+	app.chat.usage = null;
+	bump();
+	// Render from the stored transcript first. Switching inside the agent takes
+	// seconds, and the same messages are already on disk; waiting for the agent
+	// before showing anything is what made opening a chat feel broken.
+	await loadStoredMessages(path);
+
+	const result = await call<{ cancelled: boolean }>("switchSession", path);
+	if (!result || result.cancelled) return;
+	// The agent is authoritative once it arrives: it knows about a turn still
+	// in flight, which the file cannot show.
+	await loadMessages();
+	void refreshState();
+}
+
+/** Fill the transcript from the session file, without troubling the agent. */
+async function loadStoredMessages(path: string): Promise<void> {
+	let stored: Record<string, unknown>[];
+	try {
+		stored = await api.sessionMessages(path);
+	} catch {
+		return;
+	}
+	// A later switch may have overtaken this read; it owns the view now.
+	if (app.currentSessionPath !== path || stored.length === 0) return;
+	const messages: typeof app.chat.messages = [];
+	for (const raw of stored) {
+		if (raw.role === "toolResult") {
+			attachToolResult(messages, raw);
+			continue;
+		}
+		const mapped = fromAgentMessage(raw);
+		if (mapped && mapped.blocks.length > 0) messages.push(mapped);
+	}
+	app.chat.messages = messages;
+	bump();
+}
+
+export async function newSession(): Promise<void> {
+	await call("newSession");
+	app.chat.messages = [];
+	app.chat.usage = null;
+	await refreshState();
+}
+
+export async function cycleSession(step: number): Promise<void> {
+	if (app.sessionRows.length === 0) return;
+	const current = app.sessionRows.findIndex((row) => row.path === app.currentSessionPath);
+	const next =
+		app.sessionRows[
+			(((current < 0 ? 0 : current + step) % app.sessionRows.length) + app.sessionRows.length) %
+				app.sessionRows.length
+		];
+	if (!next || next.path === app.currentSessionPath) return;
+	await switchToSession(next.path);
+}
+
+export async function renameSession(row: SessionRow): Promise<void> {
+	// Naming writes into the session itself, so it has to be the open one.
+	if (row.path !== app.currentSessionPath) await switchToSession(row.path);
+	const name = window.prompt("Name this chat", app.sessionName || row.title);
+	if (name?.trim()) {
+		await call("setSessionName", name.trim());
+		app.sessionName = name.trim();
+		await refreshState();
+	}
+}
+
+export async function forkSession(row: SessionRow): Promise<void> {
+	if (row.path !== app.currentSessionPath) await switchToSession(row.path);
+	const forked = await call<{ cancelled: boolean }>("clone");
+	if (forked && !forked.cancelled) {
+		await refreshState();
+		await loadMessages();
+	}
+}
+
+export function togglePinned(path: string): void {
+	if (app.pinned.has(path)) app.pinned.delete(path);
+	else app.pinned.add(path);
+	storePreference("smolt.pinned", [...app.pinned].join("\n"));
+	bump();
+}
+
+export function archiveSession(row: SessionRow): void {
+	app.archived.add(row.path);
+	storePreference("smolt.archived", [...app.archived].join("\n"));
+}
+
+export async function deleteSession(row: SessionRow): Promise<void> {
+	const sure = await requestConfirm({
+		title: "Delete session?",
+		message: `"${row.title}" will be permanently deleted. This can't be undone.`,
+		actionLabel: "Delete",
+		destructive: true,
+	});
+	if (!sure) return;
+	const result = await api.sessionDelete(row.path);
+	if (!result.ok) {
+		toast(result.error ?? "Could not delete that chat", "error");
+		return;
+	}
+	if (row.path === app.currentSessionPath) await call("newSession");
+	await refreshState();
+}
+
+/**
+ * Pick out every chat in a group, so one gesture can act on the lot.
+ *
+ * Selecting replaces rather than adds: a right-click on a second heading is
+ * far more likely to mean "that group instead" than "both groups".
+ */
+export function selectSessions(paths: string[]): void {
+	app.selectedSessions = new Set(paths);
+	bump();
+}
+
+export function clearSessionSelection(): void {
+	if (app.selectedSessions.size === 0) return;
+	app.selectedSessions = new Set();
+	bump();
+}
+
+/** Delete every selected chat, once. */
+export async function deleteSelectedSessions(): Promise<void> {
+	const paths = [...app.selectedSessions];
+	if (paths.length === 0) return;
+	const sure = await requestConfirm({
+		title: paths.length === 1 ? "Delete chat?" : `Delete ${paths.length} chats?`,
+		message:
+			paths.length === 1
+				? "This chat will be permanently deleted. This can't be undone."
+				: `${paths.length} chats will be permanently deleted. This can't be undone.`,
+		actionLabel: "Delete",
+		destructive: true,
+	});
+	if (!sure) return;
+	let deletedCurrent = false;
+	for (const path of paths) {
+		const result = await api.sessionDelete(path);
+		if (!result.ok) {
+			toast(result.error ?? "Could not delete that chat", "error");
+			continue;
+		}
+		if (path === app.currentSessionPath) deletedCurrent = true;
+	}
+	app.selectedSessions = new Set();
+	if (deletedCurrent) await call("newSession");
+	await refreshState();
+}
+
+export function toggleGroupCollapsed(label: string): void {
+	if (app.collapsedGroups.has(label)) app.collapsedGroups.delete(label);
+	else app.collapsedGroups.add(label);
+	storePreference("smolt.collapsed", [...app.collapsedGroups].join("\n"));
+	bump();
+}
+
+// ---------------------------------------------------------------------------
+// Model, effort, mode
+// ---------------------------------------------------------------------------
+
+/**
+ * Apply a model or effort choice.
+ *
+ * A user's pick persists through the agent into the shared settings.json —
+ * the same write the TUI's selector makes — so the desktop, the TUI, and the
+ * next launch of either all agree on the default. Nothing is kept in
+ * renderer storage except the "last used" ordering for the menu.
+ */
+export async function chooseModel(provider: string, id: string, remember = true): Promise<void> {
+	await call("setModel", provider, id, remember);
+	app.model = `${provider}/${id}`;
+	if (remember) rememberRecentModel(app.model);
+	app.availableThinking = (await call<string[]>("getAvailableThinkingLevels")) ?? [];
+	await refreshState();
+}
+
+export async function chooseThinking(level: string, remember = true): Promise<void> {
+	await call("setThinkingLevel", level, remember);
+	app.thinking = level;
+	bump();
+}
+
+export async function ensureModels(): Promise<void> {
+	if (app.availableModels.length === 0) {
+		app.availableModels = (await call<ModelOption[]>("getAvailableModels")) ?? [];
+		bump();
+	}
+}
+
+export async function ensureThinkingLevels(): Promise<void> {
+	if (app.availableThinking.length === 0) {
+		app.availableThinking = (await call<string[]>("getAvailableThinkingLevels")) ?? [];
+		bump();
+	}
+}
+
+export async function ensureCommands(): Promise<void> {
+	if (app.slashCommands.length === 0) {
+		app.slashCommands = (await call<SlashCommand[]>("getCommands")) ?? [];
+		bump();
+	}
+}
+
+/** Models picked in this app, most recent first, for the menu's top section. */
+export function recentModels(): string[] {
+	try {
+		const parsed: unknown = JSON.parse(storedPreference("smolt.recentModels", "[]"));
+		if (Array.isArray(parsed)) return parsed.filter((entry): entry is string => typeof entry === "string");
+	} catch {
+		// A malformed list is no list.
+	}
+	return [];
+}
+
+function rememberRecentModel(label: string): void {
+	const list = [label, ...recentModels().filter((entry) => entry !== label)].slice(0, 5);
+	storePreference("smolt.recentModels", JSON.stringify(list));
+}
+
+/** The permission modes the agent actually enforces, in escalating caution. */
+export const MODE_ITEMS: { id: string; label: string; hint: string; badge?: string }[] = [
+	{ id: "auto", label: "Auto", hint: "Edit files and run commands without asking", badge: "Default" },
+	{ id: "acceptEdits", label: "Accept edits", hint: "Apply file edits, ask before running commands" },
+	{ id: "manual", label: "Manual", hint: "Ask before every edit and command" },
+	{ id: "plan", label: "Plan", hint: "Investigate and propose, change nothing" },
+	{ id: "bypass", label: "Bypass", hint: "Skip every check, including destructive commands" },
+];
+
+export function modeLabel(id: string): string {
+	return MODE_ITEMS.find((item) => item.id === id)?.label ?? id;
+}
+
+export async function setPermissionMode(mode: string, remember = true): Promise<void> {
+	const result = await api.permissionMode(mode);
+	if (!result.ok) {
+		toast(result.error ?? "Could not change the permission mode", "error");
+		return;
+	}
+	app.permissionMode = String(result.value ?? mode);
+	if (remember) storePreference("smolt.mode", app.permissionMode);
+}
+
+// ---------------------------------------------------------------------------
+// Attachments
+// ---------------------------------------------------------------------------
+
+function readImageFile(file: File): Promise<Attachment | null> {
+	return new Promise((resolve) => {
+		if (!file.type.startsWith("image/")) return resolve(null);
+		const reader = new FileReader();
+		reader.onerror = () => resolve(null);
+		reader.onload = () => {
+			const url = String(reader.result ?? "");
+			const comma = url.indexOf(",");
+			if (comma < 0) return resolve(null);
+			resolve({
+				data: url.slice(comma + 1),
+				mimeType: file.type,
+				url,
+				name: file.name || "pasted image",
+			});
+		};
+		reader.readAsDataURL(file);
+	});
+}
+
+export async function addImageFiles(files: Iterable<File>): Promise<void> {
+	const added = await Promise.all([...files].map(readImageFile));
+	const usable = added.filter((item): item is Attachment => item !== null);
+	if (usable.length === 0) return;
+	app.attachments = [...app.attachments, ...usable].slice(0, 8);
+	bump();
+}
+
+export function removeAttachment(index: number): void {
+	app.attachments = app.attachments.filter((_, i) => i !== index);
+	bump();
+}
+
+// ---------------------------------------------------------------------------
+// Approvals
+// ---------------------------------------------------------------------------
+
+export async function answerApproval(answer: string): Promise<void> {
+	const request = app.pendingApprovals.shift();
+	if (!request) return;
+	bump();
+	const result = await api.permissionReply(request.id, answer);
+	if (!result.ok) toast(result.error ?? "Could not send that decision", "error");
+}
+
+// ---------------------------------------------------------------------------
+// Terminal
+// ---------------------------------------------------------------------------
+
+/** Commands run in this pane, walked with Up/Down like a shell. */
+export const terminalHistory: string[] = [];
+
+export async function runTerminalCommand(command: string): Promise<void> {
+	if (app.terminalBusy) return;
+	app.terminalBusy = true;
+	terminalHistory.push(command);
+	app.terminalLog = [...app.terminalLog, { kind: "cmd", text: command }];
+	bump();
+
+	// The agent runs it, so the command shares the session's shell state and
+	// working directory rather than a shell this window owns.
+	const result = await call<{ output: string; exitCode?: number; cancelled: boolean; truncated: boolean }>(
+		"bash",
+		command,
+	);
+	const entries: TerminalEntry[] = [];
+	if (result) {
+		if (result.output.trim() !== "") entries.push({ kind: "out", text: result.output });
+		if (result.cancelled) entries.push({ kind: "status", text: "cancelled", tone: "cancelled" });
+		else if (result.exitCode !== undefined && result.exitCode !== 0) {
+			entries.push({ kind: "status", text: `exit ${result.exitCode}`, tone: "fail" });
+		}
+		if (result.truncated) entries.push({ kind: "status", text: "output truncated", tone: "note" });
+	}
+	app.terminalLog = [...app.terminalLog, ...entries];
+	app.terminalBusy = false;
+	bump();
+}
+
+// ---------------------------------------------------------------------------
+// Side chat
+// ---------------------------------------------------------------------------
+
+/**
+ * Hand the side agent the main thread once, so it can answer questions about
+ * the work in progress. Sent as context in the first message rather than
+ * replayed as history, which would need the other agent's session format.
+ */
+function sideContext(): string {
+	if (app.sideSeeded) return "";
+	app.sideSeeded = true;
+	const transcript = app.chat.messages
+		.slice(-12)
+		.map((message) => {
+			const text = message.blocks
+				.filter((block) => block.kind === "text")
+				.map((block) => ("text" in block ? block.text : ""))
+				.join("\n")
+				.trim();
+			return text === "" ? "" : `${message.role === "user" ? "User" : "Assistant"}: ${text}`;
+		})
+		.filter(Boolean)
+		.join("\n\n");
+	if (transcript === "") return "";
+	return `Here is the conversation I am having in another thread, for context. Do not act on it unless I ask.\n\n<main_thread>\n${transcript}\n</main_thread>\n\nMy question: `;
+}
+
+export async function sendSideMessage(text: string): Promise<void> {
+	const prefix = sideContext();
+	const result = await api.sideCall("prompt", `${prefix}${text}`);
+	app.sideError = result.ok ? null : (result.error ?? "Side chat unavailable");
+	bump();
+}
+
+export async function resetSideChat(): Promise<void> {
+	await api.sideStop();
+	app.side.messages = [];
+	app.sideSeeded = false;
+	app.sideError = null;
+	bump();
+}
+
+// ---------------------------------------------------------------------------
+// Worktrees & session-wide actions
+// ---------------------------------------------------------------------------
+
+/** Restart the agent elsewhere and reload everything tied to its directory. */
+export async function afterWorktreeChange(): Promise<void> {
+	app.sessionRows = [];
+	app.chat.messages = [];
+	app.chat.usage = null;
+	await refreshState();
+	await loadMessages();
+	const info = await api.worktrees();
+	const value = (info.value ?? {}) as WorktreeInfo;
+	app.appInfo = { ...app.appInfo, cwd: value.activeCwd ?? app.appInfo.cwd };
+	bump();
+}
+
+export async function compactNow(): Promise<void> {
+	await call("compact");
+	await loadMessages();
+	await refreshContextUsage();
+}
+
+/**
+ * Rewind the conversation to just before one of its user messages, exactly as
+ * the TUI's double-escape does: the agent forks the session at that entry and
+ * hands the message text back, which lands in the composer for editing.
+ *
+ * The transcript's Nth user message is matched to the agent's forkable list
+ * by position, verified (and if need be recovered) by text, since the two
+ * views are assembled independently.
+ */
+export async function rewindToUserMessage(userIndex: number, currentText: string): Promise<void> {
+	if (app.chat.streaming) {
+		const sure = await requestConfirm({
+			title: "Stop this turn?",
+			message: "smolt is still working here. Rewinding stops the work in progress.",
+			actionLabel: "Rewind and stop",
+			destructive: true,
+		});
+		if (!sure) return;
+	}
+	const forkable = (await call<{ entryId: string; text: string }[]>("getForkMessages")) ?? [];
+	let target = forkable[userIndex];
+	if (!target || (currentText !== "" && target.text !== currentText)) {
+		target = forkable.filter((entry) => entry.text === currentText).at(-1) ?? target;
+	}
+	if (!target) {
+		toast("Could not find that message to rewind to.", "error");
+		return;
+	}
+	const result = await call<{ text: string; cancelled: boolean }>("fork", target.entryId);
+	if (!result || result.cancelled) return;
+	app.draft = result.text || currentText;
+	await refreshState();
+	await loadMessages();
+	document.querySelector<HTMLTextAreaElement>("textarea")?.focus();
+}
+
+/** True once this chat has actually run tools — the only work that changes files. */
+export function chatDidToolWork(): boolean {
+	return app.chat.messages.some(
+		(message) => message.role === "assistant" && message.blocks.some((block) => block.kind === "tool"),
+	);
+}
+
+// ---------------------------------------------------------------------------
+// Appearance
+// ---------------------------------------------------------------------------
+
+const systemPrefersLight = window.matchMedia("(prefers-color-scheme: light)");
+
+/**
+ * Stamp the chosen theme on the root element.
+ *
+ * "System" is resolved here rather than left to a media query: the stylesheet
+ * keeps a single definition per theme, and the native titlebar strip — which
+ * no stylesheet can reach — needs the resolved answer anyway.
+ */
+export function applyTheme(choice: ThemeChoice): void {
+	const resolved = choice === "system" ? (systemPrefersLight.matches ? "light" : "dark") : choice;
+	document.documentElement.setAttribute("data-theme", resolved);
+	app.themeChoice = choice;
+	storePreference("smolt.theme", choice);
+	void api.titlebar(resolved);
+	bump();
+}
+
+systemPrefersLight.addEventListener("change", () => {
+	if (storedPreference("smolt.theme", "system") === "system") applyTheme("system");
+});
+
+export function applySerif(on: boolean): void {
+	document.documentElement.classList.toggle("serif-prose", on);
+	app.serif = on;
+	storePreference("smolt.serif", on ? "1" : "0");
+	bump();
+}
+
+// ---------------------------------------------------------------------------
+// Panes and surfaces
+// ---------------------------------------------------------------------------
+
+export function toggleSidebar(): void {
+	app.sidebarHidden = !app.sidebarHidden;
+	bump();
+}
+
+export function toggleSessionSearch(force?: boolean): void {
+	const show = force ?? !app.sessionSearchOpen;
+	if (show && app.sidebarHidden) toggleSidebar();
+	app.sessionSearchOpen = show;
+	if (!show) app.sessionQuery = "";
+	bump();
+}
+
+export function toggleDiffPane(force?: boolean): void {
+	app.diffOpen = force ?? !app.diffOpen;
+	if (app.diffOpen) void refreshDiff();
+	bump();
+}
+
+export function toggleSidePane(force?: boolean): void {
+	app.sideOpen = force ?? !app.sideOpen;
+	bump();
+}
+
+export function toggleTerminalPane(force?: boolean): void {
+	app.terminalOpen = force ?? !app.terminalOpen;
+	bump();
+}
+
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+
+export function projectName(): string {
+	return app.appInfo.cwd.split(/[\\/]/).filter(Boolean).pop() ?? "";
+}
+
+async function applyRememberedSettings(): Promise<void> {
+	const savedMode = storedPreference("smolt.mode", "");
+	if (savedMode && savedMode !== app.permissionMode) await setPermissionMode(savedMode, false);
+	// The context ring needs the current model's window size from the start,
+	// not only after a menu has happened to fetch the model list.
+	await ensureModels();
+}
+
+export function boot(): void {
+	for (const [key, target] of [
+		["smolt.pinned", app.pinned],
+		["smolt.archived", app.archived],
+		["smolt.collapsed", app.collapsedGroups],
+	] as const) {
+		for (const value of storedPreference(key, "").split("\n")) {
+			if (value.trim() !== "") target.add(value);
+		}
+	}
+	applyTheme(storedPreference("smolt.theme", "system") as ThemeChoice);
+	applySerif(storedPreference("smolt.serif", "0") === "1");
+
+	api.onEvent((event) => {
+		const raw = event as { type?: string; id?: string; method?: string };
+		if (raw.type === "extension_ui_request" && typeof raw.id === "string" && typeof raw.method === "string") {
+			handleExtensionUiRequest(raw as Parameters<typeof handleExtensionUiRequest>[0]);
+			return;
+		}
+		if (raw.type === "session_replaced") {
+			// The agent switched sessions on its own (e.g. a Telegram message
+			// opened its own chat): reset the transcript and follow it.
+			app.chat = initialState();
+			void refreshState();
+			void loadMessages();
+			bump();
+			return;
+		}
+		// The first turn is what promotes a scratch chat into a stored one: the
+		// agent writes its session file as the turn opens, so this is the moment
+		// the sidebar can show it rather than waiting for the turn to finish.
+		if (raw.type === "agent_start" && app.chat.messages.length === 0) void refreshSessionRows();
+		reduce(app.chat, event);
+		syncRunStart();
+		bump();
+		const type = (event as { type?: string }).type;
+		if (type === "agent_settled") {
+			// Whatever was waiting has been delivered by the time a turn settles.
+			app.queuedMessages = [];
+			void refreshState();
+			// The turn probably touched files, so refresh the diff either way:
+			// the composer's repository bar reads it even when the pane is shut.
+			void refreshDiff();
+		}
+	});
+
+	api.onSideEvent((event) => {
+		reduce(app.side, event);
+		bump();
+	});
+
+	// Optional-called: during development the window can reload onto a newer
+	// renderer than the preload it booted with, and a missing bridge method
+	// must degrade to a missing feature, not a dead app.
+	api.onBusySessions?.((paths) => {
+		app.busySessions = new Set(paths.filter((path) => path !== ""));
+		bump();
+	});
+
+	api.onBackgroundSettled?.(() => {
+		// A chat finished while another was on screen; its title, preview and
+		// dot in the sidebar all want refreshing.
+		void refreshState();
+	});
+
+	let initialLoadDone = false;
+	const initialLoad = async (): Promise<void> => {
+		if (initialLoadDone) return;
+		initialLoadDone = true;
+		await refreshState();
+		// The agent starts on its own defaults; put back what was chosen last.
+		await applyRememberedSettings();
+		const info = await api.info();
+		app.canTranscribe = info.canTranscribe === true;
+		app.appInfo = { cwd: info.cwd ?? "", version: info.version ?? "", hasProject: info.hasProject === true };
+		await refreshRecentProjects();
+		const mode = await api.permissionMode();
+		if (mode.ok) app.permissionMode = String(mode.value ?? "auto");
+		if (info.continueLatest && app.sessionRows.length > 0 && app.chat.messages.length === 0) {
+			const result = await call<{ cancelled: boolean }>("switchSession", app.sessionRows[0]!.path);
+			if (result && !result.cancelled) await refreshState();
+		}
+		await loadMessages();
+		bump();
+	};
+
+	// The window menu lives in the main process; its items arrive as commands.
+	api.onMenuCommand((command) => {
+		if (command === "new-session") void newSession();
+		else if (command === "open-folder") void pickProject();
+		else if (command === "settings") {
+			app.settingsOpen = true;
+			bump();
+		} else if (command === "shortcuts") {
+			app.shortcutsOpen = true;
+			bump();
+		}
+	});
+
+	api.onStarted((status) => {
+		reportAgentError(status.error);
+		if (status.running) void initialLoad();
+		bump();
+	});
+
+	// The agent may already be running before our listener registered.
+	const pollStarted = setInterval(() => {
+		if (initialLoadDone) {
+			clearInterval(pollStarted);
+			return;
+		}
+		void api.status().then((status) => {
+			reportAgentError(status.error);
+			if (status.running) void initialLoad();
+			bump();
+		});
+	}, 300);
+
+	// Anything that arrived before this listener existed.
+	void api.pendingApprovals().then((waiting) => {
+		for (const raw of waiting ?? []) {
+			const request = raw as PermissionRequest;
+			if (request?.id && !app.pendingApprovals.some((pending) => pending.id === request.id)) {
+				app.pendingApprovals.push(request);
+			}
+		}
+		bump();
+	});
+	api.onPermissionRequest((raw) => {
+		const request = raw as PermissionRequest;
+		if (!request?.id || app.pendingApprovals.some((pending) => pending.id === request.id)) return;
+		app.pendingApprovals.push(request);
+		bump();
+	});
+}

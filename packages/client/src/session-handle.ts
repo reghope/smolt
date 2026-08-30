@@ -1,11 +1,4 @@
-import type {
-	Command,
-	ModelRef,
-	ResultForCommand,
-	ServerEvent,
-	SessionSnapshot,
-	ThinkingLevel,
-} from "@smolt/protocol";
+import type { Command, ModelRef, ResultForCommand, ServerEvent, SessionSnapshot, ThinkingLevel } from "@smolt/protocol";
 import type { Unsubscribe } from "./types.ts";
 
 type SessionCommand = Extract<Command, { sessionId: string }>;

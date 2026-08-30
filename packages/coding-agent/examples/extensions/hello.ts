@@ -3,7 +3,7 @@
  */
 
 import { Type } from "@smolt/ai";
-import { defineTool, type ExtensionAPI } from "@smolt/coding-agent";
+import { defineTool, type ExtensionAPI } from "smolt";
 
 const helloTool = defineTool({
 	name: "hello",

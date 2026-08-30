@@ -168,7 +168,7 @@ If no `smolt` manifest is present, smolt auto-discovers resources from these dir
 
 Third party runtime dependencies belong in `dependencies` in `package.json`. Dependencies that do not register extensions, skills, prompt templates, or themes also belong in `dependencies`. When smolt installs a package from npm or git, it runs `npm install`, so those dependencies are installed automatically.
 
-Smolt bundles core packages for extensions and skills. If you import any of these, list them in `peerDependencies` with a `"*"` range and do not bundle them: `@smolt/ai`, `@smolt/agent-core`, `@smolt/coding-agent`, `@smolt/tui`, `typebox`.
+Smolt bundles core packages for extensions and skills. If you import any of these, list them in `peerDependencies` with a `"*"` range and do not bundle them: `@smolt/ai`, `@smolt/agent-core`, `smolt`, `@smolt/tui`, `typebox`.
 
 Other smolt packages must be bundled in your tarball. Add them to `dependencies` and `bundledDependencies`, then reference their resources through `node_modules/` paths. Smolt loads packages with separate module roots, so separate installs do not collide or share modules.
 

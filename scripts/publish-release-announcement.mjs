@@ -9,7 +9,7 @@ import { getPublicWorkspacePackages } from "./release-packages.mjs";
 
 const RELEASES_PREFIX = "releases/v1";
 const INSTALLER_PREFIX = "installer/v1";
-const INSTALLER_PACKAGE_NAME = "@smolt/coding-agent-install";
+const INSTALLER_PACKAGE_NAME = "smolt-install";
 const REGISTRY_URL = "https://registry.npmjs.org";
 const RETRY_DELAY_MS = 5000;
 const RETRY_TIMEOUT_MS = 10 * 60 * 1000;
@@ -233,7 +233,7 @@ function validateInstallerArtifacts(packageJsonPath, packageLockPath, version) {
 		packageLock.lockfileVersion !== 3 ||
 		packageLock.version !== version ||
 		root?.version !== version ||
-		root.dependencies?.["@smolt/coding-agent"] !== version
+		root.dependencies?.["smolt"] !== version
 	) {
 		throw new Error(`Installer package-lock.json must describe Smolt ${version}`);
 	}

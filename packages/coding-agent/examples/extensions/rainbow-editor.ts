@@ -4,7 +4,7 @@
  * Usage: smolt --extension ./examples/extensions/rainbow-editor.ts
  */
 
-import { CustomEditor, type ExtensionAPI } from "@smolt/coding-agent";
+import { CustomEditor, type ExtensionAPI } from "smolt";
 
 // Base colors (coral → yellow → green → teal → blue → purple → pink)
 const COLORS: [number, number, number][] = [

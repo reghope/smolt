@@ -67,7 +67,10 @@ export function getRadiusModelsFromConfig(providerId: string, config: RadiusGate
 	}));
 }
 
-export function getRadiusModels(providerId: string, credential: OAuthCredential | undefined): Model<"smolt-messages">[] {
+export function getRadiusModels(
+	providerId: string,
+	credential: OAuthCredential | undefined,
+): Model<"smolt-messages">[] {
 	const config = getRadiusCredentialConfig(credential);
 	return config ? getRadiusModelsFromConfig(providerId, config) : [];
 }

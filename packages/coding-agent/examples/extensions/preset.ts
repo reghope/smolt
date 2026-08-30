@@ -41,9 +41,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Api, Model } from "@smolt/ai";
-import type { ExtensionAPI, ExtensionContext } from "@smolt/coding-agent";
-import { CONFIG_DIR_NAME, DynamicBorder, getAgentDir } from "@smolt/coding-agent";
 import { Container, Key, type SelectItem, SelectList, Text } from "@smolt/tui";
+import type { ExtensionAPI, ExtensionContext } from "smolt";
+import { CONFIG_DIR_NAME, DynamicBorder, getAgentDir } from "smolt";
 
 // Preset configuration
 interface Preset {

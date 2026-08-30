@@ -7,7 +7,7 @@
  * Usage: smolt -e ./model-status.ts
  */
 
-import type { ExtensionAPI } from "@smolt/coding-agent";
+import type { ExtensionAPI } from "smolt";
 
 export default function (smolt: ExtensionAPI) {
 	smolt.on("model_select", async (event, ctx) => {

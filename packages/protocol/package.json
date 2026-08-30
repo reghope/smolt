@@ -1,6 +1,6 @@
 {
 	"name": "@smolt/protocol",
-	"version": "0.84.3",
+	"version": "0.1.0",
 	"description": "Transport-neutral CBOR protocol for remote smolt sessions",
 	"type": "module",
 	"main": "./dist/index.js",

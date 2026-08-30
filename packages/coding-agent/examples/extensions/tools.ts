@@ -9,9 +9,9 @@
  * 2. Use /tools to open the tool selector
  */
 
-import type { ExtensionAPI, ExtensionContext, ToolInfo } from "@smolt/coding-agent";
-import { getSettingsListTheme } from "@smolt/coding-agent";
 import { Container, type SettingItem, SettingsList } from "@smolt/tui";
+import type { ExtensionAPI, ExtensionContext, ToolInfo } from "smolt";
+import { getSettingsListTheme } from "smolt";
 
 // State persisted to session
 interface ToolsState {

@@ -13,7 +13,7 @@
  * Try it in a project containing .smolt, AGENTS.md/CLAUDE.md, or .agents/skills.
  */
 
-import type { ExtensionAPI, ProjectTrustEventResult } from "@smolt/coding-agent";
+import type { ExtensionAPI, ProjectTrustEventResult } from "smolt";
 
 export default function (smolt: ExtensionAPI) {
 	let loadCount = 0;

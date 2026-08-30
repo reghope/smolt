@@ -4,7 +4,7 @@
  * Shows how to select a specific model and thinking level.
  */
 
-import { createAgentSession, ModelRuntime } from "@smolt/coding-agent";
+import { createAgentSession, ModelRuntime } from "smolt";
 
 const modelRuntime = await ModelRuntime.create();
 

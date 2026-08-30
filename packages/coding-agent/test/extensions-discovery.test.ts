@@ -55,7 +55,7 @@ describe("extensions discovery", () => {
 		fs.writeFileSync(
 			path.join(extensionsDir, "coding-agent-import.ts"),
 			`
-				import { getAgentDir } from "@smolt/coding-agent";
+				import { getAgentDir } from "smolt";
 				void getAgentDir;
 				export default function(smolt) {
 					smolt.registerCommand("test", { handler: async () => {} });

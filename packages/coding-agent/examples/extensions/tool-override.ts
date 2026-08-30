@@ -21,10 +21,10 @@
  */
 
 import type { TextContent } from "@smolt/ai";
-import { type ExtensionAPI, getAgentDir, withFileMutationQueue } from "@smolt/coding-agent";
 import { constants, readFileSync } from "fs";
 import { access, appendFile, readFile } from "fs/promises";
 import { join, resolve } from "path";
+import { type ExtensionAPI, getAgentDir, withFileMutationQueue } from "smolt";
 import { Type } from "typebox";
 
 const LOG_FILE = join(getAgentDir(), "read-access.log");

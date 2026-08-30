@@ -1,11 +1,6 @@
-import {
-	CustomEditor,
-	type ExtensionAPI,
-	type ExtensionContext,
-	type KeybindingsManager,
-} from "@smolt/coding-agent";
 import type { Component, EditorTheme, TUI } from "@smolt/tui";
 import { truncateToWidth, visibleWidth } from "@smolt/tui";
+import { CustomEditor, type ExtensionAPI, type ExtensionContext, type KeybindingsManager } from "smolt";
 
 function fitBorder(
 	left: string,

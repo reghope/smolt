@@ -1,7 +1,7 @@
 {
-	"name": "@smolt/coding-agent",
-	"version": "0.84.3",
-	"description": "Smolt - a coding agent CLI forked from Smolt, with read, bash, edit, write tools and session management",
+	"name": "smolt",
+	"version": "0.1.0",
+	"description": "smolt - a coding agent that keeps what it learns: curated memory, self-authored skills, and session recall. Forked from the Pi agent harness.",
 	"type": "module",
 	"smoltConfig": {
 		"name": "smolt",
@@ -45,11 +45,11 @@
 		"prepublishOnly": "npm run clean && npm run build && npm run shrinkwrap"
 	},
 	"dependencies": {
-		"@smolt/agent-core": "^0.84.3",
-		"@smolt/ai": "^0.84.3",
-		"@smolt/client": "^0.84.3",
-		"@smolt/protocol": "^0.84.3",
-		"@smolt/tui": "^0.84.3",
+		"@smolt/agent-core": "^0.1.0",
+		"@smolt/ai": "^0.1.0",
+		"@smolt/client": "^0.1.0",
+		"@smolt/protocol": "^0.1.0",
+		"@smolt/tui": "^0.1.0",
 		"@silvia-odwyer/photon-node": "0.3.4",
 		"chalk": "5.6.2",
 		"cross-spawn": "7.0.6",
@@ -94,14 +94,16 @@
 		"tui",
 		"agent"
 	],
-	"author": "Mario Zechner",
+	"author": "reghope",
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/earendil-works/pi.git",
+		"url": "git+https://github.com/reghope/smolt.git",
 		"directory": "packages/coding-agent"
 	},
 	"engines": {
 		"node": ">=22.19.0"
-	}
+	},
+	"homepage": "https://github.com/reghope/smolt",
+	"bugs": "https://github.com/reghope/smolt/issues"
 }

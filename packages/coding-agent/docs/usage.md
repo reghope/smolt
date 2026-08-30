@@ -138,7 +138,7 @@ Use `/export [file]` to write a session to HTML.
 
 Use `/share` to upload a private GitHub gist with a shareable HTML link.
 
-If you use smolt for open source work and want to publish sessions for model, prompt, tool, and evaluation research, see [`badlogic/smolt-share-hf`](https://github.com/badlogic/smolt-share-hf). It publishes sessions to Hugging Face datasets.
+If you use smolt for open source work and want to publish sessions for model, prompt, tool, and evaluation research, see [`badlogic/pi-share-hf`](https://github.com/badlogic/pi-share-hf). It publishes sessions to Hugging Face datasets.
 
 ## CLI Reference
 

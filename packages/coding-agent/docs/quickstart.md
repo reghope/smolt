@@ -7,7 +7,7 @@ This page gets you from install to a useful first smolt session.
 Smolt is distributed as an npm package:
 
 ```bash
-npm install -g --ignore-scripts @smolt/coding-agent
+npm install -g --ignore-scripts smolt
 ```
 
 `--ignore-scripts` disables dependency lifecycle scripts during install. Smolt does not require install scripts for normal npm installs.
@@ -18,16 +18,16 @@ Use the package manager that installed smolt. The curl installer uses npm global
 
 ```bash
 # curl installer or npm install -g
-npm uninstall -g @smolt/coding-agent
+npm uninstall -g smolt
 
 # pnpm
-pnpm remove -g @smolt/coding-agent
+pnpm remove -g smolt
 
 # Yarn
-yarn global remove @smolt/coding-agent
+yarn global remove smolt
 
 # Bun
-bun uninstall -g @smolt/coding-agent
+bun uninstall -g smolt
 ```
 
 Uninstalling smolt leaves settings, credentials, sessions, and installed smolt packages in `~/.smolt/agent/`.

@@ -61,8 +61,8 @@ const ExtensionAuthoringJudge = createJudge<PiCodingAgentInput, ExtensionAuthori
 				output.extensionSource.matchAll(/\b(?:from|import)\s+["']([^"']+)["']/g),
 				(match) => match[1],
 			);
-			if (!imports.includes("@smolt/coding-agent")) {
-				failures.push("extension does not import the canonical @smolt/coding-agent package");
+			if (!imports.includes("smolt")) {
+				failures.push("extension does not import the canonical smolt package");
 			}
 			if (imports.some((specifier) => specifier.startsWith("@mariozechner/"))) {
 				failures.push("extension imports a legacy @mariozechner package");

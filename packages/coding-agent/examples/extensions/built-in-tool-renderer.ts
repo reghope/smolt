@@ -25,9 +25,9 @@
  *   smolt -e ./built-in-tool-renderer.ts
  */
 
-import type { BashToolDetails, EditToolDetails, ExtensionAPI, ReadToolDetails } from "@smolt/coding-agent";
-import { createBashTool, createEditTool, createReadTool, createWriteTool } from "@smolt/coding-agent";
 import { Text } from "@smolt/tui";
+import type { BashToolDetails, EditToolDetails, ExtensionAPI, ReadToolDetails } from "smolt";
+import { createBashTool, createEditTool, createReadTool, createWriteTool } from "smolt";
 
 export default function (smolt: ExtensionAPI) {
 	const cwd = process.cwd();

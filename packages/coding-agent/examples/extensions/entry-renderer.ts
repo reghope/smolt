@@ -8,8 +8,8 @@
  * Usage: /status-card [message]
  */
 
-import type { ExtensionAPI } from "@smolt/coding-agent";
 import { Box, Text } from "@smolt/tui";
+import type { ExtensionAPI } from "smolt";
 
 interface StatusCardData {
 	message: string;

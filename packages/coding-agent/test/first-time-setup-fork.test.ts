@@ -14,22 +14,22 @@ vi.mock("../src/config.ts", async (importOriginal) => {
 import { shouldRunFirstTimeSetup } from "../src/cli/startup-ui.ts";
 
 describe("shouldRunFirstTimeSetup in forked distributions", () => {
-	const originalSmoltExperimental = process.env.PI_EXPERIMENTAL;
+	const originalSmoltExperimental = process.env.SMOLT_EXPERIMENTAL;
 	let tempDir: string;
 	let settingsPath: string;
 
 	beforeEach(() => {
 		tempDir = mkdtempSync(join(tmpdir(), "smolt-first-time-setup-fork-"));
 		settingsPath = join(tempDir, "settings.json");
-		process.env.PI_EXPERIMENTAL = "1";
+		process.env.SMOLT_EXPERIMENTAL = "1";
 	});
 
 	afterEach(() => {
 		rmSync(tempDir, { recursive: true, force: true });
 		if (originalSmoltExperimental === undefined) {
-			delete process.env.PI_EXPERIMENTAL;
+			delete process.env.SMOLT_EXPERIMENTAL;
 		} else {
-			process.env.PI_EXPERIMENTAL = originalSmoltExperimental;
+			process.env.SMOLT_EXPERIMENTAL = originalSmoltExperimental;
 		}
 	});
 

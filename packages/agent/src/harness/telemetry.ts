@@ -354,7 +354,12 @@ export const HARNESS_TELEMETRY_SCHEMA = {
 			description: "One durable retry attempt",
 			parents: {
 				kind: "spans",
-				spans: ["smolt.harness.turn", "smolt.harness.checkpoint", "smolt.harness.compaction", "smolt.harness.navigation"],
+				spans: [
+					"smolt.harness.turn",
+					"smolt.harness.checkpoint",
+					"smolt.harness.compaction",
+					"smolt.harness.navigation",
+				],
 			},
 			startAttributes: {
 				"smolt.lane.name": {

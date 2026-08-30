@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@smolt/coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "smolt";
 
 const COMPACT_THRESHOLD_TOKENS = 100_000;
 

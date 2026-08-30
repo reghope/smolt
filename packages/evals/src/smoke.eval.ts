@@ -10,8 +10,8 @@ describeEval("Smolt Coding Agent smoke", { harness: smoltCodingAgentHarness }, (
 
 		expect(result.output.trim()).toBe("Paris");
 		expect(result.errors).toEqual([]);
-		expect(result.usage.provider).toBe(process.env.PI_PROVIDER);
-		expect(result.usage.model).toBe(process.env.PI_MODEL);
+		expect(result.usage.provider).toBe(process.env.SMOLT_PROVIDER);
+		expect(result.usage.model).toBe(process.env.SMOLT_MODEL);
 		expect(result.usage.totalTokens).toBeGreaterThan(0);
 	});
 });

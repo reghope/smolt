@@ -1,0 +1,307 @@
+/* smolt desktop — shadcn/Tailwind theme carrying the site's palette. */
+
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@theme inline {
+	--color-background: var(--background);
+	--color-foreground: var(--foreground);
+	--color-card: var(--card);
+	--color-card-foreground: var(--card-foreground);
+	--color-popover: var(--popover);
+	--color-popover-foreground: var(--popover-foreground);
+	--color-primary: var(--primary);
+	--color-primary-foreground: var(--primary-foreground);
+	--color-secondary: var(--secondary);
+	--color-secondary-foreground: var(--secondary-foreground);
+	--color-muted: var(--muted);
+	--color-muted-foreground: var(--muted-foreground);
+	--color-accent: var(--accent);
+	--color-accent-foreground: var(--accent-foreground);
+	--color-destructive: var(--destructive);
+	--color-destructive-foreground: var(--destructive-foreground);
+	--color-border: var(--border);
+	--color-input: var(--input);
+	--color-ring: var(--ring);
+	--color-ok: var(--ok);
+	--color-warn: var(--warn);
+	--color-salmon: var(--salmon);
+	--color-salmon-text: var(--salmon-text);
+	--color-faint: var(--faint);
+	--radius-sm: calc(var(--radius) - 4px);
+	--radius-md: calc(var(--radius) - 2px);
+	--radius-lg: var(--radius);
+	--radius-xl: calc(var(--radius) + 4px);
+	--font-sans: -apple-system, "Segoe UI", "Inter", system-ui, sans-serif;
+	--font-serif: ui-serif, Georgia, Cambria, serif;
+	--font-mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
+}
+
+/* Charcoal ground with the site's salmon as primary; #FA8072 is the one value
+   that does not move between themes. */
+:root {
+	color-scheme: dark;
+	--background: #0a0b0e;
+	--background-deep: #050608;
+	--foreground: #eceef2;
+	--card: #111317;
+	--card-foreground: #eceef2;
+	--popover: #111317;
+	--popover-foreground: #eceef2;
+	--primary: #fa8072;
+	--primary-foreground: #1a1614;
+	--secondary: #11161f;
+	--secondary-foreground: #eceef2;
+	--muted: #171a21;
+	--muted-foreground: #aeb4bd;
+	--accent: #1b1f27;
+	--accent-foreground: #eceef2;
+	--destructive: #ef8368;
+	--destructive-foreground: #1a1614;
+	--border: #30363f;
+	--border-strong: #454d59;
+	--input: #454d59;
+	--ring: rgba(250, 128, 114, 0.5);
+	--ok: #8fae84;
+	--warn: #d6a35c;
+	--salmon: #fa8072;
+	--salmon-text: #ff9385;
+	--faint: #8d939c;
+	--radius: 0.5rem;
+	--shadow-rgb: 0, 0, 0;
+}
+
+[data-theme="light"] {
+	color-scheme: light;
+	--background: #fffdfc;
+	--background-deep: #fdf8f6;
+	--foreground: #1a1614;
+	--card: #fdf8f6;
+	--card-foreground: #1a1614;
+	--popover: #fffdfc;
+	--popover-foreground: #1a1614;
+	--primary: #fa8072;
+	--primary-foreground: #1a1614;
+	--secondary: #f4efec;
+	--secondary-foreground: #1a1614;
+	--muted: #f4efec;
+	--muted-foreground: #635956;
+	--accent: #f4ece8;
+	--accent-foreground: #1a1614;
+	--destructive: #be4438;
+	--destructive-foreground: #fffdfc;
+	--border: #f2e7e3;
+	--border-strong: #e6d6d1;
+	--input: #e6d6d1;
+	--ring: rgba(190, 68, 56, 0.45);
+	--ok: #4f7a44;
+	--warn: #9c6b1f;
+	--salmon: #fa8072;
+	--salmon-text: #be4438;
+	--faint: #7a6d69;
+	--shadow-rgb: 26, 22, 20;
+}
+
+@layer base {
+	* {
+		border-color: var(--border);
+	}
+	/* No focus rings: the hover and border treatments carry focus instead. */
+	*:focus-visible {
+		outline: none;
+	}
+	html,
+	body,
+	#root {
+		height: 100%;
+	}
+	body {
+		background: var(--background);
+		color: var(--foreground);
+		font-family: var(--font-sans);
+		font-size: 14px;
+		line-height: 1.55;
+		overflow: hidden;
+		-webkit-font-smoothing: antialiased;
+		text-rendering: optimizeLegibility;
+	}
+	::selection {
+		background: rgba(250, 128, 114, 0.32);
+		color: var(--foreground);
+	}
+	button {
+		cursor: pointer;
+	}
+	button:disabled {
+		cursor: default;
+	}
+
+	::-webkit-scrollbar {
+		width: 12px;
+		height: 12px;
+	}
+	::-webkit-scrollbar-thumb {
+		background: var(--border);
+		border-radius: 999px;
+		border: 3px solid transparent;
+		background-clip: padding-box;
+	}
+	::-webkit-scrollbar-thumb:hover {
+		background: var(--faint);
+		background-clip: padding-box;
+	}
+	::-webkit-scrollbar-track {
+		background: none;
+	}
+	::-webkit-scrollbar-corner {
+		background: transparent;
+	}
+}
+
+/* Serif responses, opt-in from Appearance. */
+.serif-prose .prose-response {
+	font-family: var(--font-serif);
+	font-size: 16px;
+	line-height: 1.68;
+}
+
+/* The titlebar is the window's drag surface; its controls opt back out. */
+.app-drag {
+	-webkit-app-region: drag;
+}
+.app-no-drag {
+	-webkit-app-region: no-drag;
+}
+
+/* Markdown, rendered by the in-house renderer into these hooks. */
+.md {
+	overflow-wrap: anywhere;
+	user-select: text;
+}
+.md p {
+	margin: 0 0 12px;
+}
+.md p:last-child {
+	margin-bottom: 0;
+}
+.md h1,
+.md h2,
+.md h3,
+.md h4,
+.md h5,
+.md h6 {
+	margin: 20px 0 8px;
+	font-size: 14px;
+	font-weight: 600;
+	letter-spacing: -0.005em;
+}
+.md h1:first-child,
+.md h2:first-child,
+.md h3:first-child {
+	margin-top: 0;
+}
+.md ul,
+.md ol {
+	margin: 0 0 12px 22px;
+}
+.md ul {
+	list-style: disc;
+}
+.md ol {
+	list-style: decimal;
+}
+.md li {
+	margin-bottom: 5px;
+}
+.md li::marker {
+	color: var(--faint);
+}
+.md blockquote {
+	border-left: 2px solid var(--border-strong);
+	padding-left: 14px;
+	color: var(--muted-foreground);
+	margin-bottom: 12px;
+}
+.md code {
+	font-family: var(--font-mono);
+	font-size: 13px;
+	background: color-mix(in srgb, var(--foreground) 7%, transparent);
+	border-radius: var(--radius-md);
+	padding: 1.5px 5px;
+}
+.md pre {
+	position: relative;
+	background: var(--background-deep);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	padding: 12px 14px;
+	overflow-x: auto;
+	margin: 4px 0 12px;
+}
+.md pre code {
+	background: none;
+	padding: 0;
+	font-size: 13px;
+	line-height: 1.55;
+}
+.md a {
+	color: var(--salmon-text);
+	text-decoration: none;
+}
+.md a:hover {
+	text-decoration: underline;
+}
+.md hr {
+	border: none;
+	border-top: 1px solid var(--border);
+	margin: 16px 0;
+}
+.md table {
+	display: block;
+	width: fit-content;
+	max-width: 100%;
+	overflow-x: auto;
+	border-collapse: collapse;
+	margin: 0 0 12px;
+}
+.md th,
+.md td {
+	border: 1px solid var(--border);
+	padding: 5px 10px;
+	text-align: left;
+	white-space: nowrap;
+}
+.md th {
+	color: var(--muted-foreground);
+	font-weight: 600;
+}
+.md img {
+	max-width: 100%;
+	height: auto;
+	border-radius: var(--radius-lg);
+	margin: 4px 0 12px;
+}
+
+@keyframes pulse-soft {
+	0%,
+	100% {
+		opacity: 0.25;
+	}
+	50% {
+		opacity: 1;
+	}
+}
+.animate-pulse-soft {
+	animation: pulse-soft 1.3s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.001ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.001ms !important;
+		scroll-behavior: auto !important;
+	}
+}

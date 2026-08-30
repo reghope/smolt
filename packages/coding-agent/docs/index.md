@@ -7,7 +7,7 @@ Smolt is a minimal terminal coding harness. It is designed to stay small at the 
 Install Smolt with npm:
 
 ```bash
-npm install -g --ignore-scripts @smolt/coding-agent
+npm install -g --ignore-scripts smolt
 ```
 
 `--ignore-scripts` disables dependency lifecycle scripts during install. Smolt does not require install scripts for normal npm installs.
@@ -21,10 +21,10 @@ curl -fsSL https://pi.dev/install.sh | sh
 To uninstall smolt itself, use npm for curl and npm installs:
 
 ```bash
-npm uninstall -g @smolt/coding-agent
+npm uninstall -g smolt
 ```
 
-For pnpm, Yarn, or Bun installs, use the matching global remove command: `pnpm remove -g @smolt/coding-agent`, `yarn global remove @smolt/coding-agent`, or `bun uninstall -g @smolt/coding-agent`.
+For pnpm, Yarn, or Bun installs, use the matching global remove command: `pnpm remove -g smolt`, `yarn global remove smolt`, or `bun uninstall -g smolt`.
 
 Then run it in a project directory:
 

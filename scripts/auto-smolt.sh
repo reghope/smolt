@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Developer wrapper that runs smolt from this checkout's latest `npm run build`.
-# Development invocations use PI_EXPERIMENTAL=1 by default. Pass --stable to use
+# Development invocations use SMOLT_EXPERIMENTAL=1 by default. Pass --stable to use
 # the next smolt executable on PATH; `smolt update` also uses stable so self-update
 # works.
 #
@@ -71,5 +71,5 @@ if [[ ! -x "$dev_smolt" ]]; then
 	exit 1
 fi
 
-export PI_EXPERIMENTAL="${PI_EXPERIMENTAL:-1}"
+export SMOLT_EXPERIMENTAL="${SMOLT_EXPERIMENTAL:-1}"
 exec "$dev_smolt" ${args[@]+"${args[@]}"}

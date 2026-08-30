@@ -1,6 +1,6 @@
 import type { AgentTool } from "@smolt/agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@smolt/ai";
-import type { ExtensionAPI } from "@smolt/coding-agent";
+import type { ExtensionAPI } from "smolt";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.ts";

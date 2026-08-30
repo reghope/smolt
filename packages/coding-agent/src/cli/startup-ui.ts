@@ -1,10 +1,4 @@
-import {
-	ProcessTerminal,
-	setCapabilityOverrides,
-	setKeybindings,
-	type TUI,
-	TuiMainScreen,
-} from "@smolt/tui";
+import { ProcessTerminal, setCapabilityOverrides, setKeybindings, type TUI, TuiMainScreen } from "@smolt/tui";
 import { existsSync } from "fs";
 import { APP_NAME, CONFIG_DIR_NAME, ENV_AGENT_DIR, getAgentDir, getSettingsPath, PACKAGE_NAME } from "../config.ts";
 import { areExperimentalFeaturesEnabled } from "../core/experimental.ts";
@@ -29,7 +23,7 @@ import {
 	type Theme,
 } from "../modes/interactive/theme/theme.ts";
 
-const OFFICIAL_PACKAGE_NAME = "@smolt/coding-agent";
+const OFFICIAL_PACKAGE_NAME = "smolt";
 const OFFICIAL_APP_NAME = "smolt";
 const OFFICIAL_CONFIG_DIR_NAME = ".smolt";
 
@@ -115,7 +109,7 @@ async function clearStartupTui(ui: TUI): Promise<void> {
 /**
  * First-time setup runs when all of these hold:
  * - this is the official Smolt distribution (not a fork/rebrand)
- * - experimental features are enabled (PI_EXPERIMENTAL=1)
+ * - experimental features are enabled (SMOLT_EXPERIMENTAL=1)
  * - the default agent directory is used (no custom agent dir override)
  * - setup was not completed before (settings.json does not exist)
  */

@@ -7,7 +7,7 @@
  * Usage: /emit [event-name] [data] - emit an event on the bus
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@smolt/coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "smolt";
 
 export default function (smolt: ExtensionAPI) {
 	// Store ctx for use in event handler

@@ -1,10 +1,4 @@
-import type {
-	FileError,
-	Result,
-	SessionSearch,
-	SessionSearchHit,
-	SessionSearchOptions,
-} from "@smolt/agent-core";
+import type { FileError, Result, SessionSearch, SessionSearchHit, SessionSearchOptions } from "@smolt/agent-core";
 import { SessionError } from "@smolt/agent-core";
 import { applyMigrations } from "./migrations.ts";
 import { sql } from "./sql.ts";

@@ -14,8 +14,8 @@
 
 import type { AgentMessage } from "@smolt/agent-core";
 import type { AssistantMessage, TextContent } from "@smolt/ai";
-import type { ExtensionAPI, ExtensionContext } from "@smolt/coding-agent";
 import { Key } from "@smolt/tui";
+import type { ExtensionAPI, ExtensionContext } from "smolt";
 import { extractTodoItems, isSafeCommand, markCompletedSteps, type TodoItem } from "./utils.ts";
 
 // Tools

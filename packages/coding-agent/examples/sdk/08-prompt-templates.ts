@@ -11,7 +11,7 @@ import {
 	getAgentDir,
 	type PromptTemplate,
 	SessionManager,
-} from "@smolt/coding-agent";
+} from "smolt";
 
 // Define custom templates
 const deployTemplate: PromptTemplate = {

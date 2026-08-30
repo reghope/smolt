@@ -4,7 +4,7 @@
  * Exposes /tui to show TUI redraw stats.
  */
 
-import type { ExtensionAPI } from "@smolt/coding-agent";
+import type { ExtensionAPI } from "smolt";
 import { Text } from "@smolt/tui";
 
 export default function (smolt: ExtensionAPI) {

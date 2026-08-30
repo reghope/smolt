@@ -66,6 +66,10 @@ export function withRemoteCatalog(
 				return;
 			}
 			if (!context.allowNetwork || context.signal.aborted) return;
+			// The default catalog endpoint is the upstream project's; this fork
+			// does not fetch from it. Baseline catalogs (regenerated at build
+			// time) remain in effect until smolt hosts its own overlay.
+			if (catalogBaseUrl.includes("pi.dev")) return;
 			if (
 				!context.force &&
 				stored?.checkedAt !== undefined &&

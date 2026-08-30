@@ -52,7 +52,7 @@ When a `Focusable` component has focus, TUI:
 3. Positions the hardware terminal cursor at that location
 4. Shows the hardware cursor only when `showHardwareCursor` is enabled
 
-The cursor remains hidden by default. This keeps the fake cursor rendering, while still positioning the hardware cursor for terminals that track IME candidate windows with hidden cursors. Some terminals require a visible hardware cursor for IME positioning; enable it with `showHardwareCursor`, `setShowHardwareCursor(true)`, or `PI_HARDWARE_CURSOR=1`. The `Editor` and `Input` built-in components already implement this interface.
+The cursor remains hidden by default. This keeps the fake cursor rendering, while still positioning the hardware cursor for terminals that track IME candidate windows with hidden cursors. Some terminals require a visible hardware cursor for IME positioning; enable it with `showHardwareCursor`, `setShowHardwareCursor(true)`, or `SMOLT_HARDWARE_CURSOR=1`. The `Editor` and `Input` built-in components already implement this interface.
 
 ### Container Components with Embedded Inputs
 
@@ -449,7 +449,7 @@ renderResult(result, options, theme, context) {
 **For Markdown**, use `getMarkdownTheme()`:
 
 ```typescript
-import { getMarkdownTheme } from "@smolt/coding-agent";
+import { getMarkdownTheme } from "smolt";
 import { Markdown } from "@smolt/tui";
 
 renderResult(result, options, theme, context) {
@@ -469,10 +469,10 @@ interface MyTheme {
 
 ## Debug logging
 
-Set `PI_TUI_WRITE_LOG` to capture the raw ANSI stream written to stdout.
+Set `SMOLT_TUI_WRITE_LOG` to capture the raw ANSI stream written to stdout.
 
 ```bash
-PI_TUI_WRITE_LOG=/tmp/tui-ansi.log npx tsx packages/tui/test/chat-simple.ts
+SMOLT_TUI_WRITE_LOG=/tmp/tui-ansi.log npx tsx packages/tui/test/chat-simple.ts
 ```
 
 ## Performance
@@ -614,8 +614,8 @@ These patterns cover the most common UI needs in extensions. **Copy these patter
 For letting users pick from a list of options. Use `SelectList` from `@smolt/tui` with `DynamicBorder` for framing.
 
 ```typescript
-import type { ExtensionAPI } from "@smolt/coding-agent";
-import { DynamicBorder } from "@smolt/coding-agent";
+import type { ExtensionAPI } from "smolt";
+import { DynamicBorder } from "smolt";
 import { Container, type SelectItem, SelectList, Text } from "@smolt/tui";
 
 smolt.registerCommand("pick", {
@@ -674,7 +674,7 @@ smolt.registerCommand("pick", {
 For operations that take time and should be cancellable. `BorderedLoader` shows a spinner and handles escape to cancel.
 
 ```typescript
-import { BorderedLoader } from "@smolt/coding-agent";
+import { BorderedLoader } from "smolt";
 
 smolt.registerCommand("fetch", {
   handler: async (_args, ctx) => {
@@ -706,7 +706,7 @@ smolt.registerCommand("fetch", {
 For toggling multiple settings. Use `SettingsList` from `@smolt/tui` with `getSettingsListTheme()`.
 
 ```typescript
-import { getSettingsListTheme } from "@smolt/coding-agent";
+import { getSettingsListTheme } from "smolt";
 import { Container, type SettingItem, SettingsList, Text } from "@smolt/tui";
 
 smolt.registerCommand("settings", {
@@ -846,7 +846,7 @@ Token stats available via `ctx.sessionManager.getBranch()` and `ctx.model`.
 Replace the main input editor with a custom implementation. Useful for modal editing (vim), different keybindings (emacs), or specialized input handling.
 
 ```typescript
-import { CustomEditor, type ExtensionAPI } from "@smolt/coding-agent";
+import { CustomEditor, type ExtensionAPI } from "smolt";
 import { matchesKey, truncateToWidth } from "@smolt/tui";
 
 type Mode = "normal" | "insert";

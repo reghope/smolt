@@ -53,7 +53,7 @@ export default function llamaExtension(smolt: ExtensionAPI): void {
 		provider.setCatalog(current, client.serverUrl);
 		const result = await ctx.modelRegistry.refresh({
 			providers: [LLAMA_PROVIDER_ID],
-			// /llama already contacted the configured llama.cpp server, so keep this refresh live even in PI_OFFLINE.
+			// /llama already contacted the configured llama.cpp server, so keep this refresh live even in SMOLT_OFFLINE.
 			allowNetwork: true,
 			signal,
 		});

@@ -9,7 +9,7 @@
 
 set -e
 
-AGENT_DIR="${PI_AGENT_DIR:-$HOME/.smolt/agent}"
+AGENT_DIR="${SMOLT_AGENT_DIR:-$HOME/.smolt/agent}"
 DRY_RUN=false
 
 if [[ "$1" == "--dry-run" ]]; then

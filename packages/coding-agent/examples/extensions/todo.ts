@@ -11,8 +11,8 @@
  */
 
 import { StringEnum } from "@smolt/ai";
-import type { ExtensionAPI, ExtensionContext, Theme } from "@smolt/coding-agent";
 import { matchesKey, Text, truncateToWidth } from "@smolt/tui";
+import type { ExtensionAPI, ExtensionContext, Theme } from "smolt";
 import { Type } from "typebox";
 
 interface Todo {

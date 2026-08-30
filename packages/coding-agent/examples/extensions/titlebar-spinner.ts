@@ -9,14 +9,14 @@
  */
 
 import path from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@smolt/coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "smolt";
 
 const BRAILLE_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 function getBaseTitle(smolt: ExtensionAPI): string {
 	const cwd = path.basename(process.cwd());
 	const session = smolt.getSessionName();
-	return session ? `π - ${session} - ${cwd}` : `π - ${cwd}`;
+	return session ? `smolt - ${session} - ${cwd}` : `smolt - ${cwd}`;
 }
 
 export default function (smolt: ExtensionAPI) {
@@ -38,7 +38,7 @@ export default function (smolt: ExtensionAPI) {
 			const frame = BRAILLE_FRAMES[frameIndex % BRAILLE_FRAMES.length];
 			const cwd = path.basename(process.cwd());
 			const session = smolt.getSessionName();
-			const title = session ? `${frame} π - ${session} - ${cwd}` : `${frame} π - ${cwd}`;
+			const title = session ? `${frame} smolt - ${session} - ${cwd}` : `${frame} smolt - ${cwd}`;
 			ctx.ui.setTitle(title);
 			frameIndex++;
 		}, 80);

@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
 // Type-only import: a standalone install of this module outside the smolt
-// tree switches this single line to `from "@smolt/coding-agent"`.
+// tree switches this single line to `from "smolt"`.
 import type { ExtensionAPI } from "../../core/extensions/types.ts";
 import { MemoryStore, memoryTool } from "./memory.ts";
 import { SessionStore } from "./sessions.ts";

@@ -12,7 +12,7 @@ import {
 	getAgentDir,
 	SessionManager,
 	type Skill,
-} from "@smolt/coding-agent";
+} from "smolt";
 
 // Or define custom skills inline
 const customSkill: Skill = {

@@ -24,7 +24,7 @@ This folder only uses the public extension surface (`session_start` /
 plus `typebox`, `yaml`, and Node built-ins. Its single type-only import of
 `ExtensionAPI` is the one line a standalone install changes — copy the
 folder into `~/.smolt/agent/extensions/` (or any extensions dir), point the
-type import at `@smolt/coding-agent`, and it loads like any other
+type import at `smolt`, and it loads like any other
 extension. In-tree it is registered as a built-in in
 `../index.ts`.
 

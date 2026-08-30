@@ -11,7 +11,7 @@
  * Start smolt with this extension:
  *   smolt -e ./examples/extensions/input-transform-streaming.ts
  */
-import type { ExtensionAPI } from "@smolt/coding-agent";
+import type { ExtensionAPI } from "smolt";
 
 const TRIGGER = /\b(changes?|diff|modified)\b/i;
 

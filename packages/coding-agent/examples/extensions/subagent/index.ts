@@ -19,14 +19,8 @@ import * as path from "node:path";
 import type { AgentToolResult, ThinkingLevel } from "@smolt/agent-core";
 import type { Message } from "@smolt/ai";
 import { StringEnum } from "@smolt/ai";
-import {
-	CONFIG_DIR_NAME,
-	type ExtensionAPI,
-	getAgentDir,
-	getMarkdownTheme,
-	withFileMutationQueue,
-} from "@smolt/coding-agent";
 import { Container, Markdown, Spacer, Text } from "@smolt/tui";
+import { CONFIG_DIR_NAME, type ExtensionAPI, getAgentDir, getMarkdownTheme, withFileMutationQueue } from "smolt";
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
 

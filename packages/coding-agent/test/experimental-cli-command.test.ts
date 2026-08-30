@@ -118,7 +118,10 @@ describe("experimental CLI commands", () => {
 		[["--listen", "/tmp/smolt.sock"], 'Invalid --listen address "/tmp/smolt.sock"'],
 		[["--listen", "ws://localhost:8080"], 'Unsupported --listen transport "ws:"'],
 		[["--listen", "unix://relative.sock"], "Unix transport address must not include an authority"],
-		[["--listen", "unix:///tmp/smolt.sock?wrong=value"], 'Invalid --listen address "unix:///tmp/smolt.sock?wrong=value"'],
+		[
+			["--listen", "unix:///tmp/smolt.sock?wrong=value"],
+			'Invalid --listen address "unix:///tmp/smolt.sock?wrong=value"',
+		],
 		[["--listen", "unix:///tmp/smolt.sock#fragment"], 'Invalid --listen address "unix:///tmp/smolt.sock#fragment"'],
 		[["--listen", "unix:/tmp/smolt.sock"], 'Invalid --listen address "unix:/tmp/smolt.sock"'],
 		[["--listen", "unix:///tmp/%00pi.sock"], 'Invalid --listen address "unix:///tmp/%00pi.sock"'],

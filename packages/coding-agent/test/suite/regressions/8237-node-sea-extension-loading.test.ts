@@ -45,6 +45,6 @@ describe("Node SEA extension loading", () => {
 		expect(options.tryNative).toBe(false);
 		expect(options.alias).toBeUndefined();
 		expect(options.virtualModules?.typebox).toBeDefined();
-		expect(options.virtualModules?.["@smolt/coding-agent"]).toBeDefined();
+		expect(options.virtualModules?.smolt).toBeDefined();
 	});
 });

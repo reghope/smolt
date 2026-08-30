@@ -23,7 +23,7 @@ import * as _bundledTypeboxCompile from "typebox/compile";
 import * as _bundledTypeboxValue from "typebox/value";
 import { CONFIG_DIR_NAME, getAgentDir, isBunBinary } from "../../config.ts";
 // NOTE: This import works because loader.ts exports are NOT re-exported from index.ts,
-// avoiding a circular dependency. Extensions can import from @smolt/coding-agent.
+// avoiding a circular dependency. Extensions can import from smolt.
 import * as _bundledSmoltCodingAgent from "../../index.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { createEventBus, type EventBus } from "../event-bus.ts";
@@ -63,7 +63,7 @@ const VIRTUAL_MODULES: Record<string, unknown> = {
 	"@smolt/ai/compat": _bundledSmoltAiCompat,
 	"@smolt/ai/oauth": _bundledSmoltAiOauth,
 	"@smolt/ai/providers/all": _bundledSmoltAiProviders,
-	"@smolt/coding-agent": _bundledSmoltCodingAgent,
+	smolt: _bundledSmoltCodingAgent,
 	"@mariozechner/smolt-agent-core": _bundledSmoltAgentCore,
 	"@mariozechner/smolt-tui": _bundledSmoltTui,
 	"@mariozechner/smolt-ai": _bundledSmoltAiCompat,
@@ -78,8 +78,8 @@ const require = createRequire(import.meta.url);
 const isNodeSeaBinary =
 	("sea" in process.features && process.features.sea === true) ||
 	process.getBuiltinModule("node:sea")?.isSea() === true;
-declare const PI_BUNDLED_NODE: boolean;
-const isBundledNode = typeof PI_BUNDLED_NODE !== "undefined" && PI_BUNDLED_NODE;
+declare const SMOLT_BUNDLED_NODE: boolean;
+const isBundledNode = typeof SMOLT_BUNDLED_NODE !== "undefined" && SMOLT_BUNDLED_NODE;
 const isTypeScriptSourceRuntime = !isBunBinary && path.extname(fileURLToPath(import.meta.url)) === ".ts";
 
 /**
@@ -115,13 +115,10 @@ function getAliases(): Record<string, string> {
 	// global API keep working at runtime until compat is removed.
 	const smoltAiCompatEntry = resolveWorkspaceOrImport("ai/dist/compat.js", "@smolt/ai/compat");
 	const smoltAiOauthEntry = resolveWorkspaceOrImport("ai/dist/oauth.js", "@smolt/ai/oauth");
-	const smoltAiProvidersEntry = resolveWorkspaceOrImport(
-		"ai/dist/providers/all.js",
-		"@smolt/ai/providers/all",
-	);
+	const smoltAiProvidersEntry = resolveWorkspaceOrImport("ai/dist/providers/all.js", "@smolt/ai/providers/all");
 
 	_aliases = {
-		"@smolt/coding-agent": smoltCodingAgentEntry,
+		smolt: smoltCodingAgentEntry,
 		"@smolt/agent-core": smoltAgentCoreEntry,
 		"@smolt/tui": smoltTuiEntry,
 		"@smolt/ai/providers/all": smoltAiProvidersEntry,

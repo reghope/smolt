@@ -4,12 +4,7 @@
  * Shows how to replace or modify the default system prompt.
  */
 
-import {
-	createAgentSession,
-	DefaultResourceLoader,
-	getAgentDir,
-	SessionManager,
-} from "@smolt/coding-agent";
+import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager } from "smolt";
 
 const cwd = process.cwd();
 const agentDir = getAgentDir();

@@ -1,7 +1,7 @@
 import { uuidv7 } from "@smolt/ai";
-import type { ExtensionAPI, ExtensionCommandContext } from "@smolt/coding-agent";
-import { DynamicBorder, getMarkdownTheme } from "@smolt/coding-agent";
 import { Container, Markdown, matchesKey, Text } from "@smolt/tui";
+import type { ExtensionAPI, ExtensionCommandContext } from "smolt";
+import { DynamicBorder, getMarkdownTheme } from "smolt";
 
 type ContentBlock = {
 	type?: string;

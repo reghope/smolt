@@ -10,7 +10,7 @@ import {
 } from "vitest";
 import type { HarnessRun } from "vitest-evals/harness";
 
-export const PI_SESSION_SNAPSHOT_ARTIFACT = "smoltSessionJsonl";
+export const SMOLT_SESSION_SNAPSHOT_ARTIFACT = "smoltSessionJsonl";
 
 const evalSessionArtifactKey = Symbol("smolt-evals-session-artifact");
 const evalSourceArtifactKey = Symbol("smolt-evals-source-artifact");
@@ -53,7 +53,7 @@ export async function recordEvalSessionArtifact(
 	run: Pick<HarnessRun, "artifacts">,
 ): Promise<void> {
 	const runId = run.artifacts?.runId;
-	const session = run.artifacts?.[PI_SESSION_SNAPSHOT_ARTIFACT];
+	const session = run.artifacts?.[SMOLT_SESSION_SNAPSHOT_ARTIFACT];
 	if (session === undefined) return;
 	if (typeof runId !== "string" || typeof session !== "string") {
 		throw new TypeError("Smolt eval session artifact metadata is invalid.");
@@ -92,8 +92,7 @@ export async function persistEvalArtifactReferences(
 	const references: Array<{ name: string; path: string }> = [];
 	for (const artifact of artifacts) {
 		if (
-			(artifact.type !== "@smolt/evals:session" &&
-				artifact.type !== "@smolt/evals:source") ||
+			(artifact.type !== "@smolt/evals:session" && artifact.type !== "@smolt/evals:source") ||
 			artifact.runId !== runId
 		) {
 			continue;

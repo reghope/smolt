@@ -312,6 +312,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 	runtimeHost.setRebindSession(async () => {
 		await rebindSession();
+		// The active session was replaced from inside the agent (an extension's
+		// ctx.newSession/fork/switchSession), not by a client command — tell the
+		// client so it can reload its view of the transcript.
+		output({ type: "session_replaced" });
 	});
 
 	const rebindSession = async (): Promise<void> => {
@@ -475,7 +479,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				if (!model) {
 					return error(id, "set_model", `Model not found: ${command.provider}/${command.modelId}`);
 				}
-				await session.setModel(model);
+				// persist writes the choice to global settings, exactly as the
+				// interactive selector does, so RPC frontends share the default.
+				await session.setModel(model, { persist: command.persist === true });
 				return success(id, "set_model", model);
 			}
 
@@ -497,7 +503,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 
 			case "set_thinking_level": {
-				session.setThinkingLevel(command.level);
+				session.setThinkingLevel(command.level, { persist: command.persist === true });
 				return success(id, "set_thinking_level");
 			}
 

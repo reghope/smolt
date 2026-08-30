@@ -3,8 +3,8 @@
 	"compilerOptions": {
 		"noEmit": true,
 		"paths": {
-			"@smolt/coding-agent": ["./src/index.ts"],
-			"@smolt/coding-agent/hooks": ["./src/core/hooks/index.ts"],
+			"smolt": ["./src/index.ts"],
+			"smolt/hooks": ["./src/core/hooks/index.ts"],
 			"@smolt/tui": ["../tui/src/index.ts"],
 			"@smolt/ai": ["../ai/src/index.ts"],
 			"typebox": ["../../node_modules/typebox"]

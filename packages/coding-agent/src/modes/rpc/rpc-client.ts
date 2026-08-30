@@ -248,9 +248,11 @@ export class RpcClient {
 
 	/**
 	 * Set model by provider and ID.
+	 * With persist, the choice also becomes the global default — the same
+	 * settings.json write the interactive selector makes.
 	 */
-	async setModel(provider: string, modelId: string): Promise<{ provider: string; id: string }> {
-		const response = await this.send({ type: "set_model", provider, modelId });
+	async setModel(provider: string, modelId: string, persist?: boolean): Promise<{ provider: string; id: string }> {
+		const response = await this.send({ type: "set_model", provider, modelId, persist });
 		return this.getData(response);
 	}
 
@@ -275,10 +277,10 @@ export class RpcClient {
 	}
 
 	/**
-	 * Set thinking level.
+	 * Set thinking level. With persist, it also becomes the global default.
 	 */
-	async setThinkingLevel(level: ThinkingLevel): Promise<void> {
-		await this.send({ type: "set_thinking_level", level });
+	async setThinkingLevel(level: ThinkingLevel, persist?: boolean): Promise<void> {
+		await this.send({ type: "set_thinking_level", level, persist });
 	}
 
 	/**
@@ -543,6 +545,21 @@ export class RpcClient {
 			pending.reject(error);
 		}
 		this.pendingRequests.clear();
+	}
+
+	/**
+	 * Answer an extension_ui_request event (select / confirm / input / editor).
+	 * Fire-and-forget: the agent matches the response by the request id and
+	 * sends nothing back.
+	 */
+	respondExtensionUI(response: { id: string; value?: string; confirmed?: boolean; cancelled?: boolean }): void {
+		const stdin = this.process?.stdin;
+		if (!stdin || stdin.destroyed || !stdin.writable) return;
+		const body: Record<string, unknown> = { type: "extension_ui_response", id: response.id };
+		if (response.cancelled === true) body.cancelled = true;
+		else if (response.value !== undefined) body.value = response.value;
+		else body.confirmed = response.confirmed === true;
+		stdin.write(serializeJsonLine(body));
 	}
 
 	private async send(command: RpcCommandBody): Promise<RpcResponse> {

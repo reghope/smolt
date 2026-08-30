@@ -142,7 +142,7 @@ cp permission-gate.ts ~/.smolt/agent/extensions/
 See [docs/extensions.md](../../docs/extensions.md) for full documentation.
 
 ```typescript
-import type { ExtensionAPI } from "@smolt/coding-agent";
+import type { ExtensionAPI } from "smolt";
 import { Type } from "typebox";
 
 export default function (smolt: ExtensionAPI) {

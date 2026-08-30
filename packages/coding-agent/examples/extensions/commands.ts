@@ -10,7 +10,7 @@
  * 3. Use /commands extensions to filter by source
  */
 
-import type { ExtensionAPI, SlashCommandInfo } from "@smolt/coding-agent";
+import type { ExtensionAPI, SlashCommandInfo } from "smolt";
 
 export default function commandsExtension(smolt: ExtensionAPI) {
 	smolt.registerCommand("commands", {

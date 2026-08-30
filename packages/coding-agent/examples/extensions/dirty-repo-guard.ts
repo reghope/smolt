@@ -5,7 +5,7 @@
  * Useful to ensure work is committed before switching context.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@smolt/coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "smolt";
 
 async function checkDirtyRepo(
 	smolt: ExtensionAPI,

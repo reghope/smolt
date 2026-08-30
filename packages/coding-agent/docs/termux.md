@@ -17,7 +17,7 @@ pkg update && pkg upgrade
 pkg install nodejs termux-api git
 
 # Install smolt
-npm install -g --ignore-scripts @smolt/coding-agent
+npm install -g --ignore-scripts smolt
 
 # Create config directory
 mkdir -p ~/.smolt/agent

@@ -10,7 +10,7 @@
  * extensions system using smolt.registerTool().
  */
 
-import { createAgentSession, SessionManager } from "@smolt/coding-agent";
+import { createAgentSession, SessionManager } from "smolt";
 
 // Read-only mode (no edit/write)
 const { session: readOnlySession } = await createAgentSession({

@@ -14,8 +14,8 @@
  */
 
 import { uuidv7 } from "@smolt/ai";
-import type { ExtensionAPI } from "@smolt/coding-agent";
-import { convertToLlm, serializeConversation } from "@smolt/coding-agent";
+import type { ExtensionAPI } from "smolt";
+import { convertToLlm, serializeConversation } from "smolt";
 
 export default function (smolt: ExtensionAPI) {
 	smolt.on("session_before_compact", async (event, ctx) => {

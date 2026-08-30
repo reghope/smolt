@@ -17,7 +17,7 @@ const CATALOG_SCHEMA_VERSION = 1;
 const CATALOG_PREFIX = `models/v${CATALOG_SCHEMA_VERSION}`;
 const CATALOG_INDEX_KEY = `${CATALOG_PREFIX}/index.json`;
 // Bump this only when generated model metadata requires behavior unavailable in older smolt clients.
-const MINIMUM_PI_VERSION = "0.80.7";
+const MINIMUM_SMOLT_VERSION = "0.80.7";
 const JSON_CONTENT_TYPE = "application/json; charset=utf-8";
 const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const INDEX_CACHE_CONTROL = "no-store";
@@ -222,7 +222,7 @@ function compareSmoltVersions(left, right) {
 
 function buildIndex(existingIndex, publication) {
 	const entry = {
-		minimumSmoltVersion: MINIMUM_PI_VERSION,
+		minimumSmoltVersion: MINIMUM_SMOLT_VERSION,
 		revision: publication.revision,
 		sourceCommit: publication.sourceCommit,
 		publishedAt: new Date().toISOString(),
@@ -230,7 +230,7 @@ function buildIndex(existingIndex, publication) {
 		modelCount: publication.modelCount,
 	};
 	const catalogs = (existingIndex?.catalogs || [])
-		.filter((catalog) => catalog.minimumSmoltVersion !== MINIMUM_PI_VERSION)
+		.filter((catalog) => catalog.minimumSmoltVersion !== MINIMUM_SMOLT_VERSION)
 		.concat(entry)
 		.sort((left, right) => compareSmoltVersions(left.minimumSmoltVersion, right.minimumSmoltVersion));
 	return {
@@ -246,7 +246,7 @@ async function main() {
 	const bundle = validateBundle(inputDir);
 	const publication = {
 		schemaVersion: CATALOG_SCHEMA_VERSION,
-		minimumSmoltVersion: MINIMUM_PI_VERSION,
+		minimumSmoltVersion: MINIMUM_SMOLT_VERSION,
 		revision: bundle.revision,
 		sourceCommit: options.sourceCommit || gitSourceCommit(),
 		providerCount: bundle.providerCount,
@@ -266,7 +266,7 @@ async function main() {
 		const hasCurrentIndex = downloadIndex(options.bucket, options.endpoint, currentIndexPath);
 		const currentIndex = hasCurrentIndex ? validateIndex(readJson(currentIndexPath)) : undefined;
 		const currentEntry = currentIndex?.catalogs.find(
-			(catalog) => catalog.minimumSmoltVersion === MINIMUM_PI_VERSION,
+			(catalog) => catalog.minimumSmoltVersion === MINIMUM_SMOLT_VERSION,
 		);
 		if (currentIndex?.defaultRevision === bundle.revision && currentEntry?.revision === bundle.revision) {
 			console.log(`Model catalog ${bundle.revision} is already current; no objects uploaded.`);

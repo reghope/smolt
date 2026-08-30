@@ -9,8 +9,8 @@
  */
 
 import type { AssistantMessage } from "@smolt/ai";
-import type { ExtensionAPI } from "@smolt/coding-agent";
 import { truncateToWidth, visibleWidth } from "@smolt/tui";
+import type { ExtensionAPI } from "smolt";
 
 export default function (smolt: ExtensionAPI) {
 	let enabled = false;

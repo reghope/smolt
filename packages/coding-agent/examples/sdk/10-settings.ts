@@ -4,7 +4,7 @@
  * Override settings using SettingsManager.
  */
 
-import { createAgentSession, SessionManager, SettingsManager } from "@smolt/coding-agent";
+import { createAgentSession, SessionManager, SettingsManager } from "smolt";
 
 const cwd = process.cwd();
 

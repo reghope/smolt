@@ -413,6 +413,24 @@ export function getThemesDir(): string {
 }
 
 /**
+ * Get path to the vendored design doctrine (shipped with package)
+ * - For Bun binary: taste-doctrine/ next to executable
+ * - For Node.js (dist/): dist/extensions/taste/doctrine/
+ * - For tsx (src/): src/extensions/taste/doctrine/
+ *
+ * Resolved from the package root rather than the module, so the bundled
+ * build finds it too: there, every module collapses into dist/bundle/.
+ */
+export function getTasteDoctrineDir(): string {
+	if (isBunBinary) {
+		return join(getPackageDir(), "taste-doctrine");
+	}
+	const packageDir = getPackageDir();
+	const srcOrDist = existsSync(join(packageDir, "src")) ? "src" : "dist";
+	return join(packageDir, srcOrDist, "extensions", "taste", "doctrine");
+}
+
+/**
  * Get path to HTML export template directory (shipped with package)
  * - For Bun binary: export-html/ next to executable
  * - For Node.js (dist/): dist/core/export-html/

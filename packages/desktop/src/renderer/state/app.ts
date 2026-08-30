@@ -153,6 +153,8 @@ interface AppState {
 	historyLoading: boolean;
 	/** The chat is being read in; the transcript shows a spinner, not an empty state. */
 	chatLoading: boolean;
+	/** This chat has run a tool, remembered past the end of the rendered page. */
+	chatUsedTools: boolean;
 	/** The agent whose events the window is currently reducing; null mid-switch. */
 	attachedSlot: number | null;
 	pendingApprovals: PermissionRequest[];
@@ -182,6 +184,10 @@ interface AppState {
 	voiceFinishing: boolean;
 	voiceDenied: boolean;
 	micDeviceId: string;
+	/** How loud the microphone is right now, 0–1, while dictation runs. */
+	voiceLevel: number;
+	/** The device that recorded nothing, so the mic button can say which. */
+	voiceSilent: string;
 	holdToRecord: boolean;
 	/** Composer text lives here so dictation and history can write it. */
 	draft: string;
@@ -227,6 +233,7 @@ export const app: AppState = {
 	historySource: "disk",
 	historyLoading: false,
 	chatLoading: false,
+	chatUsedTools: false,
 	attachedSlot: null,
 	pendingApprovals: [],
 	uiRequests: [],
@@ -253,6 +260,8 @@ export const app: AppState = {
 	voiceFinishing: false,
 	voiceDenied: false,
 	micDeviceId: "",
+	voiceLevel: 0,
+	voiceSilent: "",
 	holdToRecord: false,
 	draft: "",
 	busySessions: new Set<string>(),
@@ -640,6 +649,31 @@ export async function refreshState(): Promise<void> {
  * shows and auto-compaction acts on — so the dial is cumulative, survives
  * session switches, and honestly reads unknown right after a compaction.
  */
+/**
+ * Re-read the diff while a turn is still running.
+ *
+ * The repository bar used to update only when the turn settled, so a
+ * chat that edited a file five minutes ago showed nothing until it
+ * finished — or until the reader pressed stop, which is what made it
+ * look like stopping was the thing that produced the change.
+ *
+ * Throttled, because a turn can finish a write every few hundred
+ * milliseconds and each read shells out to git.
+ */
+const DIFF_REFRESH_MS = 1500;
+let diffRefreshAt = 0;
+let diffRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+export function refreshDiffSoon(): void {
+	if (diffRefreshTimer !== null) return;
+	const wait = Math.max(0, diffRefreshAt + DIFF_REFRESH_MS - Date.now());
+	diffRefreshTimer = setTimeout(() => {
+		diffRefreshTimer = null;
+		diffRefreshAt = Date.now();
+		void refreshDiff();
+	}, wait);
+}
+
 export async function refreshContextUsage(): Promise<void> {
 	const stats = await call<{ contextUsage?: ContextUsage }>("getSessionStats");
 	app.contextUsage = stats?.contextUsage ?? null;
@@ -738,8 +772,10 @@ export async function refreshStats(): Promise<void> {
 export async function refreshDiff(): Promise<void> {
 	const result = await api.diff();
 	if (!result.ok) {
-		app.diffFiles = [];
-		bump();
+		// Keep the last good answer. Wiping the list on a failed read made a
+		// momentary error look like the change had been undone: the bar
+		// vanished and the panel emptied, with nothing to say why.
+		reportAgentError(result.error ?? "Could not read the working tree");
 		return;
 	}
 	const { files, branch, preexisting } = (result.value ?? {}) as {
@@ -786,10 +822,12 @@ export async function send(): Promise<void> {
 			app.queuedBySession.set(app.currentSessionPath, [...queuedHere(), { label, text, images }]);
 			bump();
 		}
-		// Queued, not steered: a message typed while the agent works waits for
-		// the turn to finish rather than cutting into it, so a half-finished
-		// thought never redirects work already under way.
-		await call("followUp", text, images);
+		// Steered, not followed up. A follow-up waits for the whole run to
+		// finish — every tool call, every retry — which on a long agentic turn
+		// is minutes of the message sitting there looking ignored. Steering
+		// delivers it at the next tool boundary, which is the first moment the
+		// agent can actually read it.
+		await call("steer", text, images);
 	} else {
 		// A first message is what turns a scratch chat into a stored one. Put the
 		// row in the sidebar now, titled from the message, rather than leaving the
@@ -867,21 +905,30 @@ export function queuedHere(): QueuedMessage[] {
  * and steers it in instead.
  */
 export async function sendQueuedNow(): Promise<void> {
+	const path = app.currentSessionPath;
 	const waiting = queuedHere();
 	if (waiting.length === 0) return;
-	// Take it out of the agent's queue first, so a failure here leaves the
-	// message queued rather than delivering it twice.
-	const cleared = await call("clearQueue");
-	if (cleared === null) return;
-	app.queuedBySession.delete(app.currentSessionPath);
-	bump();
 	const text = waiting
 		.map((message) => message.text)
 		.filter((line) => line !== "")
 		.join("\n\n");
 	const images = waiting.flatMap((message) => message.images);
 	if (text === "" && images.length === 0) return;
-	await call("steer", text, images);
+	// Take it out of the agent's queue so the send below is not a second
+	// copy of the same message.
+	if ((await call("clearQueue")) === null) return;
+	app.queuedBySession.delete(path);
+	bump();
+	// A turn that finished while the message sat there cannot be steered:
+	// steering an idle agent puts the message somewhere nothing reads, and
+	// it was just taken out of the queue. Start a turn with it instead.
+	const method = app.chat.streaming ? "steer" : "prompt";
+	const sent = await call(method, text, images);
+	if (sent === null) {
+		// Delivery failed; put it back rather than losing what was typed.
+		app.queuedBySession.set(path, waiting);
+		bump();
+	}
 }
 
 export async function clearQueued(): Promise<void> {
@@ -922,10 +969,6 @@ export async function switchToSession(path: string): Promise<void> {
 	// Move the view first. The agent's own switch takes about a second and the
 	// transcript another half, so waiting for both before anything changes on
 	// screen reads as a hang rather than a load.
-	// Stop listening before the view moves. The old agent may still be
-	// streaming, and for the second it takes the switch to land its words
-	// would otherwise be reduced into the chat now on screen.
-	app.attachedSlot = null;
 	app.currentSessionPath = path;
 	app.chat.messages = [];
 	app.chat.usage = null;
@@ -962,6 +1005,7 @@ export async function switchToSession(path: string): Promise<void> {
 
 /** Forget the window; a different chat is about to fill it. */
 function resetHistory(loading: boolean): void {
+	app.chatUsedTools = false;
 	app.historyStart = 0;
 	app.historyUserStart = 0;
 	app.historySource = "disk";
@@ -987,8 +1031,6 @@ async function loadStoredMessages(path: string): Promise<void> {
 }
 
 export async function newSession(): Promise<void> {
-	// As with a switch: the chat being left may still be talking.
-	app.attachedSlot = null;
 	resetHistory(false);
 	await call("newSession");
 	await reattach();
@@ -1365,10 +1407,20 @@ export async function rewindToUserMessage(userIndex: number, currentText: string
 }
 
 /** True once this chat has actually run tools — the only work that changes files. */
+/**
+ * Whether this chat has actually run a tool.
+ *
+ * Sticky, and not re-derived from the transcript: only a page of messages
+ * is held at a time, so a tool call that has scrolled out of the window
+ * would otherwise read as a chat that never touched anything.
+ */
 export function chatDidToolWork(): boolean {
-	return app.chat.messages.some(
+	if (app.chatUsedTools) return true;
+	const seen = app.chat.messages.some(
 		(message) => message.role === "assistant" && message.blocks.some((block) => block.kind === "tool"),
 	);
+	if (seen) app.chatUsedTools = true;
+	return seen;
 }
 
 // ---------------------------------------------------------------------------
@@ -1448,6 +1500,24 @@ async function applyRememberedSettings(): Promise<void> {
 	await ensureModels();
 }
 
+/** Tools whose finished call means a file on disk has just moved. */
+const WRITING_TOOLS = new Set(["edit", "write", "bash", "powershell"]);
+
+/** Whether this streamed event was a writing tool finishing. */
+function wroteAFile(event: unknown): boolean {
+	const raw = event as { type?: string; assistantMessageEvent?: { type?: string; toolCall?: { name?: unknown } } };
+	if (raw.type !== "message_update") return false;
+	const delta = raw.assistantMessageEvent;
+	if (delta?.type !== "toolcall_end") return false;
+	return WRITING_TOOLS.has(String(delta.toolCall?.name ?? ""));
+}
+
+/** The agent's live view of what it still has queued. */
+interface QueueUpdate {
+	steering?: string[];
+	followUp?: string[];
+}
+
 export function boot(): void {
 	for (const [key, target] of [
 		["smolt.pinned", app.pinned],
@@ -1492,12 +1562,27 @@ export function boot(): void {
 		// agent writes its session file as the turn opens, so this is the moment
 		// the sidebar can show it rather than waiting for the turn to finish.
 		if (raw.type === "agent_start" && app.chat.messages.length === 0) void refreshSessionRows();
+		// A finished write moves the working tree now, not when the turn ends.
+		if (wroteAFile(event)) refreshDiffSoon();
 		reduce(app.chat, event);
 		syncRunStart();
 		bump();
 		const type = (event as { type?: string }).type;
+		// The agent reports its own queue as it drains it, so the banner clears
+		// when a message is actually delivered rather than when the turn ends.
+		if (raw.type === "queue_update") {
+			const live = new Set([...((raw as QueueUpdate).steering ?? []), ...((raw as QueueUpdate).followUp ?? [])]);
+			const held = queuedHere();
+			const remaining = held.filter((message) => live.has(message.text));
+			if (remaining.length !== held.length) {
+				if (remaining.length === 0) app.queuedBySession.delete(app.currentSessionPath);
+				else app.queuedBySession.set(app.currentSessionPath, remaining);
+				bump();
+			}
+		}
 		if (type === "agent_settled") {
-			// Whatever was waiting has been delivered by the time a turn settles.
+			// Nothing can still be waiting once the run is over: a message the
+			// agent never drained is one it will not read now.
 			app.queuedBySession.delete(app.currentSessionPath);
 			void refreshState();
 			// The turn probably touched files, so refresh the diff either way:

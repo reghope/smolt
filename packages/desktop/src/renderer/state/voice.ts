@@ -15,7 +15,25 @@ interface VoiceSession {
 	samples: Float32Array[];
 	total: number;
 	timer: ReturnType<typeof setInterval> | null;
+	/** Loudest sample seen, which is how a dead microphone is recognised. */
+	peak: number;
+	/** The device this clip came from, for saying which one heard nothing. */
+	device: string;
 }
+
+/**
+ * Below this peak amplitude, nothing was said.
+ *
+ * A working microphone in a silent room still reads around 0.15 peak from
+ * its own noise floor; a muted or absent one reads 0.0001 or less. The
+ * threshold sits far above the dead floor and far below any real speech,
+ * so it separates the two without ever rejecting a quiet talker.
+ *
+ * This matters because Whisper does not return nothing for silence — it
+ * invents a filler word. Transcribing a dead microphone is where the
+ * stray "yeah" in the composer came from.
+ */
+const SILENCE_PEAK = 0.02;
 
 let voice: VoiceSession | null = null;
 let voiceText = "";
@@ -54,6 +72,8 @@ function joinSamples(session: VoiceSession): Float32Array {
 async function refreshTranscript(final = false): Promise<void> {
 	if (!voice || voiceBusy) return;
 	if (voice.total < SPEECH_RATE * 0.4) return;
+	// Never hand silence to the model: it answers with a word regardless.
+	if (voice.peak < SILENCE_PEAK) return;
 	voiceBusy = true;
 	try {
 		const result = await api.speechTranscribe(joinSamples(voice).buffer as ArrayBuffer);
@@ -133,11 +153,37 @@ export async function startVoice(): Promise<void> {
 	analyser.fftSize = 1024;
 	const collector = context.createScriptProcessor(4096, 1, 1);
 
-	const session: VoiceSession = { stream, context, analyser, samples: [], total: 0, timer: null };
+	const session: VoiceSession = {
+		stream,
+		context,
+		analyser,
+		samples: [],
+		total: 0,
+		timer: null,
+		peak: 0,
+		device: stream.getAudioTracks()[0]?.label ?? "",
+	};
 	collector.onaudioprocess = (event) => {
 		const input = event.inputBuffer.getChannelData(0);
 		session.samples.push(new Float32Array(input));
 		session.total += input.length;
+		let loudest = 0;
+		for (const sample of input) {
+			const size = sample < 0 ? -sample : sample;
+			if (size > loudest) loudest = size;
+		}
+		if (loudest > session.peak) session.peak = loudest;
+		if (session.peak >= SILENCE_PEAK && app.voiceSilent !== "") {
+			app.voiceSilent = "";
+			bump();
+		}
+		// A coarse level, so the button can show that sound is arriving and a
+		// dead microphone is visible while speaking rather than afterwards.
+		const level = Math.min(1, loudest * 4);
+		if (Math.abs(level - app.voiceLevel) > 0.12) {
+			app.voiceLevel = level;
+			bump();
+		}
 	};
 	source.connect(analyser);
 	analyser.connect(collector);
@@ -161,6 +207,7 @@ function stopCapture(): VoiceSession | null {
 	voice = null;
 	app.voiceActive = false;
 	if (session.timer) clearInterval(session.timer);
+	app.voiceLevel = 0;
 	for (const track of session.stream.getTracks()) track.stop();
 	void session.context.close();
 	return session;
@@ -171,6 +218,16 @@ export async function finishVoice(insert: boolean): Promise<void> {
 	if (!session) return;
 	if (!insert) {
 		voiceText = "";
+		bump();
+		return;
+	}
+	// A clip with nothing in it is not transcribed at all. Saying so, and
+	// naming the device, is the difference between a mystery and a setting:
+	// the machine may have several inputs and only one of them live.
+	if (session.peak < SILENCE_PEAK) {
+		voiceText = "";
+		const which = session.device.trim();
+		app.voiceSilent = which === "" ? "the microphone" : which;
 		bump();
 		return;
 	}

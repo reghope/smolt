@@ -259,7 +259,14 @@ const NO_PROJECT_NOTE =
 	"where it should go. Do not fall back to the current working directory.";
 
 let projectFolders: string[] = readProjectState().folders;
-const homeCwd = (): string => projectFolders[0] ?? scratchDir();
+/**
+ * Where the agent works when no chat has moved it: the explicit override
+ * first, then the project folder the window remembers, then a scratch
+ * directory. Every agent slot is rooted here, including the first one — it
+ * used to start in the process working directory instead, so the opening
+ * chat of every launch ran somewhere other than the folder on screen.
+ */
+const homeCwd = (): string => process.env.SMOLT_DESKTOP_CWD || projectFolders[0] || scratchDir();
 let activeCwd = homeCwd();
 /**
  * The tree as this chat found it. Anything already modified when a chat opens
@@ -432,6 +439,15 @@ app.whenReady().then(async () => {
 	};
 	slots.push(active);
 
+	/**
+	 * A session change in flight.
+	 *
+	 * While this is set the window is between chats, so nothing is forwarded to
+	 * it: the agent being left can still be streaming, and its words belong to
+	 * the chat it came from, not the one about to appear.
+	 */
+	let switching: Promise<unknown> | null = null;
+
 	const broadcastBusy = (): void => {
 		if (win.isDestroyed()) return;
 		win.webContents.send(
@@ -524,6 +540,7 @@ app.whenReady().then(async () => {
 				}
 			}
 			if (win.isDestroyed()) return;
+			if (switching !== null) return;
 			if (slot === active) {
 				win.webContents.send("agent:event", event, slot.id);
 			} else if (type === "agent_settled") {
@@ -635,8 +652,6 @@ app.whenReady().then(async () => {
 	};
 
 	const debug = process.env.SMOLT_DESKTOP_DEBUG === "1";
-	/** A session change in flight, which every other call waits behind. */
-	let switching: Promise<unknown> | null = null;
 	ipcMain.handle("agent:call", async (_e, method: string, args: unknown[]) => {
 		try {
 			if (restarting) await restarting;
@@ -1251,7 +1266,7 @@ app.whenReady().then(async () => {
 	// Start the agent after the window is up so the UI appears instantly.
 	await bridge.start(
 		{
-			cwd: process.env.SMOLT_DESKTOP_CWD || process.cwd(),
+			cwd: activeCwd,
 			provider: process.env.SMOLT_DESKTOP_PROVIDER,
 			model: process.env.SMOLT_DESKTOP_MODEL,
 			args: process.env.SMOLT_DESKTOP_CONTINUE === "1" ? ["--continue"] : undefined,

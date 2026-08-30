@@ -58,7 +58,6 @@ import { Icon } from "./ui/icon.tsx";
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "./ui/popover.tsx";
 import { Slider } from "./ui/slider.tsx";
 import { Switch } from "./ui/switch.tsx";
-
 /** Number keys pick an entry from an open menu, as in the reference app. */
 function pickByNumber(event: React.KeyboardEvent<HTMLElement>): void {
 	if (!/^[1-9]$/.test(event.key) || event.ctrlKey || event.metaKey || event.altKey) return;
@@ -424,10 +423,8 @@ function MicMenu() {
 		<DropdownMenu
 			onOpenChange={(open) => {
 				if (!open) return;
-				if (!state.canTranscribe) {
-					toast("Dictation needs a transcription key: set OPENAI_API_KEY or GROQ_API_KEY before launching.", "error");
-					return;
-				}
+				// No key check: dictation runs a local model, so the only thing that
+				// can stop it is the microphone itself.
 				navigator.mediaDevices
 					.enumerateDevices()
 					.then((all) => setDevices(all.filter((device) => device.kind === "audioinput")))
@@ -452,19 +449,23 @@ function MicMenu() {
 						<span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
 							{device.label.trim() || `Microphone ${index + 1}`}
 						</span>
-						{device.deviceId === state.micDeviceId && <Icon name="check" className="text-salmon-text" />}
+						{(device.deviceId === state.micDeviceId ||
+							(state.micDeviceId === "" && device.deviceId === "default")) && (
+							<Icon name="check" className="text-salmon-text" />
+						)}
 					</DropdownMenuItem>
 				))}
 				<DropdownMenuSeparator />
-				<DropdownMenuCheckboxItem
-					checked={state.holdToRecord}
-					onCheckedChange={(checked) => {
-						app.holdToRecord = checked === true;
-						bump();
-					}}
-				>
-					Hold to record
-				</DropdownMenuCheckboxItem>
+				<div className="flex items-center justify-between gap-3 px-2.5 py-1.5 text-sm">
+					<span>Hold to record</span>
+					<Switch
+						checked={state.holdToRecord}
+						onCheckedChange={(checked) => {
+							app.holdToRecord = checked === true;
+							bump();
+						}}
+					/>
+				</div>
 			</DropdownMenuContent>
 		</DropdownMenu>
 	);
@@ -990,12 +991,17 @@ export function Composer() {
 											? "Stop and insert"
 											: state.voiceDenied
 												? "Microphone unavailable — open the setting"
-												: "Dictate (Ctrl+M)"
+												: state.voiceSilent !== ""
+													? `No sound reached ${state.voiceSilent}. Choose another microphone in the menu beside this button.`
+													: "Dictate (Ctrl+M)"
 							}
 							className={cn(
-								state.voiceActive && "animate-pulse-soft bg-destructive/10 text-destructive",
+								"relative",
+								state.voiceActive && "bg-destructive/10 text-destructive",
+								state.voiceSilent !== "" && !state.voiceActive && "text-destructive",
 								(state.voicePreparing || state.voiceFinishing) && "text-salmon-text [&_svg]:animate-spin",
 							)}
+
 							disabled={state.voicePreparing || state.voiceFinishing}
 							onClick={() => {
 								// With no status line left to click, a refused microphone makes
@@ -1012,6 +1018,16 @@ export function Composer() {
 							onContextMenu={(event) => event.preventDefault()}
 						>
 							<Icon name={state.voicePreparing || state.voiceFinishing ? "spinner" : "mic"} />
+							{/* A live level, so a microphone that hears nothing shows it while
+							    speaking rather than only once the clip comes back empty. */}
+							{state.voiceActive && (
+								<span className="pointer-events-none absolute inset-x-1 bottom-0.5 h-0.5 overflow-hidden rounded-full bg-destructive/20">
+									<span
+										className="block h-full rounded-full bg-destructive transition-[width] duration-100"
+										style={{ width: `${Math.round(state.voiceLevel * 100)}%` }}
+									/>
+								</span>
+							)}
 						</Button>
 						<MicMenu />
 					</div>

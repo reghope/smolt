@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, session, shell, systemPreferences } from "electron";
@@ -305,6 +305,29 @@ const rebaseline = (): Promise<void> => {
 	return baselineReady;
 };
 
+/**
+ * Record something that went wrong badly enough to lose the window.
+ *
+ * Kept as a plain file beside the agent`s own state: when the interface
+ * disappears there is nowhere on screen left to report it, and "it just went
+ * blank" needs something to look at afterwards.
+ */
+function crashLog(message: string): void {
+	const line = `${new Date().toISOString()} ${message}`;
+	console.error(line);
+	try {
+		const dir = join(homedir(), ".smolt", "agent");
+		mkdirSync(dir, { recursive: true });
+		appendFileSync(
+			join(dir, "desktop-crash.log"),
+			`${line}
+`,
+		);
+	} catch {
+		// Losing the log must not itself throw; the console line still stands.
+	}
+}
+
 function createWindow(): BrowserWindow {
 	const win = new BrowserWindow({
 		width: 1200,
@@ -323,6 +346,41 @@ function createWindow(): BrowserWindow {
 		},
 	});
 	win.loadFile(join(__dirname, "index.html"));
+
+	/**
+	 * A dead renderer must not leave a black window.
+	 *
+	 * The React tree has its own error boundary, so anything it can catch is
+	 * already reported in place. What lands here is the other kind: the render
+	 * process itself gone — out of memory, killed, or crashed — which leaves a
+	 * window that is simply empty, with no way back and nothing said. Reload it,
+	 * and keep the reason where it can be found afterwards.
+	 */
+	let reloadsAfterCrash = 0;
+	win.webContents.on("render-process-gone", (_event, details) => {
+		crashLog(`render-process-gone reason=${details.reason} exitCode=${details.exitCode}`);
+		if (win.isDestroyed()) return;
+		// A crash that repeats on load would spin here; after a few goes, stop
+		// and leave the window alone rather than flickering forever.
+		reloadsAfterCrash += 1;
+		if (reloadsAfterCrash > 3) return;
+		// Not from inside the handler: Electron is still tearing the old render
+		// process down, and reloading underneath that throws before it reloads.
+		setTimeout(() => {
+			if (!win.isDestroyed()) win.reload();
+		}, 0);
+	});
+	win.webContents.on("unresponsive", () => crashLog("renderer unresponsive"));
+	// Renderer errors are otherwise only visible with devtools open.
+	win.webContents.on(
+		"console-message",
+		(event: { level?: unknown; message?: unknown; lineNumber?: unknown; sourceId?: unknown }) => {
+			if (String(event?.level ?? "") !== "error") return;
+			crashLog(
+				`renderer error: ${String(event.message ?? "")} (${String(event.sourceId ?? "")}:${String(event.lineNumber ?? "")})`,
+			);
+		},
+	);
 
 	/**
 	 * The window is frameless, so the menu it would normally carry is built

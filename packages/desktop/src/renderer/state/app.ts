@@ -1546,6 +1546,28 @@ function wroteAFile(event: unknown): boolean {
 }
 
 /** The agent's live view of what it still has queued. */
+/**
+ * The most messages held while a turn is running.
+ *
+ * Loading a chat takes a page at a time, but a live turn appends without
+ * limit: a long agentic run can produce hundreds of tool calls, and every one
+ * stays in memory and in the DOM for the rest of the session. Well above a
+ * page, so ordinary use never reaches it.
+ */
+const LIVE_MAX = 200;
+
+/** Drop the oldest messages once a running turn has outgrown the window. */
+function trimLiveTranscript(): void {
+	const over = app.chat.messages.length - LIVE_MAX;
+	if (over <= 0) return;
+	const dropped = app.chat.messages.slice(0, over);
+	app.chat.messages = app.chat.messages.slice(over);
+	// The window has moved down the conversation, so what sits above it has
+	// grown by the same amount — or scrolling up would fetch the wrong slice.
+	app.historyStart += over;
+	app.historyUserStart += dropped.filter((message) => message.role === "user").length;
+}
+
 interface QueueUpdate {
 	steering?: string[];
 	followUp?: string[];
@@ -1598,6 +1620,7 @@ export function boot(): void {
 		// A finished write moves the working tree now, not when the turn ends.
 		if (wroteAFile(event)) refreshDiffSoon();
 		reduce(app.chat, event);
+		trimLiveTranscript();
 		syncRunStart();
 		bump();
 		const type = (event as { type?: string }).type;

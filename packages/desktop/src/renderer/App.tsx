@@ -12,7 +12,6 @@ import {
 	toggleSessionSearch,
 	toggleSidebar,
 	toggleSidePane,
-	toggleTerminalPane,
 } from "./state/app.ts";
 import { useApp } from "./state/useApp.ts";
 import { toggleVoice } from "./state/voice.ts";
@@ -24,7 +23,6 @@ import { RightRail } from "./components/RightRail.tsx";
 import { SettingsDialog } from "./components/SettingsDialog.tsx";
 import { ShortcutsDialog } from "./components/ShortcutsDialog.tsx";
 import { Sidebar } from "./components/Sidebar.tsx";
-import { TerminalPane } from "./components/TerminalPane.tsx";
 import { Titlebar } from "./components/Titlebar.tsx";
 import { toggleAllToolOutput, Transcript } from "./components/Transcript.tsx";
 import { TooltipProvider } from "./components/ui/tooltip.tsx";
@@ -66,10 +64,7 @@ export function App() {
 				return;
 			}
 			const key = e.key.toLowerCase();
-			if (e.key === "`") {
-				e.preventDefault();
-				toggleTerminalPane();
-			} else if (e.key === ";") {
+			if (e.key === ";") {
 				e.preventDefault();
 				toggleSidePane();
 			} else if (e.key === "Tab") {
@@ -161,7 +156,6 @@ export function App() {
 				<main className="flex min-w-0 flex-1 flex-col pt-9 @container">
 					<Transcript />
 					<Composer />
-					<TerminalPane />
 				</main>
 				<RightRail />
 			</div>

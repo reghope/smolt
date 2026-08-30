@@ -92,13 +92,6 @@ export interface WorktreeInfo {
 	worktrees: { name: string; branch: string; path: string }[];
 }
 
-export interface TerminalEntry {
-	kind: "cmd" | "out" | "status";
-	text: string;
-	/** For status rows: failed / cancelled / note. */
-	tone?: "fail" | "cancelled" | "note";
-}
-
 export type ThemeChoice = "system" | "light" | "dark";
 
 /** A transient, self-dismissing notification card. */
@@ -153,8 +146,6 @@ interface AppState {
 	stats: UsageStats | null;
 	statsTab: "overview" | "models" | "rhythm";
 	statsWindow: number;
-	terminalLog: TerminalEntry[];
-	terminalBusy: boolean;
 	sideSeeded: boolean;
 	sideError: string | null;
 	// UI surfaces the keyboard shortcuts also need to reach.
@@ -163,7 +154,6 @@ interface AppState {
 	sessionQuery: string;
 	diffOpen: boolean;
 	sideOpen: boolean;
-	terminalOpen: boolean;
 	settingsOpen: boolean;
 	shortcutsOpen: boolean;
 	modelMenuOpen: boolean;
@@ -222,8 +212,6 @@ export const app: AppState = {
 	stats: null,
 	statsTab: "overview",
 	statsWindow: 0,
-	terminalLog: [],
-	terminalBusy: false,
 	sideSeeded: false,
 	sideError: null,
 	sidebarHidden: false,
@@ -231,7 +219,6 @@ export const app: AppState = {
 	sessionQuery: "",
 	diffOpen: false,
 	sideOpen: false,
-	terminalOpen: false,
 	settingsOpen: false,
 	shortcutsOpen: false,
 	modelMenuOpen: false,
@@ -1071,40 +1058,6 @@ export async function answerApproval(answer: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Terminal
-// ---------------------------------------------------------------------------
-
-/** Commands run in this pane, walked with Up/Down like a shell. */
-export const terminalHistory: string[] = [];
-
-export async function runTerminalCommand(command: string): Promise<void> {
-	if (app.terminalBusy) return;
-	app.terminalBusy = true;
-	terminalHistory.push(command);
-	app.terminalLog = [...app.terminalLog, { kind: "cmd", text: command }];
-	bump();
-
-	// The agent runs it, so the command shares the session's shell state and
-	// working directory rather than a shell this window owns.
-	const result = await call<{ output: string; exitCode?: number; cancelled: boolean; truncated: boolean }>(
-		"bash",
-		command,
-	);
-	const entries: TerminalEntry[] = [];
-	if (result) {
-		if (result.output.trim() !== "") entries.push({ kind: "out", text: result.output });
-		if (result.cancelled) entries.push({ kind: "status", text: "cancelled", tone: "cancelled" });
-		else if (result.exitCode !== undefined && result.exitCode !== 0) {
-			entries.push({ kind: "status", text: `exit ${result.exitCode}`, tone: "fail" });
-		}
-		if (result.truncated) entries.push({ kind: "status", text: "output truncated", tone: "note" });
-	}
-	app.terminalLog = [...app.terminalLog, ...entries];
-	app.terminalBusy = false;
-	bump();
-}
-
-// ---------------------------------------------------------------------------
 // Side chat
 // ---------------------------------------------------------------------------
 
@@ -1271,11 +1224,6 @@ export function toggleDiffPane(force?: boolean): void {
 
 export function toggleSidePane(force?: boolean): void {
 	app.sideOpen = force ?? !app.sideOpen;
-	bump();
-}
-
-export function toggleTerminalPane(force?: boolean): void {
-	app.terminalOpen = force ?? !app.terminalOpen;
 	bump();
 }
 

@@ -10,7 +10,6 @@ import {
 	toggleSessionSearch,
 	toggleSidebar,
 	toggleSidePane,
-	toggleTerminalPane,
 } from "../state/app.ts";
 import { useApp } from "../state/useApp.ts";
 import { Icon } from "./ui/icon.tsx";
@@ -133,11 +132,6 @@ export function Titlebar() {
 				</div>
 			)}
 			<div className="app-no-drag absolute top-1 right-[148px] flex gap-0.5">
-				<TitlebarButton
-					name="terminal"
-					title="Terminal (Ctrl+`)"
-					onClick={() => toggleTerminalPane()}
-				/>
 				<TitlebarButton
 					name="diff"
 					title="Changes (Ctrl+Shift+D)"

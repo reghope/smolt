@@ -18,6 +18,7 @@ import { listSessions } from "./sessions.ts";
 import { ensureModel, speechStatus, transcribeSamples } from "./speech.ts";
 import { collectStats } from "./stats.ts";
 import { findTranscriptionProvider, transcribeAudio } from "./transcribe.ts";
+import { checkNow, installUpdate, startUpdates, updateState } from "./updates.ts";
 import { createWorktree, listWorktrees, removeWorktree, repoRoot } from "./worktrees.ts";
 
 const SMOKE = process.env.SMOLT_DESKTOP_SMOKE === "1";
@@ -379,7 +380,11 @@ function createWindow(): BrowserWindow {
 		items.push({ role: "selectAll" });
 		Menu.buildFromTemplate(items).popup({ window: win });
 	});
-	win.once("ready-to-show", () => win.show());
+	win.once("ready-to-show", () => {
+		win.show();
+		// Looking for an update is background work; it must never delay the window.
+		void startUpdates(win);
+	});
 
 	// Links in a response belong in the user's browser. Without this a click
 	// either navigates the window away from the app or opens a bare Electron
@@ -862,6 +867,16 @@ app.whenReady().then(async () => {
 	});
 
 	ipcMain.handle("app:recent-projects", () => readProjectState().recent);
+
+	ipcMain.handle("app:update-state", () => updateState());
+	ipcMain.handle("app:update-check", async () => {
+		await checkNow();
+		return { ok: true };
+	});
+	ipcMain.handle("app:update-install", async () => {
+		await installUpdate();
+		return { ok: true };
+	});
 
 	ipcMain.handle("app:folders", () => projectFolders);
 

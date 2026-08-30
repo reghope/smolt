@@ -47,6 +47,13 @@ extraResources:
   - from: ../coding-agent/package.json
     to: agent/package.json
 
+# Updates are served from the site the installers are published to. No CI
+# publishes here: a release is a deliberate upload, and the app only reads.
+publish:
+  - provider: generic
+    url: https://smolt.dev/downloads
+    channel: latest
+
 asar: true
 # Native bindings cannot be read from inside an asar archive.
 asarUnpack:

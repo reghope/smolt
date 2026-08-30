@@ -8,7 +8,6 @@ import {
 	projectName,
 	toggleDiffPane,
 	toggleSessionSearch,
-	toggleTerminalPane,
 } from "../state/app.ts";
 import { useApp } from "../state/useApp.ts";
 import {
@@ -106,10 +105,6 @@ export function MoreMenu() {
 				<DropdownMenuItem onSelect={() => toggleDiffPane()}>
 					Changes
 					<DropdownMenuShortcut>Ctrl+Shift+D</DropdownMenuShortcut>
-				</DropdownMenuItem>
-				<DropdownMenuItem onSelect={() => toggleTerminalPane()}>
-					Terminal
-					<DropdownMenuShortcut>Ctrl+`</DropdownMenuShortcut>
 				</DropdownMenuItem>
 				<DropdownMenuItem onSelect={() => void call("bash", `start "" "${state.appInfo.cwd}"`)}>
 					Open project folder

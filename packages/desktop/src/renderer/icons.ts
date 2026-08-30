@@ -18,6 +18,7 @@ const PATHS: Record<string, string> = {
 	// chrome
 	plus: `<path ${STROKE} d="M3.5 10h13M10 3.5v13"/>`,
 	folderAdd: `<path ${STROKE} d="M3 6.5A1.5 1.5 0 0 1 4.5 5h3l1.5 2h6.5A1.5 1.5 0 0 1 17 8.5v6A1.5 1.5 0 0 1 15.5 16h-11A1.5 1.5 0 0 1 3 14.5z"/><path ${STROKE} d="M10 9.5v4M8 11.5h4"/>`,
+	update: `<path ${STROKE} d="M10 4v8m0 0 3-3m-3 3-3-3"/><path ${STROKE} d="M4 14v1.5A1.5 1.5 0 0 0 5.5 17h9a1.5 1.5 0 0 0 1.5-1.5V14"/>`,
 	folder: `<path ${STROKE} d="M3 6.5A1.5 1.5 0 0 1 4.5 5h3l1.5 2h6.5A1.5 1.5 0 0 1 17 8.5v6A1.5 1.5 0 0 1 15.5 16h-11A1.5 1.5 0 0 1 3 14.5z"/>`,
 	command: `<path ${STROKE} d="M12.5 4 7.5 16"/><path ${STROKE} d="m5 7-3 3 3 3M15 7l3 3-3 3"/>`,
 	newChat: `<path ${STROKE} d="M3.5 10h13M10 3.5v13"/>`,
@@ -30,7 +31,6 @@ const PATHS: Record<string, string> = {
 	trash: `<path ${STROKE} d="M4.5 6h11M8 6V4.5h4V6M6 6l.6 9.5h6.8L14 6"/>`,
 	diff: `<path ${STROKE} d="M6 3.5v6M3 6.5h6M3 15.5h6M11 6.5h6M14 12.5v6M11 15.5h6"/>`,
 	branch: `<circle ${STROKE} cx="6" cy="5" r="2"/><circle ${STROKE} cx="6" cy="15" r="2"/><circle ${STROKE} cx="14" cy="8" r="2"/><path ${STROKE} d="M6 7v6M8 8h2a2 2 0 0 1 2 2v0a2 2 0 0 1-2 2H8"/>`,
-	terminal: `<rect ${STROKE} x="3" y="4" width="14" height="12" rx="2.5"/><path ${STROKE} d="m6.5 8.5 2 2-2 2M11 13h3"/>`,
 	side: `<rect ${STROKE} x="3" y="4" width="14" height="12" rx="2.5"/><path ${STROKE} d="M12.5 4v12"/>`,
 	sidebar: `<rect ${STROKE} x="3" y="4" width="14" height="12" rx="2.5"/><path ${STROKE} d="M8 4v12"/>`,
 	menu: `<path ${STROKE} d="M3.5 6h13M3.5 10h13M3.5 14h13"/>`,

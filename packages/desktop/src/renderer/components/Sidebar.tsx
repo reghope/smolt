@@ -31,6 +31,7 @@ import {
 import { Icon } from "./ui/icon.tsx";
 import { Input } from "./ui/input.tsx";
 import { MoreMenu } from "./MoreMenu.tsx";
+import { UpdateBanner } from "./UpdateBanner.tsx";
 
 /** Bucket a session by how long ago it was last touched. */
 function sessionBucket(lastActive: number): string {
@@ -328,6 +329,7 @@ export function Sidebar() {
 			</div>
 			{/* A rule marks the footer off from the list it sits under. */}
 			<div className="-mx-2 mt-1 border-t px-2 pt-2">
+				<UpdateBanner />
 				<MoreMenu />
 			</div>
 			</div>

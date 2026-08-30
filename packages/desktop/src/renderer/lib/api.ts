@@ -1,5 +1,14 @@
 /** The preload bridge: everything the renderer may ask of the main process. */
 
+/** What the updater is doing, mirrored from the main process. */
+export type UpdateState =
+	| { status: "idle" }
+	| { status: "checking" }
+	| { status: "available"; version: string }
+	| { status: "downloading"; version: string; percent: number }
+	| { status: "ready"; version: string }
+	| { status: "error"; message: string };
+
 export interface AgentCallResult {
 	ok: boolean;
 	value?: unknown;
@@ -35,6 +44,10 @@ export interface SmoltApi {
 	recentProjects(): Promise<string[]>;
 	closeProject(): Promise<{ ok: boolean; error?: string }>;
 	folders(): Promise<string[]>;
+	updateState(): Promise<UpdateState>;
+	updateCheck(): Promise<{ ok: boolean }>;
+	updateInstall(): Promise<{ ok: boolean }>;
+	onUpdateState(cb: (state: UpdateState) => void): void;
 	authList(): Promise<string[]>;
 	authSet(provider: string, key: string): Promise<{ ok: boolean; error?: string }>;
 	openCli(): Promise<{ ok: boolean; error?: string }>;

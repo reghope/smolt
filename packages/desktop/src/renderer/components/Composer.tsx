@@ -15,7 +15,6 @@ import {
 	renameSession,
 	switchToSession,
 	toggleSidePane,
-	toggleTerminalPane,
 	chooseModel,
 	chooseThinking,
 	clearQueued,
@@ -741,7 +740,6 @@ export function Composer() {
 			app.settingsOpen = true;
 			bump();
 		}) },
-		{ title: "terminal", description: "Toggle the terminal", kind: "action", run: act(() => toggleTerminalPane()) },
 		{ title: "changes", description: "Toggle the changes pane", kind: "action", run: act(() => toggleDiffPane()) },
 		{ title: "side", description: "Toggle the side chat", kind: "action", run: act(() => toggleSidePane()) },
 		{ title: "shortcuts", description: "Keyboard shortcuts", kind: "action", run: act(() => {

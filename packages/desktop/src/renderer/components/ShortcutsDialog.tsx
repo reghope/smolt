@@ -17,7 +17,6 @@ const SHORTCUTS: [string, string][] = [
 	["1 – 9", "Select an item in an open menu"],
 	["Ctrl + Shift + M", "Permission mode menu"],
 	["Ctrl + Shift + D", "Toggle the changes pane"],
-	["Ctrl + `", "Toggle the terminal"],
 	["Ctrl + ;", "Toggle the side chat"],
 	["Ctrl + O", "Expand or collapse all tool output"],
 	["Ctrl + M", "Dictate"],

@@ -358,7 +358,22 @@ export function SettingsDialog() {
 											onChange={(event) => setModelFilter(event.target.value)}
 										/>
 										<div className="flex max-h-56 flex-col gap-px overflow-y-auto">
-											{filteredModels.length === 0 ? (
+											{state.availableModels.length === 0 ? (
+												<div className="flex flex-col items-start gap-2 px-2 py-2">
+													<p className="text-sm leading-relaxed text-muted-foreground">
+														No models yet. Add a provider's API key and smolt will pick its models up.
+													</p>
+													<Button
+														size="sm"
+														onClick={() => {
+															app.providerDialogOpen = true;
+															bump();
+														}}
+													>
+														Add a provider
+													</Button>
+												</div>
+											) : filteredModels.length === 0 ? (
 												<p className="px-2 py-2 text-sm text-faint">No model matches “{modelFilter.trim()}”.</p>
 											) : (
 												filteredModels.map((option) => (

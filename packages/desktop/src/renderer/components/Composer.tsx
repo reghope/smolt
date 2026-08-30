@@ -8,6 +8,7 @@ import {
 	app,
 	applyTheme,
 	bump,
+	bumpDraft,
 	call,
 	forkSession,
 	newSession,
@@ -40,7 +41,7 @@ import {
 	type ModelOption,
 	type SlashCommand,
 } from "../state/app.ts";
-import { useApp } from "../state/useApp.ts";
+import { useApp, useDraft } from "../state/useApp.ts";
 import { finishVoice, startVoice, toggleVoice } from "../state/voice.ts";
 import { Badge } from "./ui/badge.tsx";
 import { Button } from "./ui/button.tsx";
@@ -666,6 +667,8 @@ function CommandPalette({
 
 export function Composer() {
 	const state = useApp();
+	// The composer alone follows the draft, so typing wakes nothing else.
+	useDraft();
 	const inputRef = useRef<HTMLTextAreaElement>(null);
 	const [dropping, setDropping] = useState(false);
 	const [paletteIndex, setPaletteIndex] = useState(0);
@@ -891,7 +894,9 @@ export function Composer() {
 						onChange={(event) => {
 							app.draft = event.target.value;
 							historyIndexRef.current = -1;
-							bump();
+							// Only the composer reads the draft; waking the transcript to add
+							// one character is what made typing feel behind the keyboard.
+							bumpDraft();
 						}}
 						onKeyDown={(event) => {
 							const input = event.currentTarget;

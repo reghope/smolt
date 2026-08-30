@@ -1,6 +1,6 @@
 {
 	"name": "@smolt/desktop",
-	"version": "0.1.7",
+	"version": "0.1.8",
 	"description": "Minimalist desktop app for the smolt coding agent",
 	"private": true,
 	"type": "module",
@@ -13,6 +13,7 @@
 		"clean": "shx rm -rf dist",
 		"release": "node build.mjs && electron-builder --publish never",
 		"release:win": "node build.mjs && electron-builder --win --publish never",
+		"release:win:hotfix": "node build.mjs && electron-builder --win --publish never -c.releaseInfo.releaseName=hotfix",
 		"release:linux": "node build.mjs && electron-builder --linux --publish never",
 		"release:mac": "node build.mjs && electron-builder --mac --publish never"
 	},

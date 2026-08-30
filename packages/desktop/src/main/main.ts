@@ -458,7 +458,8 @@ function createWindow(): BrowserWindow {
 	win.once("ready-to-show", () => {
 		win.show();
 		// Looking for an update is background work; it must never delay the window.
-		void startUpdates(win);
+		// A hotfix applies itself, but never through a turn in progress.
+		void startUpdates(win, () => !slots.some((slot) => slot.busy));
 	});
 
 	// Links in a response belong in the user's browser. Without this a click

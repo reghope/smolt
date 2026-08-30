@@ -25,6 +25,28 @@ export function UpdateBanner() {
 
 	if (state.status === "idle" || state.status === "checking" || state.status === "error") return null;
 
+	// A hotfix applies itself; the row reports rather than asks.
+	if (state.status === "installing") {
+		return (
+			<div className="mb-1 flex w-full items-center gap-2 rounded-lg border bg-card px-3 py-2 text-xs">
+				<Icon name="spinner" className="flex-none animate-spin text-salmon" />
+				<span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
+					Updating to v{state.version} — restarting
+				</span>
+			</div>
+		);
+	}
+	if (state.status === "ready" && state.hotfix) {
+		return (
+			<div className="mb-1 flex w-full items-center gap-2 rounded-lg border bg-card px-3 py-2 text-xs">
+				<Icon name="update" className="flex-none text-salmon" />
+				<span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
+					v{state.version} installs when this chat is done
+				</span>
+			</div>
+		);
+	}
+
 	if (state.status === "downloading") {
 		return (
 			<div className="mb-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-xs text-faint">

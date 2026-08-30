@@ -6,7 +6,8 @@ export type UpdateState =
 	| { status: "checking" }
 	| { status: "available"; version: string }
 	| { status: "downloading"; version: string; percent: number }
-	| { status: "ready"; version: string }
+	| { status: "ready"; version: string; hotfix?: boolean }
+	| { status: "installing"; version: string }
 	| { status: "error"; message: string };
 
 export interface AgentCallResult {

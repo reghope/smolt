@@ -1,6 +1,6 @@
 {
 	"name": "@smolt/desktop",
-	"version": "0.1.9",
+	"version": "0.1.10",
 	"description": "Minimalist desktop app for the smolt coding agent",
 	"private": true,
 	"type": "module",

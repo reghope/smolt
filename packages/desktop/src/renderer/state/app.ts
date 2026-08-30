@@ -188,6 +188,8 @@ interface AppState {
 	voiceLevel: number;
 	/** The device that recorded nothing, so the mic button can say which. */
 	voiceSilent: string;
+	/** A stop has been asked for and not yet taken effect. */
+	aborting: boolean;
 	holdToRecord: boolean;
 	/** Composer text lives here so dictation and history can write it. */
 	draft: string;
@@ -262,6 +264,7 @@ export const app: AppState = {
 	micDeviceId: "",
 	voiceLevel: 0,
 	voiceSilent: "",
+	aborting: false,
 	holdToRecord: false,
 	draft: "",
 	busySessions: new Set<string>(),
@@ -718,7 +721,23 @@ export async function loadMessages(): Promise<void> {
 	app.historyStart = start;
 	app.historyUserStart = countUsers(messages.slice(0, start));
 	app.historySource = "agent";
+	// Put the turn cost back. Switching into a chat clears it, and the count
+	// only ever refills from a streamed usage event — so on a long turn the
+	// footer would sit there with no tokens for however long the turn had left.
+	app.chat.usage = latestUsage(messages) ?? app.chat.usage;
 	bump();
+}
+
+/** The newest usage figures in a transcript, which are the turn so far. */
+function latestUsage(messages: Record<string, unknown>[]): { input: number; output: number; cost: number } | null {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const raw = messages[index];
+		if (raw?.role !== "assistant") continue;
+		const usage = raw.usage as { input?: number; output?: number; cost?: { total?: number } } | undefined;
+		if (!usage || typeof usage.input !== "number") continue;
+		return { input: usage.input, output: usage.output ?? 0, cost: usage.cost?.total ?? 0 };
+	}
+	return null;
 }
 
 /**
@@ -800,6 +819,20 @@ export async function refreshDiff(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Sending
 // ---------------------------------------------------------------------------
+
+/**
+ * Ask the turn to stop, and show that it was asked at once.
+ *
+ * Aborting is not instant — the agent finishes what it is inside before it
+ * unwinds — so a button that stays live reads as a button that did not
+ * work, and gets pressed again.
+ */
+export async function abortTurn(): Promise<void> {
+	if (app.aborting) return;
+	app.aborting = true;
+	bump();
+	await call("abort");
+}
 
 /** Prompts already sent, newest last; Up/Down walk this like a shell history. */
 export const promptHistory: string[] = [];
@@ -1580,7 +1613,9 @@ export function boot(): void {
 				bump();
 			}
 		}
+		if (raw.type === "agent_start") app.aborting = false;
 		if (type === "agent_settled") {
+			app.aborting = false;
 			// Nothing can still be waiting once the run is over: a message the
 			// agent never drained is one it will not read now.
 			app.queuedBySession.delete(app.currentSessionPath);

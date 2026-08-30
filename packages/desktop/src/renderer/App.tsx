@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import {
+	abortTurn,
 	addImageFiles,
 	app,
 	bump,
@@ -58,7 +59,7 @@ export function App() {
 						// once the dialogs are shut, and a turn in flight is the one
 						// thing a reader most often wants out of.
 						e.preventDefault();
-						void call("abort");
+						void abortTurn();
 					}
 				}
 				return;

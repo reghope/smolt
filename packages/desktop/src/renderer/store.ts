@@ -197,10 +197,14 @@ export function reduce(state: UiState, event: unknown): UiState {
 				const mapped = fromAgentMessage(message);
 				if (mapped && textOf(message.content).trim() !== "") state.messages.push(mapped);
 			} else if (message.role === "assistant") {
-				const previous = state.messages[state.messages.length - 1];
-				if (previous?.streaming) {
-					previous.streaming = false;
-					previous.tookMs = previous.startedAt ? Date.now() - previous.startedAt : undefined;
+				// Close every message still marked live, not just the one before this.
+				// A steered message lands between two assistant turns, so the one that
+				// was streaming is no longer the last entry — and it would keep a
+				// second working line running underneath the real one.
+				for (const earlier of state.messages) {
+					if (!earlier.streaming) continue;
+					earlier.streaming = false;
+					earlier.tookMs = earlier.startedAt ? Date.now() - earlier.startedAt : undefined;
 				}
 				state.messages.push({ role: "assistant", blocks: [], streaming: true, startedAt: Date.now() });
 			}

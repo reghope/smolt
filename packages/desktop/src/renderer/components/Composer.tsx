@@ -17,6 +17,7 @@ import {
 	toggleSidePane,
 	chooseModel,
 	chooseThinking,
+	abortTurn,
 	clearQueued,
 	queuedHere,
 	sendQueuedNow,
@@ -1042,20 +1043,21 @@ export function Composer() {
 						    none. Esc still stops at any time. */}
 						{(() => {
 							const showStop = state.chat.streaming && !canSend;
+							const stopping = showStop && state.aborting;
 							return (
 								<Button
 									size="icon"
-									title={showStop ? "Stop (Esc)" : state.chat.streaming ? "Send to queue" : "Send"}
-									disabled={!state.chat.streaming && !canSend}
+									title={stopping ? "Stopping…" : showStop ? "Stop (Esc)" : state.chat.streaming ? "Send to queue" : "Send"}
+									disabled={stopping || (!state.chat.streaming && !canSend)}
 									className={cn(
 										"rounded-full active:scale-95",
 										showStop
-											? "bg-destructive text-destructive-foreground hover:bg-destructive/90"
+											? "bg-destructive text-destructive-foreground hover:bg-destructive/90 disabled:bg-destructive/40"
 											: "disabled:bg-input disabled:text-faint",
 									)}
-									onClick={() => (showStop ? void call("abort") : void send())}
+									onClick={() => (showStop ? void abortTurn() : void send())}
 								>
-									<Icon name={showStop ? "stop" : "send"} />
+									<Icon name={stopping ? "spinner" : showStop ? "stop" : "send"} className={cn(stopping && "animate-spin")} />
 								</Button>
 							);
 						})()}

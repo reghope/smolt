@@ -133,6 +133,8 @@ interface AppState {
 	thinking: string;
 	/** The effort new chats start at; the composer changes only this chat. */
 	defaultThinking: string;
+	/** Sidebar days list every chat instead of folding past the latest five. */
+	sidebarShowAll: boolean;
 	sessionRows: SessionRow[];
 	currentSessionPath: string;
 	sessionName: string;
@@ -249,6 +251,7 @@ export const app: AppState = {
 	model: "",
 	thinking: "",
 	defaultThinking: storedPreference("smolt.defaultEffort", ""),
+	sidebarShowAll: storedPreference("smolt.sidebarShowAll", "0") === "1",
 	sessionRows: [],
 	currentSessionPath: "",
 	sessionName: "",
@@ -1495,6 +1498,12 @@ export async function deleteSelectedSessions(): Promise<void> {
 	app.selectedSessions = new Set();
 	if (deletedCurrent) await call("newSession");
 	await refreshState();
+}
+
+export function setSidebarShowAll(on: boolean): void {
+	app.sidebarShowAll = on;
+	storePreference("smolt.sidebarShowAll", on ? "1" : "0");
+	bump();
 }
 
 export function toggleGroupCollapsed(label: string): void {

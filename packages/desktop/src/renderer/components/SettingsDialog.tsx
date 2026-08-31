@@ -15,6 +15,7 @@ import {
 	ensureThinkingLevels,
 	installUpdate,
 	refreshState,
+	setSidebarShowAll,
 	requestConfirm,
 	requestInput,
 	setDefaultThinking,
@@ -546,6 +547,14 @@ export function SettingsDialog() {
 										hint="Set smolt's prose in a serif face"
 										checked={state.serif}
 										onChange={(next) => applySerif(next)}
+									/>
+								)}
+								{matches(query, "sidebar chats history day collapse") && (
+									<ToggleRow
+										label="Show every chat per day"
+										hint="Sidebar days list all their chats instead of the latest 5"
+										checked={state.sidebarShowAll}
+										onChange={(next) => setSidebarShowAll(next)}
 									/>
 								)}
 							</>

@@ -169,9 +169,18 @@ const SessionEntry = memo(function SessionEntry({
 	);
 });
 
+/** How many chats a day's group shows before the rest fold behind a chevron. */
+const GROUP_PREVIEW_ROWS = 5;
+
 function Group({ label, rows, ambiguous }: { label: string; rows: SessionRow[]; ambiguous: Set<string> }) {
 	const collapsed = app.collapsedGroups.has(label);
 	const [menuOpen, setMenuOpen] = useState(false);
+	// A busy day buries every other day: only the latest few show, the rest
+	// wait behind "N more". The preference shows everything by default instead.
+	const [expanded, setExpanded] = useState(false);
+	const showAll = app.sidebarShowAll || expanded;
+	const shown = showAll ? rows : rows.slice(0, GROUP_PREVIEW_ROWS);
+	const hiddenCount = showAll ? 0 : rows.length - shown.length;
 	if (rows.length === 0) return null;
 	return (
 		<>
@@ -201,7 +210,7 @@ function Group({ label, rows, ambiguous }: { label: string; rows: SessionRow[]; 
 				</DropdownMenuContent>
 			</DropdownMenu>
 			{!collapsed &&
-				rows.map((row) => (
+				shown.map((row) => (
 					<SessionEntry
 						key={row.path}
 						row={row}
@@ -213,6 +222,30 @@ function Group({ label, rows, ambiguous }: { label: string; rows: SessionRow[]; 
 						waiting={app.pendingApprovals.some((request) => request.session === row.path)}
 					/>
 				))}
+			{!collapsed && hiddenCount > 0 && (
+				<button
+					type="button"
+					onClick={() => setExpanded(true)}
+					className="flex h-7 items-center gap-2 rounded-lg px-3 text-left text-xs text-faint transition-colors hover:bg-accent/60 hover:text-muted-foreground"
+				>
+					<span className="flex rotate-90 text-faint">
+						<Icon name="chevron" />
+					</span>
+					{hiddenCount} more
+				</button>
+			)}
+			{!collapsed && expanded && !app.sidebarShowAll && rows.length > GROUP_PREVIEW_ROWS && (
+				<button
+					type="button"
+					onClick={() => setExpanded(false)}
+					className="flex h-7 items-center gap-2 rounded-lg px-3 text-left text-xs text-faint transition-colors hover:bg-accent/60 hover:text-muted-foreground"
+				>
+					<span className="flex -rotate-90 text-faint">
+						<Icon name="chevron" />
+					</span>
+					Show fewer
+				</button>
+			)}
 		</>
 	);
 }

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { relative, resolve } from "node:path";
+import { statSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 
 /**
  * Working-tree changes for the diff pane.
@@ -118,6 +119,18 @@ export function attributeChanges(
 	return { mine, preexisting: files.length - since.length };
 }
 
+/**
+ * Untracked files whose full body is rendered as a diff. Beyond this the pane
+ * lists paths without bodies: a working tree can hold thousands of untracked
+ * files (a tool dumped a browser profile, a build wrote an output dir), and
+ * one `git diff --no-index` spawn per file froze the whole app.
+ */
+const UNTRACKED_BODY_LIMIT = 100;
+/** Untracked files listed at all; past this the tree is a dump, not a diff. */
+const UNTRACKED_LIST_LIMIT = 500;
+/** An untracked file bigger than this gets listed, not rendered. */
+const UNTRACKED_BODY_MAX_BYTES = 256 * 1024;
+
 /** Everything currently differing from HEAD, including untracked files. */
 async function collectRaw(cwd: string): Promise<DiffFile[] | undefined> {
 	const inside = await run("git", ["rev-parse", "--is-inside-work-tree"], cwd);
@@ -126,17 +139,32 @@ async function collectRaw(cwd: string): Promise<DiffFile[] | undefined> {
 	const tracked = await run("git", ["diff", "HEAD", "--no-color"], cwd);
 	const files = parseDiff(tracked.out);
 
-	// Untracked files are absent from `git diff`; add them as whole-file additions.
+	// Untracked files are absent from `git diff`; add them as whole-file
+	// additions — bounded, because this used to spawn git once per file with
+	// no cap and locked the app when a tool littered thousands of them.
 	const untracked = await run("git", ["ls-files", "--others", "--exclude-standard"], cwd);
-	for (const path of untracked.out
+	const paths = untracked.out
 		.split("\n")
 		.map((line) => line.trim())
-		.filter(Boolean)) {
-		const shown = await run("git", ["diff", "--no-index", "--no-color", "/dev/null", path], cwd);
-		const parsed = parseDiff(shown.out);
-		const entry = parsed[0];
-		if (entry) files.push({ ...entry, path, status: "untracked" });
-		else files.push({ path, hunks: "", added: 0, removed: 0, status: "untracked" });
+		.filter(Boolean);
+	let bodies = 0;
+	for (const path of paths.slice(0, UNTRACKED_LIST_LIMIT)) {
+		let small = false;
+		try {
+			small = statSync(join(cwd, path)).size <= UNTRACKED_BODY_MAX_BYTES;
+		} catch {
+			// Unreadable or vanished mid-scan: list it without a body.
+		}
+		if (small && bodies < UNTRACKED_BODY_LIMIT) {
+			bodies++;
+			const shown = await run("git", ["diff", "--no-index", "--no-color", "/dev/null", path], cwd);
+			const entry = parseDiff(shown.out)[0];
+			if (entry) {
+				files.push({ ...entry, path, status: "untracked" });
+				continue;
+			}
+		}
+		files.push({ path, hunks: "", added: 0, removed: 0, status: "untracked" });
 	}
 	files.sort((a, b) => a.path.localeCompare(b.path));
 	return files;

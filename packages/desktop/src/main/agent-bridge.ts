@@ -53,7 +53,7 @@ export interface BridgeOptions {
 	/** Extra CLI args (e.g. --continue). */
 	args?: string[];
 	/** Extra environment for the agent process (e.g. SMOLT_TELEGRAM_POLL). */
-	env?: Record<string, string>;
+	env?: Record<string, string | undefined>;
 	/** Executable to run the CLI with; Electron's own Node once packaged. */
 	execPath?: string;
 }
@@ -76,6 +76,8 @@ export class AgentBridge {
 	private client: RpcClient | null = null;
 	private listeners: ((event: unknown) => void)[] = [];
 	private startError: string | null = null;
+	/** Held until the client exists, so a listener registered before start works. */
+	private exitListeners: ((info: { code: number | null; signal: string | null }) => void)[] = [];
 
 	async start(options: BridgeOptions, appDir: string): Promise<void> {
 		const cliPath = findCliPath(appDir, options.cliPath);
@@ -93,6 +95,7 @@ export class AgentBridge {
 				env: options.env,
 				execPath: options.execPath,
 			});
+			for (const listener of this.exitListeners) client.onExit(listener);
 			client.onEvent((event) => {
 				for (const listener of this.listeners) listener(event);
 			});
@@ -106,6 +109,20 @@ export class AgentBridge {
 
 	onEvent(listener: (event: unknown) => void): void {
 		this.listeners.push(listener);
+	}
+
+	/** The agent process's OS pid, while it is running. */
+	get pid(): number | undefined {
+		return this.client?.pid;
+	}
+
+	/** Called once when the agent process exits, for any reason. */
+	onExit(listener: (info: { code: number | null; signal: string | null }) => void): () => void {
+		if (this.client) return this.client.onExit(listener);
+		this.exitListeners.push(listener);
+		return () => {
+			this.exitListeners = this.exitListeners.filter((held) => held !== listener);
+		};
 	}
 
 	get status(): { running: boolean; error: string | null } {

@@ -33,6 +33,97 @@ export interface UsageStats {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** One transcript's contribution to the totals, cacheable by mtime. */
+interface SessionScan {
+	messages: number;
+	tokens: number;
+	cost: number;
+	byDay: Record<string, number>;
+	byHour: number[];
+	models: Record<string, { messages: number; tokens: number; input: number; output: number }>;
+	byDayModel: Record<string, Record<string, number>>;
+}
+
+/**
+ * Per-file scan results, keyed off mtime. Stats refresh after every settled
+ * turn, and re-reading and re-parsing a hundred megabytes of unchanged
+ * transcripts each time blocked the main process — which is the window's UI
+ * thread — for seconds at a time. Only files that actually changed are
+ * re-scanned.
+ */
+const scanCache = new Map<string, { mtime: number; scan: SessionScan | undefined }>();
+
+function scanSession(path: string, mtime: number): SessionScan | undefined {
+	const cached = scanCache.get(path);
+	if (cached && cached.mtime === mtime) return cached.scan;
+	const scan = scanSessionUncached(path);
+	scanCache.set(path, { mtime, scan });
+	return scan;
+}
+
+function scanSessionUncached(path: string): SessionScan | undefined {
+	let raw: string;
+	try {
+		raw = readFileSync(path, "utf-8");
+	} catch {
+		return undefined;
+	}
+	const scan: SessionScan = {
+		messages: 0,
+		tokens: 0,
+		cost: 0,
+		byDay: {},
+		byHour: new Array(24).fill(0) as number[],
+		models: {},
+		byDayModel: {},
+	};
+	for (const line of raw.split("\n")) {
+		if (line.trim() === "") continue;
+		let entry: { type?: string; timestamp?: string; message?: Record<string, unknown> };
+		try {
+			entry = JSON.parse(line);
+		} catch {
+			continue;
+		}
+		if (entry.type !== "message" || !entry.message) continue;
+		const role = entry.message.role;
+		if (role !== "user" && role !== "assistant") continue;
+		scan.messages += 1;
+		if (role !== "assistant") continue;
+
+		const when = parseWhen(entry.message.timestamp, entry.timestamp);
+		if (when) {
+			scan.byDay[dayKey(when)] = (scan.byDay[dayKey(when)] ?? 0) + 1;
+			scan.byHour[when.getHours()] += 1;
+		}
+		const usage = entry.message.usage as
+			| { totalTokens?: unknown; input?: unknown; output?: unknown; cost?: { total?: unknown } }
+			| undefined;
+		const used = typeof usage?.totalTokens === "number" ? usage.totalTokens : 0;
+		const inTokens = typeof usage?.input === "number" ? usage.input : 0;
+		const outTokens = typeof usage?.output === "number" ? usage.output : 0;
+		scan.tokens += used;
+		if (typeof usage?.cost?.total === "number") scan.cost += usage.cost.total;
+
+		const modelId = entry.message.model;
+		if (typeof modelId === "string" && modelId !== "") {
+			const seen = scan.models[modelId] ?? { messages: 0, tokens: 0, input: 0, output: 0 };
+			seen.messages += 1;
+			seen.tokens += used;
+			seen.input += inTokens;
+			seen.output += outTokens;
+			scan.models[modelId] = seen;
+			if (when) {
+				const key = dayKey(when);
+				const day = scan.byDayModel[key] ?? {};
+				day[modelId] = (day[modelId] ?? 0) + used;
+				scan.byDayModel[key] = day;
+			}
+		}
+	}
+	return scan;
+}
+
 /**
  * Session logs carry both shapes: the entry's ISO string and the message's
  * epoch milliseconds. Stringifying the number yields an invalid Date, so each
@@ -112,6 +203,7 @@ export function collectStats(cwd: string, root: string = sessionsDir()): UsageSt
 	let tokens = 0;
 	let cost = 0;
 
+	const files: { path: string; mtime: number }[] = [];
 	const walk = (dir: string): void => {
 		let entries: string[];
 		try {
@@ -121,71 +213,40 @@ export function collectStats(cwd: string, root: string = sessionsDir()): UsageSt
 		}
 		for (const name of entries) {
 			const full = join(dir, name);
-			let isDir = false;
 			try {
-				isDir = statSync(full).isDirectory();
+				const st = statSync(full);
+				if (st.isDirectory()) walk(full);
+				else if (name.endsWith(".jsonl")) files.push({ path: full, mtime: st.mtimeMs });
 			} catch {
-				continue;
-			}
-			if (isDir) {
-				walk(full);
-				continue;
-			}
-			if (!name.endsWith(".jsonl")) continue;
-			let raw: string;
-			try {
-				raw = readFileSync(full, "utf-8");
-			} catch {
-				continue;
-			}
-			sessions += 1;
-			for (const line of raw.split("\n")) {
-				if (line.trim() === "") continue;
-				let entry: { type?: string; timestamp?: string; message?: Record<string, unknown> };
-				try {
-					entry = JSON.parse(line);
-				} catch {
-					continue;
-				}
-				if (entry.type !== "message" || !entry.message) continue;
-				const role = entry.message.role;
-				if (role !== "user" && role !== "assistant") continue;
-				messages += 1;
-				if (role !== "assistant") continue;
-
-				const when = parseWhen(entry.message.timestamp, entry.timestamp);
-				if (when) {
-					byDay[dayKey(when)] = (byDay[dayKey(when)] ?? 0) + 1;
-					byHour[when.getHours()] += 1;
-				}
-				const usage = entry.message.usage as
-					| { totalTokens?: unknown; input?: unknown; output?: unknown; cost?: { total?: unknown } }
-					| undefined;
-				const used = typeof usage?.totalTokens === "number" ? usage.totalTokens : 0;
-				const inTokens = typeof usage?.input === "number" ? usage.input : 0;
-				const outTokens = typeof usage?.output === "number" ? usage.output : 0;
-				tokens += used;
-				if (typeof usage?.cost?.total === "number") cost += usage.cost.total;
-
-				const modelId = entry.message.model;
-				if (typeof modelId === "string" && modelId !== "") {
-					const seen = models.get(modelId) ?? { messages: 0, tokens: 0, input: 0, output: 0 };
-					seen.messages += 1;
-					seen.tokens += used;
-					seen.input += inTokens;
-					seen.output += outTokens;
-					models.set(modelId, seen);
-					if (when) {
-						const key = dayKey(when);
-						const day = byDayModel[key] ?? {};
-						day[modelId] = (day[modelId] ?? 0) + used;
-						byDayModel[key] = day;
-					}
-				}
+				// unreadable entry
 			}
 		}
 	};
 	walk(scoped);
+
+	for (const file of files) {
+		const scanned = scanSession(file.path, file.mtime);
+		if (!scanned) continue;
+		sessions += 1;
+		messages += scanned.messages;
+		tokens += scanned.tokens;
+		cost += scanned.cost;
+		for (const [day, count] of Object.entries(scanned.byDay)) byDay[day] = (byDay[day] ?? 0) + count;
+		for (let hour = 0; hour < 24; hour++) byHour[hour] += scanned.byHour[hour] ?? 0;
+		for (const [model, seen] of Object.entries(scanned.models)) {
+			const total = models.get(model) ?? { messages: 0, tokens: 0, input: 0, output: 0 };
+			total.messages += seen.messages;
+			total.tokens += seen.tokens;
+			total.input += seen.input;
+			total.output += seen.output;
+			models.set(model, total);
+		}
+		for (const [day, perModel] of Object.entries(scanned.byDayModel)) {
+			const merged = byDayModel[day] ?? {};
+			for (const [model, used] of Object.entries(perModel)) merged[model] = (merged[model] ?? 0) + used;
+			byDayModel[day] = merged;
+		}
+	}
 
 	const days = Object.keys(byDay);
 	const { current, longest } = streaks(days);

@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, readFileSync, rmSync, watch, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, watch, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { requestsDir } from "../../../coding-agent/src/extensions/permissions/index.ts";
 
@@ -29,8 +29,22 @@ function readRequest(dir: string, name: string): PermissionRequest | undefined {
 	}
 }
 
-/** Watch for new requests, replaying any already waiting. */
-export function watchPermissionRequests(onRequest: (request: PermissionRequest) => void): () => void {
+/** The owning agent's pid, from a request id of the form `<pid>-<counter>`. */
+export function requestPid(id: string): number | undefined {
+	const pid = Number.parseInt(id, 10);
+	return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+}
+
+/**
+ * Watch for new requests, replaying any already waiting, and report removals:
+ * a request whose file disappeared was answered elsewhere or expired, and a
+ * window still showing its card would be inviting a decision that no longer
+ * exists.
+ */
+export function watchPermissionRequests(
+	onRequest: (request: PermissionRequest) => void,
+	onRemoved?: (id: string) => void,
+): () => void {
 	const dir = requestsDir();
 	mkdirSync(dir, { recursive: true });
 	const seen = new Set<string>();
@@ -49,8 +63,11 @@ export function watchPermissionRequests(onRequest: (request: PermissionRequest) 
 			seen.add(name);
 			onRequest(request);
 		}
-		// Forget names whose files are gone, so an id can be reused later.
-		for (const name of [...seen]) if (!names.includes(name)) seen.delete(name);
+		for (const name of [...seen]) {
+			if (names.includes(name)) continue;
+			seen.delete(name);
+			if (onRemoved) onRemoved(name.replace(/\.json$/, ""));
+		}
 	};
 
 	sweep();
@@ -83,6 +100,10 @@ export function writePermissionReply(id: string, answer: string): void {
 	// Guard the id so a reply can never be written outside the directory.
 	if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error(`Unsafe request id: ${id}`);
 	const dir = requestsDir();
+	// A decision needs a live question to attach to. Writing a reply for a
+	// vanished request would linger unread and could answer a later reuse of
+	// the id — the file-based equivalent of clicking a button nobody asked about.
+	if (!existsSync(join(dir, `${id}.json`))) throw new Error(`No pending permission request "${id}"`);
 	mkdirSync(dir, { recursive: true });
 	writeFileSync(join(dir, `${id}.reply`), answer, "utf-8");
 }

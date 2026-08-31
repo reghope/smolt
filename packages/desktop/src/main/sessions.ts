@@ -45,7 +45,8 @@ export function listSessions(root: string = sessionsDir(), limit = 50): SessionS
 	return listSessionsIn(root, limit);
 }
 
-function listSessionsIn(root: string, limit: number): SessionSummary[] {
+/** Every stored transcript file under the root, newest first. */
+function collectSessionFiles(root: string): { path: string; mtime: number }[] {
 	const files: { path: string; mtime: number }[] = [];
 	const walk = (dir: string): void => {
 		let entries: string[];
@@ -67,6 +68,11 @@ function listSessionsIn(root: string, limit: number): SessionSummary[] {
 	};
 	walk(root);
 	files.sort((a, b) => b.mtime - a.mtime);
+	return files;
+}
+
+function listSessionsIn(root: string, limit: number): SessionSummary[] {
+	const files = collectSessionFiles(root);
 
 	// One stat per folder rather than per session: a busy folder holds hundreds.
 	const folderLives = new Map<string, boolean>();
@@ -91,7 +97,39 @@ function listSessionsIn(root: string, limit: number): SessionSummary[] {
 	return out;
 }
 
+/**
+ * A subject line from the first message, for sessions nothing named.
+ *
+ * The first sentence, kept to whole words: a cut-off opening reads like a
+ * leaked prompt rather than a chat's title, and gives nothing back when the
+ * list is scanned later.
+ */
+function titleFromPreview(preview: string): string {
+	const sentence = (preview.split(/(?<=[.!?])\s/)[0] ?? preview).replace(/\s+/g, " ").trim();
+	if (sentence === "") return "(untitled)";
+	if (sentence.length <= 48) return sentence;
+	const cut = sentence.slice(0, 48);
+	const lastSpace = cut.lastIndexOf(" ");
+	return `${(lastSpace > 24 ? cut.slice(0, lastSpace) : cut).replace(/[,;:.]$/, "")}…`;
+}
+
+/**
+ * Summaries by path, keyed off mtime. The sidebar relists sessions on every
+ * agent start, and re-reading a hundred unchanged megabyte transcripts each
+ * time was minutes of blocked main process over a session — the window
+ * freezes with it. A changed file misses on mtime and is read fresh.
+ */
+const summaryCache = new Map<string, { mtime: number; summary: SessionSummary | undefined }>();
+
 function summarize(path: string, mtime: number): SessionSummary | undefined {
+	const cached = summaryCache.get(path);
+	if (cached && cached.mtime === mtime) return cached.summary;
+	const summary = summarizeUncached(path, mtime);
+	summaryCache.set(path, { mtime, summary });
+	return summary;
+}
+
+function summarizeUncached(path: string, mtime: number): SessionSummary | undefined {
 	let raw: string;
 	try {
 		raw = readFileSync(path, "utf-8");
@@ -134,11 +172,43 @@ function summarize(path: string, mtime: number): SessionSummary | undefined {
 		path,
 		id,
 		cwd,
-		title: title || preview.slice(0, 40) || "(untitled)",
+		title: title || titleFromPreview(preview),
 		preview,
 		lastActive: mtime,
 		messageCount,
 	};
+}
+
+/**
+ * Every stored session whose transcript matches the query, newest first.
+ *
+ * The match runs over the file's own text, so a phrase from a reply or a
+ * tool run finds the chat even when its title never mentions it — matching
+ * titles alone made recall depend on what the first prompt looked like.
+ * A plain substring over the raw JSONL: fast, local, and close enough for
+ * finding where a word was said.
+ */
+export function searchSessions(query: string, root: string = sessionsDir(), limit = 50): SessionSummary[] {
+	const needle = query.trim().toLowerCase();
+	if (needle === "") return listSessions(root, limit);
+	if (!existsSync(root)) return [];
+	const files = collectSessionFiles(root);
+	const out: SessionSummary[] = [];
+	// The same ceiling as the plain list: a huge history is not read in full.
+	const ceiling = Math.min(files.length, limit * 8);
+	for (let index = 0; index < ceiling && out.length < limit; index++) {
+		const file = files[index]!;
+		let raw: string;
+		try {
+			raw = readFileSync(file.path, "utf-8");
+		} catch {
+			continue;
+		}
+		if (!raw.toLowerCase().includes(needle)) continue;
+		const summary = summarize(file.path, file.mtime);
+		if (summary) out.push(summary);
+	}
+	return out;
 }
 
 function extractText(content: unknown): string {

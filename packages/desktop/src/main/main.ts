@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, session, shell, systemPreferences } from "electron";
 import { AgentBridge, findCliPath } from "./agent-bridge.ts";
-import { pendingPermissionRequests, watchPermissionRequests, writePermissionReply } from "./approvals.ts";
+import { pendingPermissionRequests, requestPid, watchPermissionRequests, writePermissionReply } from "./approvals.ts";
 import {
 	captureDiffBaseline,
 	changedBetween,
@@ -14,7 +14,7 @@ import {
 	toGitPath,
 } from "./diff.ts";
 import { fetchLinkPreview } from "./link-preview.ts";
-import { listSessions } from "./sessions.ts";
+import { listSessions, searchSessions } from "./sessions.ts";
 import { ensureModel, speechStatus, transcribeSamples } from "./speech.ts";
 import { collectStats } from "./stats.ts";
 import { findTranscriptionProvider, transcribeAudio } from "./transcribe.ts";
@@ -22,7 +22,83 @@ import { checkNow, installUpdate, startUpdates, updateState } from "./updates.ts
 import { createWorktree, listWorktrees, removeWorktree, repoRoot } from "./worktrees.ts";
 
 const SMOKE = process.env.SMOLT_DESKTOP_SMOKE === "1";
+
+// Unpackaged builds listen for DevTools on localhost so a wedged renderer can
+// be inspected from outside — heap snapshots are how the freeze bugs get
+// found. Loopback only; packaged builds never open it.
+if (!app.isPackaged) {
+	app.commandLine.appendSwitch("remote-debugging-port", process.env.SMOLT_DESKTOP_DEVTOOLS_PORT ?? "9223");
+	app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
+}
+
+// ---------------------------------------------------------------------------
+// Stall evidence. The window freezes whenever this process blocks its event
+// loop (sync fs, sync git, big JSON.parse) — the renderer stays innocent and
+// the user just sees a dead app. Every IPC handler is timed, and a heartbeat
+// notices multi-second gaps, so a freeze leaves a named culprit in
+// main-stalls.log instead of a mystery.
+// ---------------------------------------------------------------------------
+let inFlightChannel = "";
+const stallLogPath = (): string => join(app.getPath("userData"), "main-stalls.log");
+const logStall = (line: string): void => {
+	try {
+		appendFileSync(stallLogPath(), `${new Date().toISOString()} ${line}\n`, "utf-8");
+	} catch {
+		// Diagnostics must never hurt the app.
+	}
+};
+{
+	const originalHandle = ipcMain.handle.bind(ipcMain);
+	(ipcMain as { handle: typeof ipcMain.handle }).handle = (channel, listener) =>
+		originalHandle(channel, async (...args: Parameters<typeof listener>) => {
+			const started = Date.now();
+			const previous = inFlightChannel;
+			inFlightChannel = channel;
+			try {
+				return await listener(...args);
+			} finally {
+				inFlightChannel = previous;
+				const ms = Date.now() - started;
+				if (ms > 1_000) logStall(`ipc ${channel} took ${ms}ms`);
+			}
+		});
+	let lastBeat = Date.now();
+	setInterval(() => {
+		const now = Date.now();
+		const stalled = now - lastBeat - 1_000;
+		if (stalled > 2_000) {
+			logStall(`event loop blocked ~${Math.round(stalled / 1000)}s (in flight: ${inFlightChannel || "none"})`);
+		}
+		lastBeat = now;
+	}, 1_000).unref();
+}
+
 const bridge = new AgentBridge();
+
+/**
+ * The app's own version, not the runtime's.
+ *
+ * `app.getVersion()` answers with the Electron binary's version when the app
+ * is launched unpackaged straight at its main script, so the settings footer
+ * read like a Chromium build number. Prefer the package.json this file ships
+ * in, and fall back to Electron's answer only when it cannot be found.
+ */
+const appVersion = (): string => {
+	let dir = app.getAppPath();
+	for (let guard = 0; guard < 4 && dir !== dirname(dir); guard += 1) {
+		try {
+			const manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf-8")) as {
+				name?: unknown;
+				version?: unknown;
+			};
+			if (manifest.name === "@smolt/desktop" && typeof manifest.version === "string") return manifest.version;
+		} catch {
+			// No manifest here; walk up one more level.
+		}
+		dir = dirname(dir);
+	}
+	return app.getVersion();
+};
 
 /**
  * One agent per session with work in flight, as the reference apps do it.
@@ -78,17 +154,38 @@ const PANE_ENV = { SMOLT_TELEGRAM_POLL: "off" };
  * one: run our own binary with ELECTRON_RUN_AS_NODE and it behaves as node.
  */
 const agentExecPath = (): string | undefined => (app.isPackaged ? process.execPath : undefined);
-const agentEnv = (extra: Record<string, string>): Record<string, string> =>
-	app.isPackaged
-		? {
-				...extra,
-				ELECTRON_RUN_AS_NODE: "1",
-				// Say where the agent lives rather than letting it guess: bundled, it
-				// would walk up from resources looking for a package root and land
-				// somewhere arbitrary, then fail to find its own theme files.
-				SMOLT_PACKAGE_DIR: join(process.resourcesPath, "agent"),
-			}
-		: extra;
+/**
+ * Ambient CLI variables that must not reach the app's own agents.
+ *
+ * The agent inherits the environment of whatever shell launched the app;
+ * session and provider variables set there describe *that* program's
+ * choices, not this window's. The app names its agents' provider, model and
+ * sessions explicitly, so ambient ones are stripped rather than inherited —
+ * a shell that was pointing at a live session must not drag the desktop
+ * into it.
+ */
+const STRIPPED_AGENT_VARS = [
+	"SMOLT_SESSION_FILE",
+	"SMOLT_SESSION_ID",
+	"SMOLT_PROVIDER",
+	"SMOLT_MODEL",
+	"SMOLT_THINKING_LEVEL",
+	"SMOLT_RESUME",
+	"SMOLT_CONTINUE",
+] as const;
+
+/**
+ * Extra environment for a spawned agent, minus the ambient variables above.
+ *
+ * An `undefined` value deletes an inherited variable instead of setting it,
+ * which is what lets the spawn filter below drop the shell's leftovers.
+ */
+const agentEnv = (extra: Record<string, string>): Record<string, string | undefined> => ({
+	...Object.fromEntries(STRIPPED_AGENT_VARS.map((name) => [name, undefined])),
+	...(app.isPackaged ? { ELECTRON_RUN_AS_NODE: "1", SMOLT_PACKAGE_DIR: join(process.resourcesPath, "agent") } : {}),
+	...extra,
+});
+
 let telegramBridge: AgentBridge | null = null;
 let telegramSync: Promise<void> = Promise.resolve();
 
@@ -131,6 +228,7 @@ function syncTelegramHost(): void {
 				await host.stop();
 				return;
 			}
+			noteAgentPid(host);
 			telegramBridge = host;
 		} else if (!want && telegramBridge) {
 			const host = telegramBridge;
@@ -259,6 +357,46 @@ const NO_PROJECT_NOTE =
 	"where it should go. Do not fall back to the current working directory.";
 
 let projectFolders: string[] = readProjectState().folders;
+
+/**
+ * Agent processes this app owns, by pid.
+ *
+ * The permission-request directory is machine-global: every smolt agent on
+ * the machine — another app instance, the CLI, the tests — drops its
+ * questions in the same place. Only a question raised by one of this
+ * window's own agents may show a card here; forwarding everyone's requests
+ * meant one window could see, and answer, another's command.
+ */
+const ownedAgentPids = new Set<number>();
+/** Requests this window has shown a card for, so their removal can be reported. */
+const shownRequestIds = new Set<string>();
+/** Bridges being deliberately stopped; their exits are not failures. */
+const stoppingBridges = new WeakSet<AgentBridge>();
+
+const noteAgentPid = (bridge: AgentBridge): void => {
+	const pid = bridge.pid;
+	if (typeof pid === "number") ownedAgentPids.add(pid);
+	bridge.onExit(() => {
+		if (typeof pid === "number") ownedAgentPids.delete(pid);
+	});
+};
+
+const requestIsOurs = (id: string): boolean => {
+	const pid = requestPid(id);
+	return pid !== undefined && ownedAgentPids.has(pid);
+};
+
+/**
+ * The chat a request belongs to, from the asking agent's pid. A request card
+ * should interrupt the chat whose agent asked, not every chat this window
+ * ever shows — the renderer filters on the slot, and marks the session's
+ * sidebar row so a background chat's question is findable rather than silent.
+ */
+const requestMeta = (id: string): { slot?: number; session?: string } => {
+	const pid = requestPid(id);
+	const slot = pid === undefined ? undefined : slots.find((candidate) => candidate.bridge.pid === pid);
+	return { slot: slot?.id, session: slot?.sessionPath || undefined };
+};
 /**
  * Where the agent works when no chat has moved it: the explicit override
  * first, then the project folder the window remembers, then a scratch
@@ -550,6 +688,16 @@ app.whenReady().then(async () => {
 	 * nothing — so edits landing from elsewhere mid-turn stay unclaimed.
 	 */
 	const wireSlot = (slot: AgentSlot): void => {
+		// An agent that died on its own is replaced at once, in the same chat;
+		// the next message would otherwise fail against a dead client with
+		// nothing on screen saying why.
+		slot.bridge.onExit(({ code }) => {
+			slot.busy = false;
+			broadcastBusy();
+			if (win.isDestroyed() || stoppingBridges.has(slot.bridge)) return;
+			if (slot === active) void respawnAgent(slot, code);
+			else win.webContents.send("agent:exited", { slotId: slot.id, wasActive: false });
+		});
 		slot.bridge.onEvent((event) => {
 			const type = (event as { type?: string }).type;
 			if (type === "agent_start") {
@@ -630,6 +778,7 @@ app.whenReady().then(async () => {
 			},
 			__dirname,
 		);
+		noteAgentPid(slot.bridge);
 		slots.push(slot);
 		return slot;
 	};
@@ -710,6 +859,42 @@ app.whenReady().then(async () => {
 		return { cancelled: false };
 	};
 
+	/** Guards against a double respawn racing on one dead slot. */
+	const respawning = new Set<number>();
+
+	/**
+	 * Replace an agent that died on its own with a fresh one in the same chat.
+	 *
+	 * The transcript is on disk, so the replacement picks the chat back up;
+	 * the window is told after the replacement is live, so a banner there can
+	 * honestly say "restarted" rather than only "crashed".
+	 */
+	const respawnAgent = async (dead: AgentSlot, code: number | null): Promise<void> => {
+		if (respawning.has(dead.id)) return;
+		respawning.add(dead.id);
+		try {
+			const fresh = await spawnSlot();
+			const index = slots.indexOf(dead);
+			if (index >= 0) slots.splice(index, 1);
+			if (dead.sessionPath) {
+				try {
+					await fresh.bridge.call("switchSession", [dead.sessionPath]);
+					await refreshSlotPath(fresh);
+				} catch {
+					// The chat is on disk either way; a failed switch starts empty.
+				}
+			}
+			active = fresh;
+			broadcastBusy();
+			announceActive();
+			reapIdleSlots();
+			ensureSpare();
+			if (!win.isDestroyed()) win.webContents.send("agent:exited", { slotId: dead.id, wasActive: true, code });
+		} finally {
+			respawning.delete(dead.id);
+		}
+	};
+
 	const debug = process.env.SMOLT_DESKTOP_DEBUG === "1";
 	ipcMain.handle("agent:call", async (_e, method: string, args: unknown[]) => {
 		try {
@@ -781,8 +966,9 @@ app.whenReady().then(async () => {
 			// Not every platform draws the overlay; the theme still applies.
 		}
 	});
-	ipcMain.handle("app:sessions", async () => {
-		const rows = await listSessions(undefined, 50);
+	ipcMain.handle("app:sessions", async (_e, query?: string) => {
+		const needle = typeof query === "string" ? query.trim() : "";
+		const rows = needle === "" ? await listSessions(undefined, 50) : await searchSessions(needle, undefined, 50);
 		const busyPaths = new Set(slots.filter((slot) => slot.busy).map((slot) => slot.sessionPath));
 		return rows.map((row) => ({ ...row, busy: busyPaths.has(row.path) }));
 	});
@@ -790,7 +976,7 @@ app.whenReady().then(async () => {
 		cwd: activeCwd,
 		hasProject: projectFolders.length > 0,
 		folders: projectFolders,
-		version: app.getVersion(),
+		version: appVersion(),
 		continueLatest: process.env.SMOLT_DESKTOP_CONTINUE === "1",
 		canTranscribe: findTranscriptionProvider() !== undefined,
 		// Only an installed build has an installer the updater can replace.
@@ -818,6 +1004,7 @@ app.whenReady().then(async () => {
 					sideBridge = null;
 					return { ok: false, error };
 				}
+				noteAgentPid(sideBridge);
 			}
 			return { ok: true, value: await sideBridge.call(method, Array.isArray(args) ? args : []) };
 		} catch (err) {
@@ -858,7 +1045,10 @@ app.whenReady().then(async () => {
 		// The old agents are dropped, not waited for: their teardown is a second
 		// of the switch and nothing downstream needs them gone, since the fresh
 		// bridge is a new process with its own listeners and its own session file.
-		for (const slot of slots) void slot.bridge.stop();
+		for (const slot of slots) {
+			stoppingBridges.add(slot.bridge);
+			void slot.bridge.stop();
+		}
 		slots.length = 0;
 		// Any agent still starting belongs to the folder being left.
 		warming = null;
@@ -887,6 +1077,7 @@ app.whenReady().then(async () => {
 			},
 			__dirname,
 		);
+		noteAgentPid(slot.bridge);
 		await refreshSlotPath(slot);
 		restarting = null;
 		signalReady();
@@ -1038,7 +1229,21 @@ app.whenReady().then(async () => {
 			const secret = String(key ?? "").trim();
 			if (name === "" || secret === "") return { ok: false, error: "Both a provider and a key are needed." };
 			const { AuthStorage } = await import("../../../coding-agent/src/core/auth-storage.ts");
-			await AuthStorage.create().modify(name, async () => ({ type: "api_key", key: secret }));
+			// The explicit path, computed the way every other main-process path
+			// is: AuthStorage.create()'s own default resolves through the
+			// coding-agent's config module, which inside the Electron bundle
+			// once produced a raw `"path" argument must be of type string`
+			// throw — and a key that silently never saved.
+			const envDir = process.env.SMOLT_CODING_AGENT_DIR;
+			const agentDir = envDir?.trim()
+				? envDir.startsWith("~")
+					? join(homedir(), envDir.slice(1))
+					: envDir
+				: join(homedir(), ".smolt", "agent");
+			await AuthStorage.create(join(agentDir, "auth.json")).modify(name, async () => ({
+				type: "api_key",
+				key: secret,
+			}));
 			void restartAgentIn(homeCwd());
 			return { ok: true };
 		} catch (err) {
@@ -1171,11 +1376,29 @@ app.whenReady().then(async () => {
 	});
 
 	// A tool call that needs approval reaches the window here, and the answer
-	// goes back the same way.
-	watchPermissionRequests((request) => {
-		if (!win.isDestroyed()) win.webContents.send("permission:request", request);
-	});
-	ipcMain.handle("app:pending-approvals", () => pendingPermissionRequests());
+	// goes back the same way — but only for this app's own agents: the requests
+	// directory is shared with every other smolt process on the machine, and
+	// their questions must neither appear on, nor be answerable from, this
+	// window. A request whose file disappears was answered elsewhere or swept,
+	// and the card here has to go with it.
+	watchPermissionRequests(
+		(request) => {
+			if (!requestIsOurs(request.id)) return;
+			shownRequestIds.add(request.id);
+			if (!win.isDestroyed()) {
+				win.webContents.send("permission:request", { ...request, ...requestMeta(request.id) });
+			}
+		},
+		(id) => {
+			if (!shownRequestIds.delete(id)) return;
+			if (!win.isDestroyed()) win.webContents.send("permission:removed", id);
+		},
+	);
+	ipcMain.handle("app:pending-approvals", () =>
+		pendingPermissionRequests()
+			.filter((request) => requestIsOurs(request.id))
+			.map((request) => ({ ...request, ...requestMeta(request.id) })),
+	);
 	ipcMain.handle("app:permission-reply", (_e, id: string, answer: string) => {
 		try {
 			writePermissionReply(String(id), String(answer));
@@ -1339,6 +1562,7 @@ app.whenReady().then(async () => {
 		},
 		__dirname,
 	);
+	noteAgentPid(bridge);
 	await refreshSlotPath(active);
 	announceActive();
 	await rebaseline();

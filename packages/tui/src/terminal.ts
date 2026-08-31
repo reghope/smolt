@@ -127,6 +127,9 @@ export class ProcessTerminal implements Terminal {
 	private wasRaw = false;
 	private inputHandler?: (data: string) => void;
 	private resizeHandler?: () => void;
+	private resizePollTimer?: ReturnType<typeof setInterval>;
+	private lastPolledColumns = 0;
+	private lastPolledRows = 0;
 	private _kittyProtocolActive = false;
 	private _modifyOtherKeysActive = false;
 	private keyboardProtocolPushed = false;
@@ -181,6 +184,22 @@ export class ProcessTerminal implements Terminal {
 		if (process.platform !== "win32") {
 			process.kill(process.pid, "SIGWINCH");
 		}
+
+		// Windows consoles (ConPTY, some terminal hosts) do not reliably emit
+		// stdout "resize" — the UI then keeps the launch dimensions for the
+		// life of the process, clipped or letterboxed. A slow poll notices the
+		// change the event missed; unref'd so it never holds the process open.
+		this.lastPolledColumns = this.columns;
+		this.lastPolledRows = this.rows;
+		this.resizePollTimer = setInterval(() => {
+			const columns = this.columns;
+			const rows = this.rows;
+			if (columns === this.lastPolledColumns && rows === this.lastPolledRows) return;
+			this.lastPolledColumns = columns;
+			this.lastPolledRows = rows;
+			this.resizeHandler?.();
+		}, 1000);
+		this.resizePollTimer.unref?.();
 
 		// On Windows, enable ENABLE_VIRTUAL_TERMINAL_INPUT so the console sends
 		// VT escape sequences (e.g. \x1b[Z for Shift+Tab) instead of raw console
@@ -460,6 +479,10 @@ export class ProcessTerminal implements Terminal {
 		if (this.resizeHandler) {
 			process.stdout.removeListener("resize", this.resizeHandler);
 			this.resizeHandler = undefined;
+		}
+		if (this.resizePollTimer) {
+			clearInterval(this.resizePollTimer);
+			this.resizePollTimer = undefined;
 		}
 
 		// Pause stdin to prevent any buffered input (e.g., Ctrl+D) from being

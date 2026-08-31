@@ -2852,6 +2852,13 @@ export class InteractiveMode {
 				this.editor.setText("");
 				this.isBashMode = false;
 				this.updateEditorBorderColor();
+			} else if (this.editor.getText().trim()) {
+				// Escape discards a half-typed message. Without this the text sat
+				// in the box and silently merged into the next submission. The
+				// double-escape timer resets so the clearing press never counts
+				// toward the tree/fork gesture.
+				this.editor.setText("");
+				this.lastEscapeTime = 0;
 			} else if (!this.editor.getText().trim()) {
 				// Double-escape with empty editor triggers /tree, /fork, or nothing based on setting
 				const action = this.settingsManager.getDoubleEscapeAction();
@@ -3023,6 +3030,11 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/help") {
+				this.handleHelpCommand();
+				this.editor.setText("");
+				return;
+			}
 			if (text === "/fork") {
 				this.showUserMessageSelector();
 				this.editor.setText("");
@@ -3112,6 +3124,17 @@ export class InteractiveMode {
 					this.updateEditorBorderColor();
 					return;
 				}
+			}
+
+			// Whatever "/word" reaches this point is a prompt template, an
+			// extension command, a skill — or a typo. A typo must not become a
+			// paid prompt: one unknown command once went to the model as a
+			// ~23k-token turn. (A path like /etc/hosts has a second slash and
+			// passes through untouched.)
+			if (/^\/[A-Za-z0-9_:-]+(\s|$)/.test(text) && !this.isKnownCommandName(text)) {
+				this.editor.setText("");
+				this.showStatus(`Unknown command ${text.split(/\s+/)[0]} — /help lists every command.`);
+				return;
 			}
 
 			// Queue input during compaction (extension commands execute immediately)
@@ -4762,6 +4785,18 @@ export class InteractiveMode {
 		const normalized = searchTerm.trim().toLowerCase();
 		const level = availableLevels.find((candidate) => candidate.toLowerCase() === normalized);
 		if (!level) {
+			// Built-in levels are authoritative; extension entries (e.g. "auto")
+			// are matched only when no level name collides.
+			const entry = this.session.extensionRunner
+				.getThinkingLevelEntries()
+				.find(
+					(candidate) =>
+						candidate.value.toLowerCase() === normalized || candidate.label.toLowerCase() === normalized,
+				);
+			if (entry) {
+				entry.onSelect(this.session.extensionRunner.createCommandContext());
+				return;
+			}
 			this.showError(`Unknown thinking level "${searchTerm}". Available levels: ${availableLevels.join(", ")}.`);
 			return;
 		}
@@ -4782,20 +4817,30 @@ export class InteractiveMode {
 
 	private showThinkingSelector(): void {
 		this.showSelector((done) => {
-			const selectLevel = (level: ThinkingLevel, persist: boolean) => {
-				this.selectThinkingLevel(level, persist);
+			const entries = this.session.extensionRunner.getThinkingLevelEntries();
+			const selectValue = (value: string, persist: boolean) => {
+				const entry = entries.find((candidate) => candidate.value === value);
+				if (entry) {
+					if (persist) entry.onSelectAsDefault?.(this.session.extensionRunner.createCommandContext());
+					else entry.onSelect(this.session.extensionRunner.createCommandContext());
+				} else {
+					this.selectThinkingLevel(value as ThinkingLevel, persist);
+				}
 				done();
 			};
+			const currentValue =
+				entries.find((entry) => entry.isCurrent?.())?.value ?? this.session.thinkingLevel ?? DEFAULT_THINKING_LEVEL;
 			const selector = new ThinkingSelectorComponent(
-				this.session.thinkingLevel ?? DEFAULT_THINKING_LEVEL,
+				currentValue,
 				this.session.getAvailableThinkingLevels(),
-				(level) => selectLevel(level, false),
+				(value) => selectValue(value, false),
 				() => {
 					done();
 					this.ui.requestRender();
 				},
-				(level) => selectLevel(level, true),
+				(value) => selectValue(value, true),
 				this.settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL,
+				entries,
 			);
 			return { component: selector, focus: selector };
 		});
@@ -6246,6 +6291,51 @@ export class InteractiveMode {
 	 */
 	private getEditorKeyDisplay(action: Keybinding): string {
 		return keyDisplayText(action);
+	}
+
+	/** Every command name the session currently answers to, lowercased. */
+	private isKnownCommandName(text: string): boolean {
+		const name = (text.split(/\s+/)[0] ?? "").slice(1).toLowerCase();
+		if (name === "") return false;
+		if (BUILTIN_SLASH_COMMANDS.some((command) => command.name.toLowerCase() === name)) return true;
+		if (this.session.promptTemplates.some((command) => command.name.toLowerCase() === name)) return true;
+		const extensionRunner = this.session.extensionRunner;
+		if (extensionRunner.getCommand(name)) return true;
+		if (
+			extensionRunner
+				.getRegisteredCommands()
+				.some((command) => command.invocationName?.toLowerCase() === name || command.name.toLowerCase() === name)
+		) {
+			return true;
+		}
+		return this.skillCommands.has(name) || this.skillCommands.has(`skill:${name.replace(/^skill:/, "")}`);
+	}
+
+	/** `/help`: the complete command list, in the chat where it can be read back. */
+	private handleHelpCommand(): void {
+		const rows: string[] = ["| Command | What it does |", "|---------|--------------|"];
+		for (const command of BUILTIN_SLASH_COMMANDS) {
+			rows.push(
+				`| \`/${command.name}${command.argumentHint ? ` ${command.argumentHint}` : ""}\` | ${command.description} |`,
+			);
+		}
+		for (const command of this.session.extensionRunner.getRegisteredCommands()) {
+			rows.push(`| \`/${command.invocationName ?? command.name}\` | ${command.description ?? ""} |`);
+		}
+		for (const command of this.session.promptTemplates) {
+			rows.push(`| \`/${command.name}\` | ${command.description ?? "prompt template"} |`);
+		}
+		for (const name of this.skillCommands.keys()) {
+			rows.push(`| \`/${name}\` | skill |`);
+		}
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new DynamicBorder());
+		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "Commands")), 1, 0));
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Markdown(rows.join("\n"), 1, 1, this.getMarkdownThemeWithSettings()));
+		this.chatContainer.addChild(new Text(theme.fg("dim", "Keyboard shortcuts: /hotkeys"), 1, 0));
+		this.chatContainer.addChild(new DynamicBorder());
+		this.ui.requestRender();
 	}
 
 	private handleHotkeysCommand(): void {

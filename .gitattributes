@@ -9,6 +9,16 @@
 # Shell scripts should keep LF
 *.sh text eol=lf
 
+# GitHub Linguist: keep the language bar to product source
+scripts/** linguist-vendored
+packages/desktop/build.mjs linguist-vendored
+packages/tui/native/win32/build.mjs linguist-vendored
+packages/evals/scripts/** linguist-vendored
+packages/session-backends/sqlite-node/scripts/** linguist-vendored
+packages/coding-agent/src/core/export-html/vendor/** linguist-vendored
+packages/coding-agent/src/core/export-html/template.js linguist-vendored
+packages/coding-agent/examples/extensions/doom-overlay/doom/build/** linguist-generated
+
 # Common binary assets
 *.png binary
 *.jpg binary

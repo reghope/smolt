@@ -101,6 +101,7 @@ import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { getUsageCostBreakdown } from "../../core/usage-totals.ts";
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
+import { spawnProcess } from "../../utils/child-process.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
 import { parseGitUrl } from "../../utils/git.ts";
@@ -109,7 +110,13 @@ import { getCwdRelativePath } from "../../utils/paths.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { loadAllHighlightLanguages } from "../../utils/syntax-highlight.ts";
 import { ensureTool, type ToolStatus } from "../../utils/tools-manager.ts";
-import { checkForNewSmoltVersion, type LatestSmoltRelease } from "../../utils/version-check.ts";
+import {
+	checkForNewSmoltVersion,
+	formatVersionCheckError,
+	getLatestSmoltRelease,
+	isNewerPackageVersion,
+	type LatestSmoltRelease,
+} from "../../utils/version-check.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
@@ -3025,6 +3032,11 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/update") {
+				void this.handleUpdateCommand();
+				this.editor.setText("");
+				return;
+			}
 			if (text === "/hotkeys") {
 				this.handleHotkeysCommand();
 				this.editor.setText("");
@@ -4272,8 +4284,14 @@ export class InteractiveMode {
 	}
 
 	showNewVersionNotification(release: LatestSmoltRelease): void {
-		const action = theme.fg("accent", `${APP_NAME} update`);
-		const updateInstruction = theme.fg("muted", `New version ${release.version} is available. Run `) + action;
+		const action = theme.fg("accent", "/update");
+		const fallback = theme.fg("accent", `${APP_NAME} update`);
+		const updateInstruction =
+			theme.fg("muted", `New version ${release.version} is available. Run `) +
+			action +
+			theme.fg("muted", " here or ") +
+			fallback +
+			theme.fg("muted", " in a terminal.");
 		const changelogUrl = "https://github.com/reghope/smolt/blob/main/packages/coding-agent/CHANGELOG.md";
 		const changelogLink = getCapabilities().hyperlinks
 			? hyperlink(theme.fg("accent", changelogUrl), changelogUrl)
@@ -6256,6 +6274,87 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(info, 1, 0));
 		this.ui.requestRender();
+	}
+
+	private selfUpdateInProgress = false;
+
+	/** Check the release channel and, when a newer version exists, run the same
+	 * `update --self` path the CLI command uses in a child process. The child
+	 * owns install-method detection and the Windows quarantine dance, so the
+	 * TUI never duplicates that logic. */
+	private async handleUpdateCommand(): Promise<void> {
+		if (this.selfUpdateInProgress) {
+			this.showWarning("An update is already running.");
+			return;
+		}
+		this.selfUpdateInProgress = true;
+		try {
+			this.showStatus("Checking for updates...");
+			let release: LatestSmoltRelease | undefined;
+			try {
+				release = await getLatestSmoltRelease(this.version, { retry: true });
+			} catch (error: unknown) {
+				this.showError(`Could not determine the latest ${APP_NAME} version: ${formatVersionCheckError(error)}`);
+				return;
+			}
+			if (!release) {
+				this.showError(`Could not determine the latest ${APP_NAME} version.`);
+				return;
+			}
+			if (!isNewerPackageVersion(release.version, this.version)) {
+				this.showStatus(`${APP_NAME} is up to date (v${this.version})`);
+				return;
+			}
+
+			const entrypoint = process.argv[1];
+			if (!entrypoint) {
+				this.showError(`${APP_NAME} cannot self-update this installation; run "${APP_NAME} update" yourself.`);
+				return;
+			}
+
+			this.showStatus(`Updating ${APP_NAME} v${this.version} → v${release.version}...`);
+			const result = await new Promise<{ code: number | null; output: string }>((resolve, reject) => {
+				const child = spawnProcess(process.execPath, [entrypoint, "update", "--self"], {
+					stdio: ["ignore", "pipe", "pipe"],
+				});
+				let output = "";
+				child.stdout?.on("data", (chunk: Buffer) => {
+					output += chunk.toString();
+				});
+				child.stderr?.on("data", (chunk: Buffer) => {
+					output += chunk.toString();
+				});
+				child.on("error", reject);
+				child.on("close", (code) => resolve({ code, output }));
+			});
+
+			if (result.code === 0) {
+				this.chatContainer.addChild(new Spacer(1));
+				this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("success", text)));
+				this.chatContainer.addChild(
+					new Text(
+						`${theme.bold(theme.fg("success", "Update installed"))}\n${theme.fg(
+							"muted",
+							`${APP_NAME} v${release.version} is ready. Restart ${APP_NAME} to use it.`,
+						)}`,
+						1,
+						0,
+					),
+				);
+				this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("success", text)));
+				this.ui.requestRender();
+			} else {
+				const tail = result.output.trim().split("\n").slice(-6).join("\n");
+				this.showError(
+					`Update failed${tail ? `:\n${tail}` : "."}\nRun "${APP_NAME} update" in a terminal for the full output.`,
+				);
+			}
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.showError(`Update failed: ${message}`);
+		} finally {
+			this.selfUpdateInProgress = false;
+		}
 	}
 
 	private handleChangelogCommand(): void {

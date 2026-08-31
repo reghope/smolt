@@ -582,6 +582,12 @@ export async function main(args: string[], options?: MainOptions) {
 	applyHttpProxySettings(bootstrapSettingsManager.getGlobalSettings().httpProxy);
 	configureHttpDispatcher();
 
+	// The flag spelling of `smolt update --self`, for muscle memory from other
+	// CLIs. Remaining arguments pass through, so `--upgrade --force` works.
+	if (args[0] === "--upgrade" || args[0] === "--update") {
+		args = ["update", "--self", ...args.slice(1)];
+	}
+
 	if (await handlePackageCommand(args, { extensionFactories })) {
 		const exitCode = process.exitCode ?? 0;
 		if (process.platform === "win32" && exitCode === 0 && args[0] === "update") {

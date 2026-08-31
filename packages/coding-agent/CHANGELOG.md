@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added self-update: startup checks the npm registry (`@smolt/cli`) for new releases and shows an update banner, `/update` installs the latest version from inside the TUI, and `smolt --upgrade` (alias `--update`) does the same from the command line as a shorthand for `smolt update`. Disable the startup check with `SMOLT_SKIP_VERSION_CHECK=1` or `--offline`.
+
 - Added `ui_prompt_start` and `ui_prompt_end` extension events so host integrations can distinguish active agent work from waiting on user-facing `ctx.ui` prompts ([#5329](https://github.com/earendil-works/pi/issues/5329)).- Added transcript usage notices for compaction and branch summaries when cache miss notices are enabled.
 - Added RPC `clear_queue` to retrieve and remove queued steering and follow-up messages ([#8432](https://github.com/earendil-works/pi/issues/8432)).
 - Added environment variables and advanced settings for overriding auto-detected terminal hyperlink, image, and truecolor capabilities ([#8665](https://github.com/earendil-works/pi/issues/8665)).

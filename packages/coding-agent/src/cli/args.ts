@@ -316,6 +316,7 @@ ${chalk.bold("Options:")}
   --approve, -a                  Trust project-local files for this run
   --no-approve, -na              Ignore project-local files for this run
   --offline                      Disable startup network operations (same as SMOLT_OFFLINE=1)
+  --upgrade, --update            Update ${APP_NAME} to the latest version and exit (same as "${APP_NAME} update")
   --                             End option parsing; treat remaining arguments as messages/files
   --help, -h                     Show this help
   --version, -v                  Show version number

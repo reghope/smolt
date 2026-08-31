@@ -2,7 +2,11 @@ import { compare, valid } from "semver";
 import { fetchWithRetry } from "./management-http.ts";
 import { getSmoltUserAgent } from "./smolt-user-agent.ts";
 
-const LATEST_VERSION_URL = "https://pi.dev/api/latest-version";
+/** The published npm package release checks consult. The workspace package is
+ * named plain "smolt" (only the publish artifact carries the scoped name), so
+ * this cannot be derived from PACKAGE_NAME. */
+const LATEST_VERSION_PACKAGE = "@smolt/cli";
+const LATEST_VERSION_URL = `https://registry.npmjs.org/${LATEST_VERSION_PACKAGE.replace("/", "%2F")}/latest`;
 const DEFAULT_VERSION_CHECK_TIMEOUT_MS = 10000;
 
 export interface LatestSmoltRelease {
@@ -52,10 +56,6 @@ export async function getLatestSmoltRelease(
 	currentVersion: string,
 	options: { timeoutMs?: number; retry?: boolean } = {},
 ): Promise<LatestSmoltRelease | undefined> {
-	// This fork has no release endpoint of its own yet; the inherited URL
-	// belongs to the upstream project and would report the wrong versions.
-	// Keep the plumbing, skip the network call.
-	if (LATEST_VERSION_URL.includes("pi.dev")) return undefined;
 	if (process.env.SMOLT_OFFLINE) return undefined;
 
 	const response = await fetchWithRetry(

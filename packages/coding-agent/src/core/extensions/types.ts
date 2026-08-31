@@ -109,6 +109,12 @@ export type WidgetPlacement = "aboveEditor" | "belowEditor";
 export interface ExtensionWidgetOptions {
 	/** Where the widget is rendered. Defaults to "aboveEditor". */
 	placement?: WidgetPlacement;
+	/**
+	 * Structured data behind the lines, for frontends that can do more than
+	 * print text — e.g. the desktop app lets a roster line expand into the
+	 * tickets and actions it counts. JSON-serializable; ignored by the TUI.
+	 */
+	details?: unknown;
 }
 
 /** Raw terminal input listener for extensions. */
@@ -1226,10 +1232,33 @@ export type EntryRenderer<T = unknown> = (
 // Command Registration
 // ============================================================================
 
+/**
+ * A display entry an extension contributes to the built-in thinking level
+ * selector. Entries render before the model's thinking levels (far left);
+ * picking one routes to the extension instead of the session's thinking
+ * level, so an entry can stand for a mode (e.g. "auto") rather than a level.
+ */
+export interface ThinkingLevelSelectorEntry {
+	/** Stable id (e.g. "auto"); must be distinct from every ThinkingLevel value. */
+	value: string;
+	/** Label shown in the selector list. */
+	label: string;
+	/** One-line description shown under the label. */
+	description?: string;
+	/** Called when the user picks this entry. */
+	onSelect(ctx: ExtensionContext): void;
+	/** Called when the user sets this entry as default (Ctrl+S in the selector). */
+	onSelectAsDefault?(ctx: ExtensionContext): void;
+	/** Return true to highlight this entry as the current selection. */
+	isCurrent?(): boolean;
+}
+
 export interface RegisteredCommand {
 	name: string;
 	sourceInfo: SourceInfo;
 	description?: string;
+	/** Development tooling; left out of user-facing command lists. */
+	internal?: boolean;
 	getArgumentCompletions?: (argumentPrefix: string) => AutocompleteItem[] | null | Promise<AutocompleteItem[] | null>;
 	handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
 }
@@ -1420,6 +1449,13 @@ export interface ExtensionAPI {
 
 	/** Set thinking level (clamped to model capabilities). */
 	setThinkingLevel(level: ThinkingLevel): void;
+
+	/**
+	 * Contribute a display entry to the built-in thinking level selector.
+	 * Entries render before the model's thinking levels. First registration
+	 * per value wins, mirroring registerTool.
+	 */
+	registerThinkingLevelEntry(entry: ThinkingLevelSelectorEntry): void;
 
 	// =========================================================================
 	// Provider Registration
@@ -1769,6 +1805,7 @@ export interface Extension {
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
+	thinkingLevelEntries: Map<string, ThinkingLevelSelectorEntry>;
 }
 
 /** Result of loading extensions. */

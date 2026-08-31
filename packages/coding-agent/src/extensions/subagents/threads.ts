@@ -34,6 +34,8 @@ export interface ThreadDriver {
 	dispose(): void;
 	/** The thread's own transcript, for inspection. */
 	transcript(): { role: string; text: string }[];
+	/** Timing totals for the thread's actions, for bottleneck hunting. */
+	metricsSummary?(): { actions: number; toolMs: number; llmMs: number };
 }
 
 export interface Thread {
@@ -189,7 +191,11 @@ export function elapsed(thread: Thread): string {
 
 /** One line per thread, the same shape for the model and for the footer. */
 export function describe(thread: Thread): string {
-	const head = `${thread.id} (${thread.nickname}) ${thread.agent} · ${thread.status} · ${elapsed(thread)}`;
+	const timing = thread.driver?.metricsSummary?.();
+	const activity = timing
+		? ` · ${timing.actions} actions (tool ${Math.round(timing.toolMs / 1000)}s, llm ${Math.round(timing.llmMs / 1000)}s)`
+		: "";
+	const head = `${thread.id} (${thread.nickname}) ${thread.agent} · ${thread.status} · ${elapsed(thread)}${activity}`;
 	const tail = thread.status === "errored" ? thread.error : thread.task;
 	return `${head} — ${tail.split("\n")[0]?.slice(0, 90) ?? ""}`;
 }

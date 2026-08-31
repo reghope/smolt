@@ -39,10 +39,25 @@ function resolveTimeoutMs(timeout: number | undefined): number | undefined {
 	return timeoutMs;
 }
 
-const bashSchema = Type.Object({
-	command: Type.String({ description: "Shell command to execute" }),
-	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
-});
+/**
+ * The parameter schema for a shell tool. The timeout's description names the
+ * configured default, so a session with a cap says so where the model reads it.
+ */
+function shellSchema(defaultTimeoutSeconds?: number) {
+	return Type.Object({
+		command: Type.String({ description: "Shell command to execute" }),
+		timeout: Type.Optional(
+			Type.Number({
+				description:
+					defaultTimeoutSeconds === undefined
+						? "Timeout in seconds (optional, no default timeout)"
+						: `Timeout in seconds (optional; defaults to ${defaultTimeoutSeconds})`,
+			}),
+		),
+	});
+}
+
+const bashSchema = shellSchema();
 
 export const bashToolSystemPromptContribution = {
 	snippet: "Execute bash commands (ls, grep, find, etc.)",
@@ -198,6 +213,13 @@ function resolveSpawnContext(
 export interface BashToolOptions {
 	/** Custom operations for command execution. Default: local shell */
 	operations?: BashOperations;
+	/**
+	 * Timeout applied when a call omits one. Nothing enforces a bound by
+	 * default — a session that cannot afford a hung command (a fleet of
+	 * test agents, for instance) sets this and every uncapped call lands
+	 * under it. The per-call `timeout` still wins.
+	 */
+	defaultTimeoutSeconds?: number;
 	/** Command prefix prepended to every command (for example shell setup commands) */
 	commandPrefix?: string;
 	/** Optional explicit shell path from settings */
@@ -339,18 +361,23 @@ export function createShellToolDefinition(
 	cwd: string,
 	config: ShellToolConfig,
 	options?: BashToolOptions,
-): ToolDefinition<typeof bashSchema, BashToolDetails | undefined, BashRenderState> {
+): ToolDefinition<ReturnType<typeof shellSchema>, BashToolDetails | undefined, BashRenderState> {
 	const ops = options?.operations ?? createLocalBashOperations({ shellPath: options?.shellPath });
 	const commandPrefix = options?.commandPrefix;
 	const exposeSessionEnvironment = options?.exposeSessionEnvironment ?? true;
 	const spawnHook = options?.spawnHook;
+	const parameters = shellSchema(options?.defaultTimeoutSeconds);
+	const timeoutNote =
+		options?.defaultTimeoutSeconds === undefined
+			? " Optionally provide a timeout in seconds."
+			: ` Calls without a timeout are stopped after ${options.defaultTimeoutSeconds} seconds; pass one for longer work.`;
 	return {
 		name: config.name,
 		label: config.label,
-		description: `Execute a ${config.shellName} command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
+		description: `Execute a ${config.shellName} command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file.${timeoutNote}`,
 		promptSnippet: config.promptSnippet,
 		promptGuidelines: exposeSessionEnvironment && config.promptGuidelines ? [...config.promptGuidelines] : undefined,
-		parameters: bashSchema,
+		parameters,
 		constrainedSampling: getExperimentalToolSampling(),
 		async execute(
 			_toolCallId,
@@ -359,6 +386,7 @@ export function createShellToolDefinition(
 			onUpdate?,
 			ctx?,
 		) {
+			const effectiveTimeout = timeout ?? options?.defaultTimeoutSeconds;
 			const resolvedCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
 			const spawnContext = resolveSpawnContext(resolvedCommand, cwd, spawnHook, exposeSessionEnvironment, ctx);
 			const output = new OutputAccumulator({ tempFilePrefix: config.tempFilePrefix });
@@ -451,7 +479,7 @@ export function createShellToolDefinition(
 					const result = await ops.exec(spawnContext.command, spawnContext.cwd, {
 						onData: handleData,
 						signal,
-						timeout,
+						timeout: effectiveTimeout,
 						env: spawnContext.env,
 					});
 					exitCode = result.exitCode;
@@ -463,7 +491,14 @@ export function createShellToolDefinition(
 					}
 					if (err instanceof Error && err.message.startsWith("timeout:")) {
 						const timeoutSecs = err.message.split(":")[1];
-						throw new Error(appendStatus(text, `Command timed out after ${timeoutSecs} seconds`));
+						throw new Error(
+							appendStatus(
+								text,
+								timeout === undefined && options?.defaultTimeoutSeconds !== undefined
+									? `Command timed out after ${timeoutSecs} seconds (the session's default timeout; pass a larger 'timeout' if it needs longer)`
+									: `Command timed out after ${timeoutSecs} seconds`,
+							),
+						);
 					}
 					throw err;
 				}

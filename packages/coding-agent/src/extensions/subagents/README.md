@@ -40,6 +40,8 @@ One `subagent` tool with seven actions:
 
 A thread that finishes while the parent is working announces itself in the parent's next turn, after the current one settles — cutting in mid-turn with an unrelated result is how a parent loses the thread of its own work.
 
+Every thread's actions are measured (`core/action-metrics.ts`): tool executions and assistant turns become timed spans, and `list`/`read`/`/subagents` show the totals per thread — `42 actions (tool 63s, llm 41s)` — so a slow thread can be diagnosed as tool-bound or model-bound at a glance.
+
 ## Agent definitions
 
 Markdown with frontmatter, the same shape as skills and prompts. Project (`.smolt/agents/*.md`) beats user (`~/.smolt/agent/agents/*.md`) beats built-in, so a repo can redefine `worker` for its own conventions without anyone editing their home directory.
@@ -70,7 +72,11 @@ Under `agents` in `settings.json` (global and project are deep-merged):
 {
   "agents": {
     "enabled": true,
-    "maxConcurrentThreadsPerSession": 4
+    "maxConcurrentThreadsPerSession": 4,
+    // Child sessions are temporary (in-memory) by default, so threads never
+    // clog the session list or session search. Set true to write them to
+    // disk like any other session.
+    "persistChildSessions": false
   }
 }
 ```

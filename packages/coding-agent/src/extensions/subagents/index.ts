@@ -1,5 +1,6 @@
 import { Type } from "typebox";
 import { getAgentDir } from "../../config.ts";
+import { ActionMetrics } from "../../core/action-metrics.ts";
 // Type-only import: a standalone install of this module outside the smolt
 // tree switches this single line to `from "smolt"`.
 import type { ExtensionAPI, ExtensionContext } from "../../core/extensions/types.ts";
@@ -35,6 +36,8 @@ interface AgentsSettings {
 	maxConcurrentThreadsPerSession?: number;
 	defaultSubagentModel?: string;
 	defaultSubagentThinking?: string;
+	/** Write child sessions to disk like before temporary chats. Default false: children are in-memory. */
+	persistChildSessions?: boolean;
 }
 
 function textResult(text: string) {
@@ -63,6 +66,17 @@ export type Spawner = (
 	ctx: ExtensionContext,
 	onFinish: (status: "completed" | "errored", detail: string) => void,
 ) => Promise<ThreadDriver>;
+
+/**
+ * Threads run in temporary sessions by default: in-memory, never on disk, so
+ * spawning a fleet of subagents does not clog the session list, /resume, or
+ * session search. The parent carries the summary; the transcript is scratch.
+ * `agents.persistChildSessions: true` restores the old persistent behavior.
+ */
+function persistChildSessions(ctx: ExtensionContext): boolean {
+	const raw = (ctx as unknown as { settings?: { agents?: AgentsSettings } }).settings?.agents;
+	return raw?.persistChildSessions === true;
+}
 
 const defaultSpawner: Spawner = async (agent, task, ctx, onFinish) => {
 	const { createAgentSession } = await import("../../core/sdk.ts");
@@ -98,8 +112,15 @@ const defaultSpawner: Spawner = async (agent, task, ctx, onFinish) => {
 		tools: agent.tools,
 		resourceLoader,
 		settingsManager,
-		sessionManager: SessionManager.create(ctx.cwd, getDefaultSessionDir(ctx.cwd, agentDir)),
+		sessionManager: persistChildSessions(ctx)
+			? SessionManager.create(ctx.cwd, getDefaultSessionDir(ctx.cwd, agentDir))
+			: SessionManager.inMemory(ctx.cwd),
 	});
+
+	// Every action timed, so /subagents can say where a slow thread's time
+	// went: inside its tools, or waiting on the model.
+	const metrics = new ActionMetrics();
+	const detachMetrics = metrics.attach(session);
 
 	const transcript = (): { role: string; text: string }[] =>
 		session.messages.map((message) => ({
@@ -126,8 +147,12 @@ const defaultSpawner: Spawner = async (agent, task, ctx, onFinish) => {
 		abort: async () => {
 			await session.abort();
 		},
-		dispose: () => session.dispose(),
+		dispose: () => {
+			detachMetrics();
+			session.dispose();
+		},
 		transcript,
+		metricsSummary: () => metrics.summary(),
 	};
 };
 

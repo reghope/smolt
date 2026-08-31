@@ -105,10 +105,22 @@ afterEach(() => {
 	rmSync(dir, { recursive: true, force: true });
 });
 
-/** Write a file into the fake project and report the write to the extension. */
+/** Write a file into the fake project and report the successful write to the extension. */
 async function writeUi(name: string, body: string): Promise<void> {
 	writeFileSync(join(smolt.cwd, name), body);
-	await smolt.fire("tool_call", { toolName: "write", input: { path: name } });
+	await smolt.fire("tool_result", { toolName: "write", input: { path: name }, isError: false });
+}
+
+/** Run a shell command through the extension: call, optional disk effect, result. */
+async function runShell(command: string, options: { effect?: () => void; isError?: boolean } = {}): Promise<void> {
+	await smolt.fire("tool_call", { toolCallId: "sh-1", toolName: "bash", input: { command } });
+	options.effect?.();
+	await smolt.fire("tool_result", {
+		toolCallId: "sh-1",
+		toolName: "bash",
+		input: { command },
+		isError: options.isError ?? false,
+	});
 }
 
 const CLEAN = '<div className="min-h-[100dvh]"><p>Straight copy.</p></div>';
@@ -144,17 +156,44 @@ describe("arming", () => {
 describe("tracking writes", () => {
 	test("a file that renders is tracked, one that does not is ignored", async () => {
 		await writeUi("src/Hero.tsx", CLEAN);
-		await smolt.fire("tool_call", { toolName: "write", input: { path: "src/server.ts" } });
+		await smolt.fire("tool_result", { toolName: "write", input: { path: "src/server.ts" }, isError: false });
 		expect(handle.pending()).toEqual(["src/Hero.tsx"]);
 	});
 
 	test("a shell redirect into a UI file is caught too", async () => {
-		await smolt.fire("tool_call", { toolName: "bash", input: { command: "cat tpl > src/Hero.tsx" } });
+		await runShell("cat tpl > src/Hero.tsx", {
+			effect: () => writeFileSync(join(smolt.cwd, "src/Hero.tsx"), CLEAN),
+		});
 		expect(handle.pending()).toEqual(["src/Hero.tsx"]);
 	});
 
 	test("reads are not writes", async () => {
-		await smolt.fire("tool_call", { toolName: "read", input: { path: "src/Hero.tsx" } });
+		await smolt.fire("tool_result", { toolName: "read", input: { path: "src/Hero.tsx" }, isError: false });
+		expect(handle.pending()).toHaveLength(0);
+	});
+
+	test("a write that failed did not update anything", async () => {
+		await smolt.fire("tool_result", { toolName: "write", input: { path: "src/Hero.tsx" }, isError: true });
+		expect(handle.pending()).toHaveLength(0);
+	});
+
+	test("a write nominated but never resolved did not update anything", async () => {
+		// A denied permission or an abort produces a tool_call with no result.
+		await smolt.fire("tool_call", { toolName: "write", input: { path: "src/Hero.tsx" } });
+		expect(handle.pending()).toHaveLength(0);
+	});
+
+	test("a shell command that mentions a page it never changed tracks nothing", async () => {
+		writeFileSync(join(smolt.cwd, "src/Hero.tsx"), CLEAN);
+		await runShell("cat src/Hero.tsx > /tmp/out.txt");
+		expect(handle.pending()).toHaveLength(0);
+	});
+
+	test("a shell command that failed tracks nothing, even if the file moved", async () => {
+		await runShell("cat tpl > src/Hero.tsx", {
+			effect: () => writeFileSync(join(smolt.cwd, "src/Hero.tsx"), CLEAN),
+			isError: true,
+		});
 		expect(handle.pending()).toHaveLength(0);
 	});
 });

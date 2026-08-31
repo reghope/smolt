@@ -17,6 +17,7 @@
 
 ### Fixed
 
+- Fixed the taste gate flagging files the session never actually changed: writes now count only on a successful tool result (a denied or failed write no longer arms the gate), and shell commands count a mentioned file only when its on-disk stat signature moved — `git add page.html` and kin track nothing.
 - Fixed toggling thinking visibility clearing partial output from running Bash tools ([#8611](https://github.com/earendil-works/pi/issues/8611)).
 - Fixed Windows shell aborts crashing Pi when `taskkill.exe` is unavailable on `PATH` ([#6596](https://github.com/earendil-works/pi/issues/6596)).
 - Fixed resumed sessions corrupting the next appended entry when their JSONL file lacks a trailing newline ([#8345](https://github.com/earendil-works/pi/issues/8345)).

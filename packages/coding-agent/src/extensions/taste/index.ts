@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { Type } from "typebox";
@@ -120,6 +120,9 @@ export function createTasteExtension(smolt: ExtensionAPI, doctrineDir: string): 
 	let disabled = false;
 	/** UI files written since the last passing review. */
 	const touched = new Set<string>();
+	/** Shell calls in flight: UI paths a command mentioned, with their pre-run
+	 * stat signatures, awaiting the result that proves the command changed them. */
+	const shellCandidates = new Map<string, { path: string; signature: string | undefined }[]>();
 	/** Times the gate has sent the agent back for the current set. */
 	let bites = 0;
 	/** The gate started the run now settling, so its result is the review. */
@@ -166,6 +169,7 @@ export function createTasteExtension(smolt: ExtensionAPI, doctrineDir: string): 
 		armed = false;
 		disabled = !config.enabled;
 		touched.clear();
+		shellCandidates.clear();
 		bites = 0;
 		gateRun = false;
 		paint(ctx);
@@ -185,11 +189,44 @@ export function createTasteExtension(smolt: ExtensionAPI, doctrineDir: string): 
 		return { systemPrompt: `${event.systemPrompt}\n\n${doctrine}` };
 	});
 
+	/** mtime plus size: coarse-mtime file systems still show a same-second
+	 * rewrite when the byte count moves. Undefined means the file is absent. */
+	const statSignatureOf = (path: string, cwd: string): string | undefined => {
+		try {
+			const stat = statSync(resolve(cwd, path));
+			return `${stat.mtimeMs}:${stat.size}`;
+		} catch {
+			return undefined;
+		}
+	};
+
+	// The gate counts only files this session actually changed. A write the
+	// user denied, an edit whose old text was not found, or a shell command
+	// that merely mentions a page — `git add index.html` — updated nothing,
+	// and must not put that file on the review list. Tool calls therefore
+	// only nominate candidates; the successful result confirms them, and for
+	// shell commands the file system gets the final word via mtime.
 	smolt.on("tool_call", async (event, ctx) => {
 		if (disabled) return;
-		const input = event.input as { path?: unknown; command?: unknown };
+		if (event.toolName !== "bash" && event.toolName !== "powershell") return;
+		const input = event.input as { command?: unknown };
+		const command = typeof input.command === "string" ? input.command : "";
+		// Only commands that can WRITE arm the gate. `ls *.html` and its
+		// kin merely mention UI files, and counting those once put a bare
+		// glob on the review list of a chat that had changed nothing.
+		if (isReadOnlyCommand(command)) return;
+		const candidates = uiPathsInCommand(command, ctx.cwd, config.extraGlobs).filter((path) => !path.includes("*"));
+		if (candidates.length === 0) return;
+		shellCandidates.set(
+			event.toolCallId,
+			candidates.map((path) => ({ path, signature: statSignatureOf(path, ctx.cwd) })),
+		);
+	});
+
+	smolt.on("tool_result", async (event, ctx) => {
 		if (event.toolName === "write" || event.toolName === "edit") {
-			const path = typeof input.path === "string" ? input.path : "";
+			if (disabled || event.isError) return;
+			const path = typeof event.input.path === "string" ? event.input.path : "";
 			if (isUiPath(path, ctx.cwd, config.extraGlobs)) {
 				note(path, ctx.cwd);
 				paint(ctx);
@@ -197,16 +234,19 @@ export function createTasteExtension(smolt: ExtensionAPI, doctrineDir: string): 
 			return;
 		}
 		if (event.toolName === "bash" || event.toolName === "powershell") {
-			const command = typeof input.command === "string" ? input.command : "";
-			// Only commands that can WRITE arm the gate. `ls *.html` and its
-			// kin merely mention UI files, and counting those once put a bare
-			// glob on the review list of a chat that had changed nothing.
-			if (isReadOnlyCommand(command)) return;
-			for (const path of uiPathsInCommand(command, ctx.cwd, config.extraGlobs)) {
-				if (path.includes("*")) continue;
+			const candidates = shellCandidates.get(event.toolCallId);
+			shellCandidates.delete(event.toolCallId);
+			if (disabled || event.isError || !candidates) return;
+			let changed = false;
+			for (const { path, signature } of candidates) {
+				// Only files the command left changed on disk count: created where
+				// there was nothing, or rewritten so the stat signature moved.
+				const now = statSignatureOf(path, ctx.cwd);
+				if (now === undefined || now === signature) continue;
 				note(path, ctx.cwd);
+				changed = true;
 			}
-			paint(ctx);
+			if (changed) paint(ctx);
 		}
 	});
 
@@ -216,6 +256,9 @@ export function createTasteExtension(smolt: ExtensionAPI, doctrineDir: string): 
 	});
 
 	smolt.on("agent_settled", async (_event, ctx) => {
+		// A run that ended without results for calls in flight leaves stale
+		// candidates; a settled agent has no shell command still running.
+		shellCandidates.clear();
 		const wasGateRun = gateRun;
 		gateRun = false;
 		paint(ctx);

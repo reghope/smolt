@@ -11,7 +11,7 @@
 		"gray": "#808080",
 		"dimGray": "#666666",
 		"darkGray": "#505050",
-		"accent": "#8abeb7",
+		"accent": "#fa8072",
 		"selectedBg": "#3a3a4a",
 		"userMsgBg": "#343541",
 		"toolPendingBg": "#282832",
@@ -21,8 +21,8 @@
 	},
 	"colors": {
 		"accent": "accent",
-		"border": "blue",
-		"borderAccent": "cyan",
+		"border": "#c05f52",
+		"borderAccent": "accent",
 		"borderMuted": "darkGray",
 		"success": "green",
 		"error": "red",
@@ -74,10 +74,10 @@
 
 		"thinkingOff": "darkGray",
 		"thinkingMinimal": "#6e6e6e",
-		"thinkingLow": "#5f87af",
-		"thinkingMedium": "#81a2be",
-		"thinkingHigh": "#b294bb",
-		"thinkingXhigh": "#d183e8",
+		"thinkingLow": "#c05f52",
+		"thinkingMedium": "#fa8072",
+		"thinkingHigh": "#ff6b81",
+		"thinkingXhigh": "#ff4fa3",
 		"thinkingMax": "#ff5fff",
 
 		"bashMode": "green"

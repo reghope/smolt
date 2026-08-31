@@ -1,6 +1,6 @@
 {
 	"name": "@smolt/agent-core",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "General-purpose agent with transport abstraction, state management, and attachment support",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -35,8 +35,8 @@
 		"prepublishOnly": "npm run build"
 	},
 	"dependencies": {
-		"@smolt/ai": "^0.1.0",
-		"@smolt/telemetry": "^0.1.0",
+		"@smolt/ai": "^0.2.0",
+		"@smolt/telemetry": "^0.2.0",
 		"diff": "8.0.4",
 		"ignore": "7.0.5",
 		"typebox": "1.3.7",

@@ -68,6 +68,6 @@ Full documentation lives in the [GitHub repository](https://github.com/reghope/s
 
 ---
 
-MIT · a fork of the [Pi agent harness](https://github.com/earendil-works/pi)
+MIT
 
 <p align="center"><em>A young salmon at the stage where it adapts to new water.</em></p>

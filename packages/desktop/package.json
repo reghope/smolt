@@ -1,6 +1,6 @@
 {
 	"name": "@smolt/desktop",
-	"version": "0.1.10",
+	"version": "0.2.0",
 	"description": "Minimalist desktop app for the smolt coding agent",
 	"private": true,
 	"type": "module",
@@ -26,7 +26,7 @@
 		"react": "19.2.8",
 		"react-dom": "19.2.8",
 		"recharts": "3.10.1",
-		"smolt": "^0.1.0",
+		"smolt": "^0.2.0",
 		"tailwind-merge": "3.6.0"
 	},
 	"devDependencies": {

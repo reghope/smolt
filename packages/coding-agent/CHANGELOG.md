@@ -4,11 +4,14 @@
 
 ### Added
 
-- Added `ui_prompt_start` and `ui_prompt_end` extension events so host integrations can distinguish active agent work from waiting on user-facing `ctx.ui` prompts ([#5329](https://github.com/earendil-works/pi/issues/5329)).
-- Added transcript usage notices for compaction and branch summaries when cache miss notices are enabled.
+- Added `ui_prompt_start` and `ui_prompt_end` extension events so host integrations can distinguish active agent work from waiting on user-facing `ctx.ui` prompts ([#5329](https://github.com/earendil-works/pi/issues/5329)).- Added transcript usage notices for compaction and branch summaries when cache miss notices are enabled.
 - Added RPC `clear_queue` to retrieve and remove queued steering and follow-up messages ([#8432](https://github.com/earendil-works/pi/issues/8432)).
 - Added environment variables and advanced settings for overriding auto-detected terminal hyperlink, image, and truecolor capabilities ([#8665](https://github.com/earendil-works/pi/issues/8665)).
 - Added `fullscreenCopyOnSelect` to disable automatic fullscreen selection copy; when disabled, `Ctrl+X` copies the active text selection before falling back to the last assistant message, while `/tree` still copies the selected message ([#7720](https://github.com/earendil-works/pi/issues/7720)).
+- Added a `toolsOptions` option to `createAgentSession` for per-tool construction options, and `defaultTimeoutSeconds` to the bash and PowerShell tools so a session can put a hard ceiling on uncapped shell calls.
+- Added per-tester token spend to battletest's widget roster and `wait` output, and a label (the command or action argument) to each tool span in battletest metrics JSONL so slow outliers can be identified after the fact.
+- Added natural-language `/battletest` invocations — e.g. `/battletest 15 subagents using opencode minimax-m3 to test a feature` — parsing a tester count and an optional model override applied to every tester (also available as `model` on the battletest `start` action), with refusals for ambiguous or unknown models and unconfigured providers.
+- Added the auto thinking mode: a built-in extension that classifies each task's thinking level before its first request (zero extra usage — confident bands map directly, uncertain prompts start at the model's lowest thinking), escalates minimal → low → medium on struggle signals (consecutive tool errors, provider error bursts), shows the decision in the footer, and stands down on any manual level pick. Selectable as the far-left `auto` entry in the `/thinking` selector (via the new `registerThinkingLevelEntry` extension API) or `/thinking auto`; on by default in fresh sessions, `/auto-thinking on|off|status` to steer.
 
 ### Fixed
 
@@ -18,6 +21,7 @@
 - Fixed extension messages sent with `triggerTurn: false` while the agent is running being inserted between a tool call and its result, which made providers that validate message order reject the replayed history. They are now appended once the turn's tool results are in ([#8537](https://github.com/earendil-works/pi/issues/8537)).
 - Fixed compaction and branch summaries forcing `toolChoice: "none"` ([#8649](https://github.com/earendil-works/pi/issues/8649), [#8638](https://github.com/earendil-works/pi/issues/8638)).
 - Fixed Google Vertex requests failing with `HttpsProxyAgent is not a constructor` when the bundled Node.js runtime uses an HTTP(S) proxy ([#8610](https://github.com/earendil-works/pi/issues/8610)).
+- Fixed battletest runs losing hours to a single hung tester shell call: tester bash/PowerShell calls now default to a 3-minute timeout, and tester briefs say to poll in short calls instead of one blocking wait.
 
 ## [0.84.3] - 2026-08-24
 

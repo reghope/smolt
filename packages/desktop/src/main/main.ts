@@ -14,6 +14,7 @@ import {
 	type DiffBaseline,
 	toGitPath,
 } from "./diff.ts";
+import { refreshIconCacheAfterUpdate } from "./icon-cache.ts";
 import { fetchLinkPreview } from "./link-preview.ts";
 import { listSessions, searchSessions } from "./sessions.ts";
 import { ensureModel, speechStatus, transcribeSamples } from "./speech.ts";
@@ -627,6 +628,7 @@ app.whenReady().then(async () => {
 	// One install, both surfaces: keep the terminal's `smolt` pointed at the
 	// CLI this build shipped with.
 	ensureCliShim();
+	refreshIconCacheAfterUpdate();
 	const win = createWindow();
 
 	let active: AgentSlot = {

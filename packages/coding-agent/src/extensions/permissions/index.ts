@@ -69,6 +69,106 @@ export function commandOf(input: unknown): string {
 	return typeof command === "string" ? command : "";
 }
 
+/**
+ * Shell leaders that only observe, wherever they point. Deliberately
+ * conservative: a leader appears here only if no argument can make it write.
+ * `node`, `npm`, `python` and friends are NOT here — they run programs.
+ */
+const READ_ONLY_LEADERS = new Set([
+	"ls",
+	"dir",
+	"pwd",
+	"cat",
+	"type",
+	"head",
+	"tail",
+	"wc",
+	"which",
+	"where",
+	"whoami",
+	"hostname",
+	"date",
+	"file",
+	"stat",
+	"du",
+	"df",
+	"env",
+	"printenv",
+	"tree",
+	"grep",
+	"rg",
+	"find",
+	"findstr",
+	"echo",
+	"Get-ChildItem",
+	"Get-Content",
+	"Get-Item",
+	"Get-ItemProperty",
+	"Get-Location",
+	"Get-Command",
+	"Get-Date",
+	"Get-Process",
+	"Select-String",
+	"Select-Object",
+	"Measure-Object",
+	"Test-Path",
+	"Write-Output",
+	"Write-Host",
+]);
+
+/** git subcommands that cannot change the repository. `branch`, `remote`, `tag` and `stash` are excluded: their bare forms read but their flagged forms mutate. */
+const GIT_READERS = new Set([
+	"status",
+	"log",
+	"diff",
+	"show",
+	"rev-parse",
+	"ls-files",
+	"blame",
+	"shortlog",
+	"describe",
+]);
+
+/**
+ * Whether a shell command provably only reads.
+ *
+ * Approval prompts exist for commands that change something; a session that
+ * asks about `ls` and `git status` trains the reader to click allow without
+ * looking, which is worse than not asking. The test errs closed: every
+ * chained segment must lead with a known reader, and anything that could
+ * smuggle a write — redirection, substitution, a write-y pipe target —
+ * disqualifies the whole command.
+ */
+export function isReadOnlyCommand(command: string): boolean {
+	let text = command.trim();
+	if (text === "") return false;
+	// Redirections that silence or merge streams write nothing anywhere:
+	// `2>/dev/null`, `2>nul`, `>/dev/null`, `2>&1`. Agents bolt these onto
+	// reads constantly; strip them before the generic no-redirection ban so
+	// `cat x 2>/dev/null | head` is not mistaken for a write.
+	text = text.replace(/(?:\d|&)?>{1,2}\s*(?:\/dev\/null|nul)(?=\s|$|[;&|)])|\d>&\d/gi, " ").trim();
+	if (/[<>`]|\$\(|\|\s*(Out-File|Set-Content|Add-Content|Tee-Object|tee|xargs)\b/i.test(text)) return false;
+	const segments = text
+		.split(/&&|\|\||[;|]|\r?\n/)
+		.map((segment) => segment.trim())
+		.filter(Boolean);
+	if (segments.length === 0) return false;
+	for (const segment of segments) {
+		const words = segment.split(/\s+/);
+		const leader = words[0] ?? "";
+		// A harmless chaining prefix, not an action of its own.
+		if (leader === "cd" || leader === "pushd" || leader === "Set-Location") continue;
+		if (leader === "git") {
+			if (!GIT_READERS.has(words[1] ?? "")) return false;
+			continue;
+		}
+		// Version probes of anything are reads: `node --version`, `tsc -v`.
+		if (words.length === 2 && /^(--version|-v|-V|--help)$/.test(words[1] ?? "")) continue;
+		if (!READ_ONLY_LEADERS.has(leader)) return false;
+	}
+	return true;
+}
+
 /** What a mode wants to happen before a tool runs. */
 export type Decision = "allow" | "ask" | "block";
 
@@ -127,7 +227,15 @@ export function decide(mode: PermissionMode, toolName: string, input?: unknown):
 	}
 	if (!MUTATING_TOOLS.has(toolName)) return "allow";
 	if (mode === "plan") return "block";
-	if (mode === "acceptEdits") return SHELL_TOOLS.has(toolName) ? "ask" : "allow";
+	if (mode === "acceptEdits") {
+		if (!SHELL_TOOLS.has(toolName)) return "allow";
+		// A command that provably only reads is one the reader would have
+		// waved through anyway; asking about it just teaches blind clicking.
+		// Destructive still asks, and anything ambiguous falls through to ask.
+		const command = commandOf(input);
+		if (destructiveReason(command)) return "ask";
+		return isReadOnlyCommand(command) ? "allow" : "ask";
+	}
 	return "ask";
 }
 
@@ -224,11 +332,33 @@ export async function askForApproval(
 	}
 }
 
+/**
+ * Whether a request file's `<pid>-<n>` prefix names a process still running.
+ *
+ * The requests directory is shared by every agent on the machine, so a
+ * starting process may only sweep files whose owning agent is gone — wiping
+ * a live agent's question would leave it waiting out its whole timeout for
+ * an answer no front end is showing anymore.
+ */
+function ownedByLiveProcess(name: string): boolean {
+	const pid = Number.parseInt(name, 10);
+	if (!Number.isInteger(pid) || pid <= 0) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (err) {
+		// EPERM means the process exists but belongs to someone else.
+		return (err as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
 /** Drop anything left behind by an earlier run. */
 export function clearStaleRequests(dir = requestsDir()): void {
 	try {
 		for (const name of readdirSync(dir)) {
-			if (name.endsWith(".json") || name.endsWith(".reply")) rmSync(join(dir, name), { force: true });
+			if (!(name.endsWith(".json") || name.endsWith(".reply"))) continue;
+			if (ownedByLiveProcess(name)) continue;
+			rmSync(join(dir, name), { force: true });
 		}
 	} catch {
 		// No directory yet is the normal first-run case.

@@ -6,6 +6,7 @@ import { getTasteDoctrineDir } from "../../config.ts";
 // Type-only import: a standalone install of this module outside the smolt
 // tree switches this single line to `from "smolt"`.
 import type { ExtensionAPI, ExtensionContext } from "../../core/extensions/types.ts";
+import { isReadOnlyCommand } from "../permissions/index.ts";
 import { BROWSER_CHECKS, type CheckResult, checkFile, summarizeFile } from "./checks.ts";
 import { isDesignPrompt, isUiPath, uiPathsInCommand } from "./trigger.ts";
 
@@ -123,6 +124,8 @@ export function createTasteExtension(smolt: ExtensionAPI, doctrineDir: string): 
 	let bites = 0;
 	/** The gate started the run now settling, so its result is the review. */
 	let gateRun = false;
+	/** The run now settling was aborted by the user; Stop means stop. */
+	let lastRunAborted = false;
 
 	const paint = (ctx: ExtensionContext): void => {
 		if (!armed || disabled) {
@@ -195,9 +198,21 @@ export function createTasteExtension(smolt: ExtensionAPI, doctrineDir: string): 
 		}
 		if (event.toolName === "bash" || event.toolName === "powershell") {
 			const command = typeof input.command === "string" ? input.command : "";
-			for (const path of uiPathsInCommand(command, ctx.cwd, config.extraGlobs)) note(path, ctx.cwd);
+			// Only commands that can WRITE arm the gate. `ls *.html` and its
+			// kin merely mention UI files, and counting those once put a bare
+			// glob on the review list of a chat that had changed nothing.
+			if (isReadOnlyCommand(command)) return;
+			for (const path of uiPathsInCommand(command, ctx.cwd, config.extraGlobs)) {
+				if (path.includes("*")) continue;
+				note(path, ctx.cwd);
+			}
 			paint(ctx);
 		}
+	});
+
+	smolt.on("agent_end", async (event) => {
+		const last = [...event.messages].reverse().find((message) => message.role === "assistant");
+		lastRunAborted = (last as { stopReason?: string } | undefined)?.stopReason === "aborted";
 	});
 
 	smolt.on("agent_settled", async (_event, ctx) => {
@@ -205,6 +220,9 @@ export function createTasteExtension(smolt: ExtensionAPI, doctrineDir: string): 
 		gateRun = false;
 		paint(ctx);
 		if (disabled || touched.size === 0) return;
+		// The user pressed Stop: the whole conversation stops, gate included.
+		// The files stay on the list; the next natural settle picks them up.
+		if (lastRunAborted) return;
 		if (ctx.mode !== "tui" && ctx.mode !== "rpc") return;
 		if (ctx.hasPendingMessages()) return;
 		if (bites >= MAX_BITES) {

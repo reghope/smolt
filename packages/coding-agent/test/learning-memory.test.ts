@@ -41,6 +41,19 @@ describe("MemoryStore.add", () => {
 		});
 	});
 
+	test("a write landing at 80%+ capacity carries the consolidate-early nudge", () => {
+		const small = new MemoryStore(dir, 100, 100);
+		const low = small.add("memory", "short");
+		expect(String(low.note)).not.toContain("capacity");
+		const high = small.add(
+			"memory",
+			"a much longer entry that pushes this store clearly past the eighty percent line",
+		);
+		expect(high.success).toBe(true);
+		expect(String(high.note)).toContain("% capacity");
+		expect(String(high.note)).toContain("consolidate");
+	});
+
 	test("rejects an add that would exceed the char limit, echoing current entries", () => {
 		const small = new MemoryStore(dir, 50, 50);
 		small.add("memory", "a".repeat(30));

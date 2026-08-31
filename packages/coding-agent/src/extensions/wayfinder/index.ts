@@ -123,7 +123,15 @@ export function createWayfinderExtension(smolt: ExtensionAPI, paths: WayfinderPa
 		armedMaps.clear();
 	});
 
+	/** The run now settling was aborted by the user; Stop means stop. */
+	let lastRunAborted = false;
+	smolt.on("agent_end", async (event) => {
+		const last = [...event.messages].reverse().find((message) => message.role === "assistant");
+		lastRunAborted = (last as { stopReason?: string } | undefined)?.stopReason === "aborted";
+	});
+
 	smolt.on("agent_settled", async (_event, ctx) => {
+		if (lastRunAborted) return;
 		if (armedMaps.size === 0) return;
 		const targets = [...armedMaps];
 		armedMaps.clear();

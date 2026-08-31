@@ -274,6 +274,14 @@ export class MemoryStore {
 		};
 		if (message) resp.message = message;
 		resp.note = "Write saved. This update is complete — do not repeat it.";
+		// Consolidate calmly at 80%, not desperately at 100%: a store near the
+		// wall forces merging mid-add, under pressure, in whatever turn happens
+		// to hit the limit. Nudging early keeps curation a deliberate act.
+		if (pct >= 80) {
+			resp.note +=
+				` Memory is at ${pct}% capacity: in a suitable moment (not necessarily this turn), consolidate — ` +
+				"merge overlapping entries with 'replace' and drop stale ones with 'remove' — before adding much more.";
+		}
 		return resp;
 	}
 

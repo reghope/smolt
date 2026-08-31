@@ -34,12 +34,15 @@ export function ExtensionDialog() {
 					)}
 				</DialogHeader>
 				{request.method === "select" && (
-					<div className="flex flex-col gap-2">
+					// Scroll inside the dialog, never grow past the window: a
+					// 40-provider picker once rendered ~1800px tall with the title
+					// and Close pushed off-screen.
+					<div className="flex max-h-[60vh] flex-col gap-2 overflow-y-auto pr-1">
 						{(request.options ?? []).map((option) => (
 							<Button
 								key={option}
 								variant="outline"
-								className="justify-start"
+								className="flex-none justify-start"
 								onClick={() => answerUiRequest({ id: request.id, value: option })}
 							>
 								{option}

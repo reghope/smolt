@@ -43,6 +43,7 @@ import type {
 	MessageRenderer,
 	ProviderConfig,
 	RegisteredCommand,
+	ThinkingLevelSelectorEntry,
 	ToolDefinition,
 } from "./types.ts";
 
@@ -312,6 +313,14 @@ function createExtensionAPI(
 			extension.shortcuts.set(shortcut, { shortcut, extensionPath: extension.path, ...options });
 		},
 
+		registerThinkingLevelEntry(entry: ThinkingLevelSelectorEntry): void {
+			assertActive();
+			// First registration per value wins, mirroring registerTool.
+			if (!extension.thinkingLevelEntries.has(entry.value)) {
+				extension.thinkingLevelEntries.set(entry.value, entry);
+			}
+		},
+
 		registerFlag(
 			name: string,
 			options: { description?: string; type: "boolean" | "string"; default?: boolean | string },
@@ -536,6 +545,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		commands: new Map(),
 		flags: new Map(),
 		shortcuts: new Map(),
+		thinkingLevelEntries: new Map(),
 	};
 }
 

@@ -2,7 +2,14 @@
 <html lang="en">
 <head>
 	<meta charset="utf-8" />
-	<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data: blob:; media-src blob:" />
+	<!-- style-src allows inline styles: the UI primitives position popovers and
+	     size meters by writing style properties on their nodes, and a policy
+	     without 'unsafe-inline' turned every popover open into console errors
+	     and a popover floating at the wrong offset. No remote content loads here. -->
+	<meta
+		http-equiv="Content-Security-Policy"
+		content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: blob:; media-src blob:"
+	/>
 	<title>smolt</title>
 	<link rel="stylesheet" href="styles.css" />
 </head>

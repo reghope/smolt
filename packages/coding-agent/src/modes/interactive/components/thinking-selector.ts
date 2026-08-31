@@ -12,6 +12,7 @@ import {
 	Spacer,
 	Text,
 } from "@smolt/tui";
+import type { ThinkingLevelSelectorEntry } from "../../../core/extensions/types.ts";
 import { getSelectListTheme, theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyDisplayText } from "./keybinding-hints.ts";
@@ -39,9 +40,9 @@ export class ThinkingSelectorComponent extends Container implements Focusable {
 	private selectList: SelectList;
 	private selectListChildIndex: number;
 	private allItems: SelectItem[];
-	private onSelect: (level: ThinkingLevel) => void;
+	private onSelect: (value: string) => void;
 	private onCancel: () => void;
-	private onSelectAsDefault?: (level: ThinkingLevel) => void;
+	private onSelectAsDefault?: (value: string) => void;
 	private _focused = false;
 
 	get focused(): boolean {
@@ -54,24 +55,33 @@ export class ThinkingSelectorComponent extends Container implements Focusable {
 	}
 
 	constructor(
-		currentLevel: ThinkingLevel,
+		currentValue: string,
 		availableLevels: ThinkingLevel[],
-		onSelect: (level: ThinkingLevel) => void,
+		onSelect: (value: string) => void,
 		onCancel: () => void,
-		onSelectAsDefault?: (level: ThinkingLevel) => void,
+		onSelectAsDefault?: (value: string) => void,
 		defaultThinkingLevel?: ThinkingLevel,
+		entries: ThinkingLevelSelectorEntry[] = [],
 	) {
 		super();
 		this.onSelect = onSelect;
 		this.onCancel = onCancel;
 		this.onSelectAsDefault = onSelectAsDefault;
 
-		this.allItems = availableLevels.map((level) => ({
-			value: level,
-			label: level,
-			description:
-				level === defaultThinkingLevel ? `${LEVEL_DESCRIPTIONS[level]} · default` : LEVEL_DESCRIPTIONS[level],
-		}));
+		// Extension entries render first (far left), then the model's levels.
+		this.allItems = [
+			...entries.map((entry) => ({
+				value: entry.value,
+				label: entry.label,
+				description: entry.description,
+			})),
+			...availableLevels.map((level) => ({
+				value: level,
+				label: level,
+				description:
+					level === defaultThinkingLevel ? `${LEVEL_DESCRIPTIONS[level]} · default` : LEVEL_DESCRIPTIONS[level],
+			})),
+		];
 
 		// Add top border
 		this.addChild(new DynamicBorder());
@@ -87,7 +97,7 @@ export class ThinkingSelectorComponent extends Container implements Focusable {
 		this.addChild(new Spacer(1));
 
 		// Create selector
-		this.selectList = this.buildSelectList(this.allItems, currentLevel);
+		this.selectList = this.buildSelectList(this.allItems, currentValue);
 		this.selectListChildIndex = this.children.length;
 		this.addChild(this.selectList);
 		this.addChild(new Spacer(1));
@@ -97,13 +107,13 @@ export class ThinkingSelectorComponent extends Container implements Focusable {
 		this.addChild(new DynamicBorder());
 	}
 
-	private buildSelectList(items: SelectItem[], preselect?: ThinkingLevel): SelectList {
+	private buildSelectList(items: SelectItem[], preselect?: string): SelectList {
 		const list = new SelectList(items, Math.max(1, items.length), getSelectListTheme(), THINKING_SELECT_LIST_LAYOUT);
 		const currentIndex = items.findIndex((item) => item.value === preselect);
 		if (currentIndex !== -1) {
 			list.setSelectedIndex(currentIndex);
 		}
-		list.onSelect = (item) => this.onSelect(item.value as ThinkingLevel);
+		list.onSelect = (item) => this.onSelect(item.value);
 		list.onCancel = () => this.onCancel();
 		return list;
 	}
@@ -112,7 +122,7 @@ export class ThinkingSelectorComponent extends Container implements Focusable {
 		const filtered = query
 			? fuzzyFilter(this.allItems, query, (item) => `${item.label} ${item.description ?? ""}`)
 			: this.allItems;
-		const selectedValue = this.selectList.getSelectedItem()?.value as ThinkingLevel | undefined;
+		const selectedValue = this.selectList.getSelectedItem()?.value;
 		const newList = this.buildSelectList(filtered, selectedValue);
 		this.children[this.selectListChildIndex] = newList;
 		this.selectList = newList;
@@ -121,7 +131,7 @@ export class ThinkingSelectorComponent extends Container implements Focusable {
 	handleInput(keyData: string): void {
 		if (matchesKey(keyData, "ctrl+s") && this.onSelectAsDefault) {
 			const item = this.selectList.getSelectedItem();
-			if (item) this.onSelectAsDefault(item.value as ThinkingLevel);
+			if (item) this.onSelectAsDefault(item.value);
 			return;
 		}
 

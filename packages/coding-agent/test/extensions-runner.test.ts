@@ -1035,4 +1035,38 @@ describe("ExtensionRunner", () => {
 			expect(errors[0].error).toContain("header handler boom");
 		});
 	});
+
+	describe("thinking level selector entries", () => {
+		it("collects entries from extensions, first registration per value wins", async () => {
+			const first = `export default function(smolt) {
+	smolt.registerThinkingLevelEntry({
+		value: "auto",
+		label: "auto",
+		onSelect: () => {},
+	});
+}`;
+			const second = `export default function(smolt) {
+	smolt.registerThinkingLevelEntry({
+		value: "auto",
+		label: "imposter",
+		onSelect: () => {},
+	});
+	smolt.registerThinkingLevelEntry({
+		value: "other",
+		label: "other",
+		onSelect: () => {},
+	});
+}`;
+			fs.writeFileSync(path.join(extensionsDir, "first-entry.ts"), first);
+			fs.writeFileSync(path.join(extensionsDir, "second-entry.ts"), second);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			expect(runner.getThinkingLevelEntries().map((entry) => `${entry.value}:${entry.label}`)).toEqual([
+				"auto:auto",
+				"other:other",
+			]);
+		});
+	});
 });

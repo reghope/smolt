@@ -29,12 +29,12 @@ export function EmptyChat() {
 		<div className="mx-auto mt-[16vh] flex max-w-[520px] flex-col items-center px-2 text-center @max-[550px]:mt-[8vh]">
 			<h1 className="text-balance text-xl font-medium tracking-tight">
 				{greeting()}
-				{inProject ? ` — what's next in ${folder}?` : " — what shall we work on?"}
+				{inProject ? `, what's next in ${folder}?` : ", what shall we work on?"}
 			</h1>
 			{!inProject && (
 				<>
 					<p className="mt-3 text-sm leading-relaxed text-faint">
-						No project folder is open. Ask anything, or open one to work in — otherwise you will be asked where new
+						No project folder is open. Ask anything, or open one to work in; otherwise you will be asked where new
 						files should go.
 					</p>
 					<Button variant="outline" size="sm" className="mt-5 gap-2" onClick={() => void pickProject()}>

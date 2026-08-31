@@ -31,7 +31,7 @@ export interface RpcClientOptions {
 	/** Working directory for the agent */
 	cwd?: string;
 	/** Environment variables */
-	env?: Record<string, string>;
+	env?: Record<string, string | undefined>;
 	/** Provider to use */
 	provider?: string;
 	/** Model ID to use */
@@ -65,6 +65,7 @@ export class RpcClient {
 	private process: ChildProcess | null = null;
 	private stopReadingStdout: (() => void) | null = null;
 	private eventListeners: RpcEventListener[] = [];
+	private exitListeners: ((info: { code: number | null; signal: string | null }) => void)[] = [];
 	private pendingRequests: Map<string, { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }> =
 		new Map();
 	private requestId = 0;
@@ -101,7 +102,14 @@ export class RpcClient {
 
 		const childProcess = spawn(this.options.execPath ?? "node", [cliPath, ...args], {
 			cwd: this.options.cwd,
-			env: { ...process.env, ...this.options.env },
+			// An explicit `undefined` value deletes an inherited variable rather
+			// than setting it, so a host can strip ambient variables it does not
+			// want the agent to see instead of only adding to them.
+			env: Object.fromEntries(
+				Object.entries({ ...process.env, ...this.options.env }).filter(
+					(entry): entry is [string, string] => entry[1] !== undefined,
+				),
+			),
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 		this.process = childProcess;
@@ -117,6 +125,7 @@ export class RpcClient {
 			const error = this.createProcessExitError(code, signal);
 			this.exitError = error;
 			this.rejectPendingRequests(error);
+			for (const listener of this.exitListeners) listener({ code, signal: signal ?? null });
 		});
 		childProcess.once("error", (error) => {
 			if (this.process !== childProcess) return;
@@ -187,6 +196,22 @@ export class RpcClient {
 		};
 	}
 
+	/** The agent process's OS pid, while it is running. */
+	get pid(): number | undefined {
+		return this.process?.pid;
+	}
+
+	/** Called once when the agent process exits, for any reason. */
+	onExit(listener: (info: { code: number | null; signal: string | null }) => void): () => void {
+		this.exitListeners.push(listener);
+		return () => {
+			const index = this.exitListeners.indexOf(listener);
+			if (index !== -1) {
+				this.exitListeners.splice(index, 1);
+			}
+		};
+	}
+
 	/**
 	 * Get collected stderr output (useful for debugging).
 	 */
@@ -203,8 +228,12 @@ export class RpcClient {
 	 * Returns immediately after sending; use onEvent() to receive streaming events.
 	 * Use waitForIdle() to wait for completion.
 	 */
-	async prompt(message: string, images?: ImageContent[]): Promise<void> {
-		await this.send({ type: "prompt", message, images });
+	async prompt(message: string, images?: ImageContent[], streamingBehavior?: "steer" | "followUp"): Promise<void> {
+		// streamingBehavior makes the call safe in either agent state: idle
+		// starts a turn, streaming queues per the behavior — decided in the
+		// agent process, so a client's possibly-stale view of streaming can
+		// never route a message somewhere nothing reads.
+		await this.send({ type: "prompt", message, images, streamingBehavior });
 	}
 
 	/**
@@ -545,7 +574,17 @@ export class RpcClient {
 	}
 
 	private createProcessExitError(code: number | null, signal: NodeJS.Signals | null): Error {
-		return new Error(`Agent process exited (code=${code} signal=${signal}). Stderr: ${this.stderr}`);
+		// A person reads this in an error card: say what happened in words,
+		// and only append the parts that carry information — "code=null
+		// signal=SIGTERM. Stderr:" with a dangling nothing helped no one.
+		const how =
+			signal !== null
+				? `was stopped by signal ${signal}`
+				: code === 0
+					? "exited normally"
+					: `crashed with exit code ${code}`;
+		const stderr = this.stderr.trim();
+		return new Error(`The agent process ${how}.${stderr !== "" ? ` Last output:\n${stderr}` : ""}`);
 	}
 
 	private rejectPendingRequests(error: Error): void {
@@ -593,11 +632,18 @@ export class RpcClient {
 		const id = `req_${++this.requestId}`;
 		const fullCommand = { ...command, id } as RpcCommand;
 
+		// A prompt's response can legitimately take minutes: an extension
+		// command inside it (e.g. /pool add) holds the reply open while its
+		// dialogs wait on the user. The short timeout is for calls a healthy
+		// agent answers immediately — timing prompt out at 30s made the
+		// desktop restore the "failed" draft into the composer and log a
+		// phantom failure after every dialog-driven command.
+		const timeoutMs = command.type === "prompt" ? 10 * 60 * 1000 : 30000;
 		return new Promise((resolve, reject) => {
 			const timeout = setTimeout(() => {
 				this.pendingRequests.delete(id);
 				reject(new Error(`Timeout waiting for response to ${command.type}. Stderr: ${this.stderr}`));
-			}, 30000);
+			}, timeoutMs);
 
 			this.pendingRequests.set(id, {
 				resolve: (response) => {

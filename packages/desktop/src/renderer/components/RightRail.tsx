@@ -59,8 +59,11 @@ function DiffPane() {
 			<div className="flex-1 overflow-y-auto pt-1.5 pb-4">
 				{state.diffFiles.length === 0 ? (
 					<p className="px-4 py-3 text-sm leading-normal text-faint">
-						This chat hasn't changed anything yet.
-						{state.preexistingChanges > 0 &&
+						{state.diffUnavailable !== ""
+							? state.diffUnavailable
+							: "This chat hasn't changed anything yet."}
+						{state.diffUnavailable === "" &&
+							state.preexistingChanges > 0 &&
 							` ${state.preexistingChanges} file${state.preexistingChanges === 1 ? " was" : "s were"} already modified when it opened.`}
 					</p>
 				) : (
@@ -289,7 +292,7 @@ export function RightRail() {
 				inert={hidden || undefined}
 				className={cn(
 					"flex h-full flex-col overflow-hidden pt-9",
-					// At width zero, painted content would peek past the closed edge —
+					// At width zero, painted content would peek past the closed edge,
 					// so the closed rail does not paint (matching the sidebar).
 					hidden && "opacity-0",
 				)}

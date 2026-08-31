@@ -20,11 +20,13 @@ import { Composer } from "./components/Composer.tsx";
 import { ConfirmDialog } from "./components/ConfirmDialog.tsx";
 import { ProviderDialog } from "./components/ProviderDialog.tsx";
 import { ExtensionDialog } from "./components/ExtensionDialog.tsx";
+import { PromptDialog } from "./components/PromptDialog.tsx";
 import { RightRail } from "./components/RightRail.tsx";
 import { SettingsDialog } from "./components/SettingsDialog.tsx";
 import { ShortcutsDialog } from "./components/ShortcutsDialog.tsx";
 import { Sidebar } from "./components/Sidebar.tsx";
 import { Titlebar } from "./components/Titlebar.tsx";
+import { Toaster } from "./components/Toaster.tsx";
 import { toggleAllToolOutput, Transcript } from "./components/Transcript.tsx";
 import { TooltipProvider } from "./components/ui/tooltip.tsx";
 
@@ -44,6 +46,16 @@ export function App() {
 				if ((e.key === "Delete" || e.key === "Backspace") && !typing && !inField && app.selectedSessions.size > 0) {
 					e.preventDefault();
 					void deleteSelectedSessions();
+					return;
+				}
+				// A menu, popover or dialog is open: its own layer handles Escape,
+				// and a prevented keydown is exactly what stops it dismissing, so
+				// so leave the event alone and let that surface close itself.
+				if (
+					document.querySelector(
+						'[data-slot="popover-content"], [data-slot="dropdown-menu-content"], [role="dialog"], [role="menu"], [role="listbox"]',
+					)
+				) {
 					return;
 				}
 				if (e.key === "Escape") {
@@ -149,10 +161,34 @@ export function App() {
 		return () => document.removeEventListener("paste", onPaste);
 	}, []);
 
+	// Narrow windows shed panes instead of crushing the chat between them:
+	// the rail's 300px floor plus the sidebar can leave the conversation no
+	// column at all. Closing is one toggle to undo, in the titlebar.
+	useEffect(() => {
+		const onResize = (): void => {
+			if (window.innerWidth < 850 && (app.diffOpen || app.sideOpen)) {
+				app.diffOpen = false;
+				app.sideOpen = false;
+				bump();
+			}
+			if (window.innerWidth < 660 && !app.sidebarHidden) {
+				app.sidebarHidden = true;
+				bump();
+			}
+		};
+		onResize();
+		window.addEventListener("resize", onResize);
+		return () => window.removeEventListener("resize", onResize);
+	}, []);
+
 	return (
 		<TooltipProvider delayDuration={300}>
 			<Titlebar />
-			<div className="flex h-screen">
+			{/* A FIXED viewport height, not min-h: the shell must never grow with
+			    the transcript, or the conversation scrolls the page instead of
+			    its own pane and the composer ends up below the fold ("the
+			    composer has gone"). dvh keeps the dynamic-viewport intent. */}
+			<div className="flex h-dvh">
 				<Sidebar />
 				<main className="flex min-w-0 flex-1 flex-col pt-9 @container">
 					<Transcript />
@@ -164,7 +200,9 @@ export function App() {
 			<ShortcutsDialog />
 			<ExtensionDialog />
 			<ConfirmDialog />
+			<PromptDialog />
 			<ProviderDialog />
+			<Toaster />
 		</TooltipProvider>
 	);
 }

@@ -202,6 +202,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					widgetKey: key,
 					widgetLines: content as string[] | undefined,
 					widgetPlacement: options?.placement,
+					widgetDetails: options?.details,
 				} as RpcExtensionUIRequest);
 			}
 			// Component factories are not supported in RPC mode - would need TUI access
@@ -465,6 +466,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					autoCompactionEnabled: session.autoCompactionEnabled,
 					messageCount: session.messages.length,
 					pendingMessageCount: session.pendingMessageCount,
+					activeThinkingEntry: session.extensionRunner
+						.getThinkingLevelEntries()
+						.find((entry) => entry.isCurrent?.())?.value,
 				};
 				return success(id, "get_state", state);
 			}
@@ -503,6 +507,17 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 
 			case "set_thinking_level": {
+				// Extension entries ("auto") ride the same selector as concrete
+				// levels on every surface; route them to their own handler.
+				const entry = session.extensionRunner
+					.getThinkingLevelEntries()
+					.find((candidate) => candidate.value === (command.level as string));
+				if (entry) {
+					const entryCtx = session.extensionRunner.createCommandContext();
+					if (command.persist === true && entry.onSelectAsDefault) entry.onSelectAsDefault(entryCtx);
+					else entry.onSelect(entryCtx);
+					return success(id, "set_thinking_level");
+				}
 				session.setThinkingLevel(command.level, { persist: command.persist === true });
 				return success(id, "set_thinking_level");
 			}
@@ -516,7 +531,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			}
 
 			case "get_available_thinking_levels": {
-				const levels = session.getAvailableThinkingLevels();
+				// Extension entries first ("auto"), then the model's own levels —
+				// the same order the TUI selector shows.
+				const entries = session.extensionRunner.getThinkingLevelEntries().map((entry) => entry.value);
+				const levels = [...entries, ...session.getAvailableThinkingLevels()] as ReturnType<
+					typeof session.getAvailableThinkingLevels
+				>;
 				return success(id, "get_available_thinking_levels", { levels });
 			}
 
@@ -694,6 +714,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 						description: command.description,
 						source: "extension",
 						sourceInfo: command.sourceInfo,
+						internal: command.internal === true,
 					});
 				}
 

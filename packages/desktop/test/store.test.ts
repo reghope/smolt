@@ -256,3 +256,46 @@ describe("a turn that settles mid-flight", () => {
 		expect(state.messages[1]!.tokens).toBe(15);
 	});
 });
+
+describe("turn usage accounting", () => {
+	test("usage accumulates across a turn's requests instead of showing only the newest", () => {
+		const state = feed([
+			{ type: "agent_start" },
+			// Request 1: streams a snapshot, then finishes with final usage.
+			{ type: "message_start", message: { role: "assistant", content: [] } },
+			{
+				type: "message_update",
+				assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "a" },
+				usage: { input: 100, output: 10, cost: { total: 0.01 } },
+			},
+			{
+				type: "message_end",
+				message: { role: "assistant", content: [], usage: { input: 100, output: 12, cost: { total: 0.012 } } },
+			},
+			// Request 2: its snapshot stacks on top of request 1's banked total.
+			{ type: "message_start", message: { role: "assistant", content: [] } },
+			{
+				type: "message_update",
+				assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "b" },
+				usage: { input: 150, output: 5, cost: { total: 0.02 } },
+			},
+		]);
+		expect(state.usage).toMatchObject({ input: 250, output: 17 });
+		expect(state.usage?.cost).toBeCloseTo(0.032);
+	});
+
+	test("a new turn counts from zero", () => {
+		const state = feed([
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant", content: [] } },
+			{
+				type: "message_end",
+				message: { role: "assistant", content: [], usage: { input: 500, output: 50, cost: { total: 0.1 } } },
+			},
+			{ type: "agent_settled" },
+			{ type: "agent_start" },
+		]);
+		expect(state.usage).toBeNull();
+		expect(state.turnBase).toMatchObject({ input: 0, output: 0, cost: 0 });
+	});
+});

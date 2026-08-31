@@ -10,7 +10,7 @@ contextBridge.exposeInMainWorld("smolt", {
 	call: (method: string, ...args: unknown[]): Promise<AgentCallResult> =>
 		ipcRenderer.invoke("agent:call", method, args),
 	status: (): Promise<{ running: boolean; error: string | null }> => ipcRenderer.invoke("agent:status"),
-	sessions: (): Promise<unknown[]> => ipcRenderer.invoke("app:sessions"),
+	sessions: (query?: string): Promise<unknown[]> => ipcRenderer.invoke("app:sessions", query),
 	info: (): Promise<{ cwd: string; version: string }> => ipcRenderer.invoke("app:info"),
 	transcribe: (audio: ArrayBuffer, mimeType: string): Promise<AgentCallResult> =>
 		ipcRenderer.invoke("app:transcribe", audio, mimeType),
@@ -19,6 +19,9 @@ contextBridge.exposeInMainWorld("smolt", {
 		ipcRenderer.invoke("app:permission-reply", id, answer),
 	onPermissionRequest: (cb: (request: unknown) => void): void => {
 		ipcRenderer.on("permission:request", (_e, request) => cb(request));
+	},
+	onPermissionRemoved: (cb: (id: string) => void): void => {
+		ipcRenderer.on("permission:removed", (_e, id: string) => cb(id));
 	},
 	sessionMessages: (
 		path: string,
@@ -88,6 +91,9 @@ contextBridge.exposeInMainWorld("smolt", {
 	},
 	onBackgroundSettled: (cb: (info: { sessionPath: string }) => void): void => {
 		ipcRenderer.on("agent:background-settled", (_e, info) => cb(info));
+	},
+	onAgentExited: (cb: (info: { slotId: number; wasActive: boolean; code: number | null }) => void): void => {
+		ipcRenderer.on("agent:exited", (_e, info) => cb(info));
 	},
 	ready: (): void => ipcRenderer.send("renderer:ready"),
 });

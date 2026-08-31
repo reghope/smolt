@@ -6,6 +6,7 @@ import {
 	chatDidToolWork,
 	projectName,
 	refreshState,
+	requestInput,
 	toggleDiffPane,
 	toggleSessionSearch,
 	toggleSidebar,
@@ -29,6 +30,7 @@ function TitlebarButton({
 		<button
 			type="button"
 			title={title}
+			aria-label={title}
 			onClick={onClick}
 			className="app-no-drag relative flex size-7 items-center justify-center rounded-lg text-faint transition-colors hover:bg-accent hover:text-foreground"
 		>
@@ -108,9 +110,12 @@ export function Titlebar() {
 				<button
 					type="button"
 					title="Rename this session"
+					aria-label="Rename this session"
 					className="app-no-drag min-w-0 overflow-hidden text-ellipsis whitespace-nowrap rounded-lg px-2.5 py-0.5 text-sm font-medium text-foreground transition-colors hover:bg-accent"
 					onClick={async () => {
-						const next = window.prompt("Rename this session", headerTitle);
+						// In-app input, never window.prompt: Electron does not
+						// implement it: it throws, so this click used to do nothing.
+						const next = await requestInput({ title: "Rename chat", initial: headerTitle });
 						if (next === null) return;
 						const trimmed = next.trim();
 						if (trimmed === "" || trimmed === headerTitle) return;

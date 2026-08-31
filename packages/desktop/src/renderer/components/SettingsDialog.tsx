@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api.ts";
 import { cn } from "../lib/cn.ts";
 import {
@@ -16,6 +16,7 @@ import {
 	installUpdate,
 	refreshState,
 	requestConfirm,
+	requestInput,
 	setDefaultThinking,
 	toast,
 	type ThemeChoice,
@@ -41,31 +42,34 @@ type SectionId = (typeof SECTIONS)[number]["id"];
  * Updates, and a way to ask for one now.
  *
  * The app looks on its own every few hours, which is right for something
- * nobody wants to think about — but leaves no answer for the moment
+ * nobody wants to think about, but leaves no answer for the moment
  * somebody does. This says where things stand and checks on request.
  */
 function UpdateSection() {
 	const state = useApp();
 	const update = state.update;
 	const version = "version" in update ? update.version : "";
+	// Every feed version says "release", so the two version numbers on this
+	// screen can never be mistaken for each other: one is what this app is,
+	// the other is what npm is serving.
 	const status =
 		state.updateChecking || update.status === "checking"
 			? "Checking…"
 			: update.status === "downloading"
-				? `Fetching v${version}${update.percent > 0 ? ` — ${update.percent}%` : "…"}`
+				? `Fetching release v${version}${update.percent > 0 ? ` (${update.percent}%)` : "…"}`
 				: update.status === "ready"
-					? `v${version} is ready`
+					? `Release v${version} is ready`
 					: update.status === "installing"
-						? `Updating to v${version} — restarting`
+						? `Updating to release v${version}, restarting`
 						: update.status === "available"
-							? `v${version} is available`
+							? `Release v${version} is available`
 							: update.status === "error"
 								? update.message
 								: !state.appInfo.packaged
-									? `smolt ${state.appInfo.version} — updates apply to the installed app`
+									? `Workspace build v${state.appInfo.version} (updates apply to the installed app)`
 									: state.updateChecked
-										? `You are on the latest version (${state.appInfo.version})`
-										: `smolt ${state.appInfo.version}`;
+										? `You are on the latest release (v${state.appInfo.version})`
+										: `This app is release v${state.appInfo.version}`;
 	return (
 		<div className="flex flex-col gap-1.5">
 			<FieldLabel>Updates</FieldLabel>
@@ -220,7 +224,11 @@ function WorktreeSection() {
 				<Button
 					variant="outline"
 					onClick={async () => {
-						const label = window.prompt("Name for the isolated worktree and its branch", app.sessionName || "session");
+						const label = await requestInput({
+							title: "Isolate in a new worktree",
+							message: "Name for the isolated worktree and its branch",
+							initial: app.sessionName || "session",
+						});
 						if (label === null) return;
 						const result = await api.worktreeCreate(label);
 						if (!result.ok) {
@@ -261,6 +269,7 @@ export function SettingsDialog() {
 	const [query, setQuery] = useState("");
 	const [modelFilter, setModelFilter] = useState("");
 	const [name, setName] = useState(state.sessionName);
+	const activeModelRef = useRef<HTMLButtonElement | null>(null);
 
 	useEffect(() => {
 		if (!state.settingsOpen) return;
@@ -269,6 +278,13 @@ export function SettingsDialog() {
 		void ensureModels();
 		void ensureThinkingLevels();
 	}, [state.settingsOpen]);
+
+	// The list opens where the reader can see their answer: the running model
+	// scrolls into view instead of sitting off-screen below the fold.
+	useEffect(() => {
+		if (!state.settingsOpen || section !== "model") return;
+		activeModelRef.current?.scrollIntoView({ block: "nearest" });
+	}, [state.settingsOpen, section, state.availableModels.length]);
 
 	const searching = query.trim() !== "";
 	const show = (id: SectionId): boolean => searching || section === id;
@@ -401,7 +417,10 @@ export function SettingsDialog() {
 												variant="outline"
 												onClick={async () => {
 													const result = await call<{ path: string }>("exportHtml");
-													if (result) void api.reveal(result.path, "reveal");
+													if (result) {
+														void api.reveal(result.path, "reveal");
+														toast(`Session exported to ${result.path}`);
+													}
 												}}
 											>
 												Export HTML
@@ -445,6 +464,7 @@ export function SettingsDialog() {
 													<button
 														type="button"
 														key={`${option.provider}/${option.id}`}
+														ref={`${option.provider}/${option.id}` === state.model ? activeModelRef : undefined}
 														className={cn(
 															"flex h-8 flex-none items-baseline justify-between gap-2.5 rounded-lg px-3 text-left text-sm transition-colors hover:bg-accent",
 															`${option.provider}/${option.id}` === state.model && "bg-primary/10",
@@ -459,6 +479,21 @@ export function SettingsDialog() {
 												))
 											)}
 										</div>
+										{/* The provider flow must stay reachable after the first key
+										    exists — pool credentials and new providers are added here. */}
+										{state.availableModels.length > 0 && (
+											<Button
+												variant="ghost"
+												size="sm"
+												className="self-start"
+												onClick={() => {
+													app.providerDialogOpen = true;
+													bump();
+												}}
+											>
+												Add a provider or failover credential…
+											</Button>
+										)}
 									</div>
 								)}
 								{matches(query, "effort thinking reasoning") && (
@@ -520,14 +555,23 @@ export function SettingsDialog() {
 								{matches(query, "version directory about") && (
 									<div className="flex flex-col gap-1.5">
 										<FieldLabel>About</FieldLabel>
-										<div className="flex flex-col gap-1 font-mono text-xs text-faint">
-											<span
-												className="overflow-hidden text-ellipsis whitespace-nowrap text-left [direction:rtl]"
-												title={state.appInfo.cwd}
-											>
-												{state.appInfo.cwd}
-											</span>
-											<span>smolt {state.appInfo.version}</span>
+										<div className="flex flex-col gap-2 font-mono text-xs text-faint">
+											<div className="flex flex-col gap-1">
+												<FieldLabel>Working directory</FieldLabel>
+												<span
+													className="overflow-hidden text-ellipsis whitespace-nowrap text-left [direction:rtl]"
+													title={state.appInfo.cwd}
+												>
+													{state.appInfo.cwd}
+												</span>
+											</div>
+											<div className="flex flex-col gap-1">
+												<FieldLabel>Version</FieldLabel>
+												<span>
+													smolt {state.appInfo.version}
+													{!state.appInfo.packaged && " (workspace build)"}
+												</span>
+											</div>
 										</div>
 									</div>
 								)}

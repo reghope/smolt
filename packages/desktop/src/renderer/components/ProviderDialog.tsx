@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../lib/api.ts";
-import { app, bump, refreshState } from "../state/app.ts";
+import { app, bump, call, refreshState } from "../state/app.ts";
 import { useApp } from "../state/useApp.ts";
 import { Button } from "./ui/button.tsx";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog.tsx";
@@ -11,7 +11,7 @@ import { Input } from "./ui/input.tsx";
  *
  * The desktop ships the same agent the CLI runs and shares its credential
  * file, so a key pasted here is the same key `/login` would have written. The
- * sign-in flows it cannot do — the OAuth ones — hand over to the CLI rather
+ * sign-in flows it cannot do (the OAuth ones) hand over to the CLI rather
  * than pretending.
  */
 
@@ -34,6 +34,8 @@ export function ProviderDialog() {
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [configured, setConfigured] = useState<string[]>([]);
+	const [poolMode, setPoolMode] = useState(false);
+	const [poolLabel, setPoolLabel] = useState("");
 
 	useEffect(() => {
 		if (!state.providerDialogOpen) return;
@@ -56,6 +58,22 @@ export function ProviderDialog() {
 	const save = async (): Promise<void> => {
 		setBusy(true);
 		setError(null);
+		if (poolMode) {
+			// Failover pool: the desktop is a proxy of the TUI, so the credential is
+			// saved by the pool extension's /pool command. The command carries NO
+			// key — the extension asks for it in its own dialog, so the secret
+			// never enters the transcript or the session title.
+			const label = poolLabel.trim();
+			const command = `/pool add-key ${chosen}${label !== "" ? ` ${label}` : ""}`;
+			const sent = await call("prompt", command, undefined, "steer");
+			setBusy(false);
+			if (sent === null) {
+				setError("Could not reach the agent. Open a chat first, then try again.");
+				return;
+			}
+			close();
+			return;
+		}
 		const result = await api.authSet(chosen, key);
 		setBusy(false);
 		if (!result.ok) {
@@ -89,7 +107,7 @@ export function ProviderDialog() {
 							{PROVIDERS.map((option) => (
 								<option key={option.id} value={option.id}>
 									{option.label}
-									{configured.includes(option.id) ? " — already set up" : ""}
+									{configured.includes(option.id) ? " (already set up)" : ""}
 								</option>
 							))}
 							<option value="other">Something else…</option>
@@ -107,24 +125,54 @@ export function ProviderDialog() {
 						</label>
 					)}
 
-					<label className="flex flex-col gap-1.5 text-sm">
-						API key
-						<Input
-							type="password"
-							value={key}
-							placeholder={hint || "your key"}
-							autoComplete="off"
-							spellCheck={false}
-							onChange={(event) => setKey(event.target.value)}
-							onKeyDown={(event) => {
-								if (event.key === "Enter" && chosen !== "" && key.trim() !== "") void save();
-							}}
-						/>
-					</label>
+					{!poolMode && (
+						<label className="flex flex-col gap-1.5 text-sm">
+							API key
+							<Input
+								type="password"
+								value={key}
+								placeholder={hint || "your key"}
+								autoComplete="off"
+								spellCheck={false}
+								onChange={(event) => setKey(event.target.value)}
+								onKeyDown={(event) => {
+									if (event.key === "Enter" && chosen !== "" && key.trim() !== "") void save();
+								}}
+							/>
+						</label>
+					)}
 					<p className="text-xs leading-relaxed text-faint">
-						Stored in your own auth file, readable only by you, and shared with the CLI. It never leaves this
-						machine except in requests to the provider.
+						{poolMode
+							? "A secure prompt opens in the chat to take the key — it is stored in your pool file and never appears in the conversation."
+							: "Stored in your own auth file, readable only by you, and shared with the CLI. It never leaves this machine except in requests to the provider."}
 					</p>
+
+					<label className="flex items-start gap-2 text-sm">
+						<input
+							type="checkbox"
+							className="mt-0.5"
+							checked={poolMode}
+							onChange={(event) => setPoolMode(event.target.checked)}
+						/>
+					<span>
+							Additional credential for failover
+							<span className="block text-xs text-faint">
+								Add to this provider's credential pool instead of replacing its key: when one hits a usage
+								limit, the next one is tried. Managed with /pool. The key is collected by a secure prompt
+								in the chat, never sent as part of a message.
+							</span>
+						</span>
+					</label>
+					{poolMode && (
+						<label className="flex flex-col gap-1.5 text-sm">
+							Label (optional)
+							<Input
+								value={poolLabel}
+								placeholder="e.g. work account"
+								onChange={(event) => setPoolLabel(event.target.value)}
+							/>
+						</label>
+					)}
 					{error !== null && <p className="text-xs text-destructive">{error}</p>}
 				</div>
 
@@ -143,8 +191,12 @@ export function ProviderDialog() {
 						<Button variant="secondary" size="sm" onClick={close}>
 							Cancel
 						</Button>
-						<Button size="sm" disabled={busy || chosen === "" || key.trim() === ""} onClick={() => void save()}>
-							{busy ? "Saving…" : "Save"}
+						<Button
+							size="sm"
+							disabled={busy || chosen === "" || (!poolMode && key.trim() === "")}
+							onClick={() => void save()}
+						>
+							{busy ? "Saving…" : poolMode ? "Continue in chat" : "Save"}
 						</Button>
 					</div>
 				</div>

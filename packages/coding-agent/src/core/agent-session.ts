@@ -108,7 +108,7 @@ import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
-import { createAllToolDefinitions } from "./tools/index.ts";
+import { createAllToolDefinitions, type ToolsOptions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
 
@@ -223,6 +223,14 @@ export interface AgentSessionConfig {
 	 * a definition-first registry even when callers provide plain AgentTool instances.
 	 */
 	baseToolsOverride?: Record<string, AgentTool>;
+	/**
+	 * Per-tool construction options for the built-in tools.
+	 *
+	 * Merged over the settings-derived options (shell path, command prefix),
+	 * so a session can tune one aspect — a default shell timeout, say —
+	 * without re-specifying the rest.
+	 */
+	toolsOptions?: ToolsOptions;
 	/** Mutable ref used by Agent to access the current ExtensionRunner */
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
@@ -359,6 +367,7 @@ export class AgentSession {
 	private _allowedToolNames?: Set<string>;
 	private _excludedToolNames?: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
+	private _toolsOptions?: ToolsOptions;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionMode: ExtensionMode = "print";
@@ -395,6 +404,7 @@ export class AgentSession {
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
 		this._excludedToolNames = config.excludedToolNames ? new Set(config.excludedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
+		this._toolsOptions = config.toolsOptions;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
 		// Always subscribe to agent events for internal handling
@@ -2749,8 +2759,14 @@ export class AgentSession {
 					]),
 				)
 			: createAllToolDefinitions(this._cwd, {
-					read: { autoResizeImages },
-					bash: { commandPrefix: shellCommandPrefix, shellPath },
+					read: { autoResizeImages, ...this._toolsOptions?.read },
+					bash: { commandPrefix: shellCommandPrefix, shellPath, ...this._toolsOptions?.bash },
+					powershell: this._toolsOptions?.powershell,
+					write: this._toolsOptions?.write,
+					edit: this._toolsOptions?.edit,
+					grep: this._toolsOptions?.grep,
+					find: this._toolsOptions?.find,
+					ls: this._toolsOptions?.ls,
 				});
 
 		this._baseToolDefinitions = new Map(

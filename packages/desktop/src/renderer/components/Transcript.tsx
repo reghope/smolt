@@ -1,11 +1,19 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { icon } from "../icons.ts";
 import { api } from "../lib/api.ts";
 import { cn } from "../lib/cn.ts";
 import { EmptyChat } from "./EmptyChat.tsx";
 import { formatElapsed, formatTokens } from "../lib/format.ts";
 import { renderMarkdown } from "../markdown.ts";
-import { app, loadEarlier, rewindToUserMessage, toast } from "../state/app.ts";
+import {
+	app,
+	approvalsHere,
+	type ExtensionWidget,
+	loadEarlier,
+	rewindToUserMessage,
+	toast,
+	toggleShowThinking,
+} from "../state/app.ts";
 import { useApp } from "../state/useApp.ts";
 import type { ChatMessage, ToolBlock } from "../store.ts";
 import { thinkingSummary } from "../thinking.ts";
@@ -15,7 +23,7 @@ import { ImageCard, LinkPreviewCard, standaloneLinks } from "./MediaCards.tsx";
 
 /**
  * The transcript: prose flush left, user turns as cards on the right, tool
- * runs folded into one summary line. Reasoning never renders here — it is
+ * runs folded into one summary line. Reasoning never renders here: it is
  * condensed into the working line's live stage phrase instead.
  */
 
@@ -31,19 +39,36 @@ function toolDescription(block: ToolBlock): string {
 	return "";
 }
 
+/** The call's full arguments, pretty-printed for the expanded row. */
+function prettyArgs(raw: string): string {
+	try {
+		return JSON.stringify(JSON.parse(raw || "{}"), null, 2);
+	} catch {
+		return raw;
+	}
+}
+
 function summarizeArgs(raw: string): string {
 	try {
 		const parsed = JSON.parse(raw || "{}");
 		const value =
 			parsed.command ?? parsed.file_path ?? parsed.path ?? parsed.query ?? parsed.message ?? parsed.pattern ?? "";
-		return String(value).slice(0, 80);
+		if (typeof value === "string" && value !== "") return value.slice(0, 80);
+		// Action-shaped tools (battletest, browse, testlog, memory…): show the
+		// action plus its most telling argument, so a two-minute `battletest()`
+		// reads as `battletest(wait)` instead of a bare name.
+		if (typeof parsed.action === "string") {
+			const detail = parsed.url ?? parsed.selector ?? parsed.title ?? parsed.area ?? parsed.run ?? "";
+			return `${parsed.action}${typeof detail === "string" && detail !== "" ? ` ${detail}` : ""}`.slice(0, 80);
+		}
+		return "";
 	} catch {
 		return raw.slice(0, 80);
 	}
 }
 
 /** "Ran 4 commands, edited 2 files", or the sentence a lone call carries. */
-function toolGroupLabel(blocks: ToolBlock[]): string {
+function toolGroupLabel(blocks: ToolBlock[], running: boolean): string {
 	if (blocks.length === 1) {
 		const only = blocks[0]!;
 		const described = toolDescription(only);
@@ -53,11 +78,26 @@ function toolGroupLabel(blocks: ToolBlock[]): string {
 	}
 	const commands = blocks.filter((block) => block.name.toLowerCase().includes("bash")).length;
 	const edits = blocks.filter((block) => /^(write|edit|multiedit)$/i.test(block.name)).length;
-	const rest = blocks.length - commands - edits;
+	const rest = blocks.filter(
+		(block) => !block.name.toLowerCase().includes("bash") && !/^(write|edit|multiedit)$/i.test(block.name),
+	);
+	// Present tense while any call is still in flight: a group whose bash
+	// awaits approval must not claim it "Ran": the label lies at exactly
+	// the moment the reader is being asked to decide.
 	const parts: string[] = [];
-	if (commands > 0) parts.push(`Ran ${commands === 1 ? "a command" : `${commands} commands`}`);
-	if (edits > 0) parts.push(`edited ${edits === 1 ? "a file" : `${edits} files`}`);
-	if (rest > 0) parts.push(`used ${rest} ${rest === 1 ? "tool" : "tools"}`);
+	if (commands > 0) {
+		parts.push(
+			running ? `Running ${commands === 1 ? "a command" : `${commands} commands`}` : `Ran ${commands === 1 ? "a command" : `${commands} commands`}`,
+		);
+	}
+	if (edits > 0) {
+		parts.push(running ? `editing ${edits === 1 ? "a file" : `${edits} files`}` : `edited ${edits === 1 ? "a file" : `${edits} files`}`);
+	}
+	if (rest.length > 0) {
+		// One leftover tool is named, not counted: "used 1 tool" over a group
+		// of two rows reads as a total that does not match what expands.
+		parts.push(running ? `using ${rest.length === 1 ? rest[0]!.name : `${rest.length} tools`}` : `used ${rest.length === 1 ? rest[0]!.name : `${rest.length} tools`}`);
+	}
 	const label = parts.join(", ");
 	return label.charAt(0).toUpperCase() + label.slice(1);
 }
@@ -95,9 +135,14 @@ function Disclosure({
 }
 
 function ToolRow({ block, dkey }: { block: ToolBlock; dkey: string }) {
-	const state = block.running ? "running" : block.isError ? "error" : "done";
+	const state = block.running ? "running" : block.isError ? "error" : block.aborted ? "aborted" : "done";
+	// While an extension tool runs, its live widget (the battletest tester
+	// roster, subagent threads) renders right under the call in the chat,
+	// the activity belongs to the tool row, not to a strip somewhere else.
+	const live = block.running ? app.extensionWidgets.get(block.name) : undefined;
 	return (
-		<Disclosure dkey={dkey} className="group/tool mb-2 font-mono">
+		<>
+			<Disclosure dkey={dkey} className="group/tool mb-2 font-mono">
 			<summary className="flex cursor-pointer list-none select-none items-baseline rounded-lg py-px pr-1 text-sm text-muted-foreground [&::-webkit-details-marker]:hidden">
 				<span
 					className={cn(
@@ -105,11 +150,13 @@ function ToolRow({ block, dkey }: { block: ToolBlock; dkey: string }) {
 						state === "running" && "animate-pulse-soft text-salmon-text",
 						state === "error" && "text-destructive",
 						state === "done" && "text-ok",
+						state === "aborted" && "text-warn",
 					)}
 				>
-					⏺
+					{state === "aborted" ? "⏹" : "⏺"}
 				</span>
 				<span className={cn("text-sm text-foreground", state === "error" && "text-destructive")}>{block.name}</span>
+				{state === "aborted" && <span className="flex-none text-xs text-warn">stopped</span>}
 				<span className="overflow-hidden text-ellipsis whitespace-nowrap text-sm text-muted-foreground before:content-['('] after:content-[')']">
 					{summarizeArgs(block.args)}
 				</span>
@@ -117,7 +164,7 @@ function ToolRow({ block, dkey }: { block: ToolBlock; dkey: string }) {
 					<Icon name="chevron" />
 				</span>
 			</summary>
-			{block.output ? (
+			{block.output !== "" || block.running ? (
 				<div className="mt-1 ml-1 flex gap-2">
 					<span className={cn("flex-none select-none text-sm text-faint", block.isError && "text-destructive/70")}>
 						⎿
@@ -128,7 +175,9 @@ function ToolRow({ block, dkey }: { block: ToolBlock; dkey: string }) {
 							block.isError && "text-destructive",
 						)}
 					>
-						{block.output}
+						{/* A running call has no output yet; opening it shows the full
+						    arguments instead of a silent empty pane. */}
+						{block.output !== "" ? block.output : `Running (no output yet). Called with:\n${prettyArgs(block.args)}`}
 					</pre>
 				</div>
 			) : null}
@@ -137,7 +186,192 @@ function ToolRow({ block, dkey }: { block: ToolBlock; dkey: string }) {
 					<ImageCard data={image.data} mimeType={image.mimeType} />
 				</div>
 			))}
-		</Disclosure>
+			</Disclosure>
+			{live && live.lines.length > 0 && <ToolLiveActivity widget={live} />}
+		</>
+	);
+}
+
+/** Per-line structured widget data, when the extension sent any (battletest). */
+interface WidgetLineDetail {
+	tickets: string[];
+	actions: string[];
+}
+
+/** Defensively read the battletest-shaped details payload off a widget. */
+function widgetLineDetails(details: unknown): WidgetLineDetail[] | undefined {
+	if (details === null || typeof details !== "object") return undefined;
+	const testers = (details as { testers?: unknown }).testers;
+	if (!Array.isArray(testers)) return undefined;
+	return testers.map((entry) => {
+		const record = (entry ?? {}) as { tickets?: unknown; actions?: unknown };
+		const strings = (value: unknown) => (Array.isArray(value) ? value.filter((v) => typeof v === "string") : []);
+		return { tickets: strings(record.tickets), actions: strings(record.actions) };
+	});
+}
+
+/** The running tool's live widget lines, drawn beneath its row in the chat. */
+function ToolLiveActivity({ widget }: { widget: ExtensionWidget }) {
+	const [expanded, setExpanded] = useState<{ index: number; kind: "tickets" | "actions" } | null>(null);
+	const details = widgetLineDetails(widget.details);
+	return (
+		<div className="mt-1 mb-2 ml-1 flex gap-2 font-mono">
+			<span className="flex-none select-none text-sm text-faint">⎿</span>
+			<div className="flex min-w-0 flex-1 flex-col gap-0.5">
+				{widget.lines.slice(0, 8).map((line, index) => {
+					const detail = details?.[index];
+					const open = expanded?.index === index ? expanded.kind : null;
+					return (
+						<div key={line} className="flex min-w-0 flex-col">
+							<span className="overflow-hidden text-ellipsis whitespace-nowrap text-xs leading-relaxed text-faint">
+								<WidgetLine
+									line={line}
+									detail={detail}
+									open={open}
+									onToggle={(kind) =>
+										setExpanded(expanded?.index === index && expanded.kind === kind ? null : { index, kind })
+									}
+								/>
+							</span>
+							{open !== null && detail !== undefined && (
+								<div className="mt-0.5 mb-1 ml-3 flex max-h-40 flex-col gap-0.5 overflow-y-auto border-l border-border pl-2">
+									{(open === "tickets" ? detail.tickets : detail.actions).map((item, i) => (
+										<span key={i} className="whitespace-pre-wrap break-words text-xs leading-relaxed text-faint">
+											{item}
+										</span>
+									))}
+								</div>
+							)}
+						</div>
+					);
+				})}
+			</div>
+		</div>
+	);
+}
+
+/** A tiny screen glyph in place of the viewport word. */
+function ViewportIcon({ viewport }: { viewport: string }) {
+	const common = {
+		width: 11,
+		height: 11,
+		viewBox: "0 0 24 24",
+		fill: "none",
+		stroke: "currentColor",
+		strokeWidth: 2,
+		strokeLinecap: "round" as const,
+		strokeLinejoin: "round" as const,
+		className: "inline-block align-[-1px]",
+	};
+	if (viewport === "mobile") {
+		return (
+			<svg {...common} aria-label="mobile" role="img">
+				<rect x="7" y="2" width="10" height="20" rx="2" />
+				<path d="M11 18h2" />
+			</svg>
+		);
+	}
+	if (viewport === "tablet") {
+		return (
+			<svg {...common} aria-label="tablet" role="img">
+				<rect x="4" y="2" width="16" height="20" rx="2" />
+				<path d="M11 18h2" />
+			</svg>
+		);
+	}
+	return (
+		<svg {...common} aria-label="desktop" role="img">
+			<rect x="2" y="3" width="20" height="14" rx="2" />
+			<path d="M8 21h8" />
+			<path d="M12 17v4" />
+		</svg>
+	);
+}
+
+/**
+ * Widget lines arrive as plain `a · b · c` text; give the segments a little
+ * colour so a roster reads at a glance: who it is, counts that matter, and
+ * what they're doing right now, without the extension knowing about CSS.
+ * When structured details rode along, the ticket and action counts become
+ * clickable and expand into the lists they count.
+ */
+function WidgetLine({
+	line,
+	detail,
+	open,
+	onToggle,
+}: {
+	line: string;
+	detail?: WidgetLineDetail;
+	open?: "tickets" | "actions" | null;
+	onToggle?: (kind: "tickets" | "actions") => void;
+}) {
+	const segments = line.split(" · ");
+	if (segments.length < 2) return <>{line}</>;
+	const last = segments[segments.length - 1]!;
+	const lastClass = last.startsWith("errored")
+		? "text-destructive"
+		: last === "completed"
+			? "text-ok"
+			: last === "stopped"
+				? "text-faint"
+				: "text-ok";
+	return (
+		<>
+			{segments.map((segment, i) => {
+				const isLast = i === segments.length - 1;
+				const separator = isLast ? "" : " · ";
+				if (isLast) {
+					return (
+						<span key={i} className={lastClass}>
+							{segment}
+						</span>
+					);
+				}
+				if (i === 0) {
+					// `Name (archetype, viewport)`: swap the viewport word for a glyph.
+					const match = /^(.*)\((.+), (desktop|mobile|tablet)\)$/.exec(segment);
+					return (
+						<span key={i} className="text-muted-foreground">
+							{match ? (
+								<>
+									{match[1]}({match[2]} <ViewportIcon viewport={match[3]!} />)
+								</>
+							) : (
+								segment
+							)}
+							{separator}
+						</span>
+					);
+				}
+				const kind = /^\d+ tickets?$/.test(segment) ? "tickets" : /^\d+ actions?$/.test(segment) ? "actions" : null;
+				const items = kind === null ? [] : kind === "tickets" ? (detail?.tickets ?? []) : (detail?.actions ?? []);
+				const klass = /^[1-9]\d* tickets?$/.test(segment) ? "text-warn" : "text-faint";
+				if (kind !== null && items.length > 0 && onToggle !== undefined) {
+					return (
+						<span key={i}>
+							<button
+								type="button"
+								onClick={() => onToggle(kind)}
+								className={cn(
+									"cursor-pointer underline decoration-dotted underline-offset-2 hover:text-foreground",
+									open === kind ? "text-foreground" : klass,
+								)}
+							>
+								{segment}
+							</button>
+							<span className="text-faint">{separator}</span>
+						</span>
+					);
+				}
+				return (
+					<span key={i} className={klass}>
+						{segment}
+						{separator}
+					</span>
+				);
+			})}
+		</>
 	);
 }
 
@@ -159,7 +393,7 @@ function ToolGroup({ blocks, scope, index }: { blocks: ToolBlock[]; scope: strin
 					failed && "text-destructive",
 				)}
 			>
-				<span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{toolGroupLabel(blocks)}</span>
+				<span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{toolGroupLabel(blocks, running)}</span>
 				<span className="flex text-faint transition-transform group-open/tg:rotate-90">
 					<Icon name="chevron" />
 				</span>
@@ -176,7 +410,14 @@ function ToolGroup({ blocks, scope, index }: { blocks: ToolBlock[]; scope: strin
 const CODE_COPY_CLASS =
 	"absolute top-1.5 right-1.5 flex size-7 items-center justify-center rounded-md border bg-card text-faint opacity-0 transition-opacity hover:text-foreground [pre:hover_&]:opacity-100 focus-visible:opacity-100 [&>svg]:size-4";
 
-function Markdown({ text, className }: { text: string; className?: string }) {
+/**
+ * Memoized on its props: while a turn streams, the transcript repaints every
+ * few deltas, and re-parsing and re-setting the HTML of every settled
+ * message each paint was megabytes of engine-side churn per pass — the
+ * renderer grew gigabytes over a long turn and froze collecting it. Only the
+ * message whose text actually changed re-renders.
+ */
+const Markdown = memo(function Markdown({ text, className }: { text: string; className?: string }) {
 	const ref = useRef<HTMLDivElement>(null);
 
 	// Each code block gets its own copy button, added after the markdown lands
@@ -189,6 +430,7 @@ function Markdown({ text, className }: { text: string; className?: string }) {
 			const button = document.createElement("button");
 			button.type = "button";
 			button.title = "Copy code";
+			button.setAttribute("aria-label", "Copy code");
 			button.dataset.copy = "";
 			button.className = CODE_COPY_CLASS;
 			button.innerHTML = icon("copy");
@@ -220,12 +462,13 @@ function Markdown({ text, className }: { text: string; className?: string }) {
 			dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }}
 		/>
 	);
-}
+});
 
 function MessageBlocks({ message, scope }: { message: ChatMessage; scope: string }) {
 	const parts: React.ReactNode[] = [];
 	let run: ToolBlock[] = [];
 	let key = 0;
+	let thinkingLabeled = false;
 	const flush = (): void => {
 		if (run.length > 0) parts.push(<ToolGroup key={`g${key++}`} blocks={run} scope={scope} index={key} />);
 		run = [];
@@ -235,9 +478,30 @@ function MessageBlocks({ message, scope }: { message: ChatMessage; scope: string
 			run.push(block);
 			continue;
 		}
-		// Reasoning never enters the transcript; the working line carries its
-		// condensed stage phrase instead. Empty text blocks are stream padding.
-		if (block.kind === "thinking") continue;
+		// Reasoning renders only when asked for (click the working line);
+		// otherwise the working line carries its condensed stage phrase.
+		// Empty text blocks are stream padding.
+		if (block.kind === "thinking") {
+			if (!app.showThinking || block.text.trim() === "") continue;
+			flush();
+			// Grey italic prose, reading as the margin notes between actions;
+			// the same treatment the reference apps give reasoning. The first
+			// block of a message carries the thinking level it ran at — with
+			// auto-thinking the level shifts per task, and "which effort
+			// produced this" is exactly what the reader wants to know.
+			parts.push(
+				<div key={`th${key++}`} className="mb-3 whitespace-pre-wrap text-sm italic leading-relaxed text-faint">
+					{!thinkingLabeled && message.thinkingLevel !== undefined && message.thinkingLevel !== "" && (
+						<span className="mr-2 rounded border border-border px-1.5 py-px font-mono text-[11px] not-italic">
+							{message.thinkingLevel}
+						</span>
+					)}
+					{block.text}
+				</div>,
+			);
+			thinkingLabeled = true;
+			continue;
+		}
 		if (block.kind === "image") {
 			flush();
 			parts.push(<ImageCard key={`i${key++}`} data={block.data} mimeType={block.mimeType} />);
@@ -252,7 +516,7 @@ function MessageBlocks({ message, scope }: { message: ChatMessage; scope: string
 }
 
 /**
- * The live stage phrase condensed from the model's reasoning stream —
+ * The live stage phrase condensed from the model's reasoning stream:
  * ephemeral by design: replaced at most about once a second, and never
  * outliving the stretch of reasoning that produced it.
  */
@@ -270,7 +534,7 @@ const STAGE_PHRASE_THROTTLE_MS = 4500;
 /**
  * After this long in one stretch of reasoning, stop naming thoughts.
  *
- * Nothing here can know how close the model is to done — it is a stand-in for
+ * Nothing here can know how close the model is to done: it is a stand-in for
  * a long think, and saying so beats cycling phrases for another minute.
  */
 const THINKING_LONG_MS = 30_000;
@@ -292,7 +556,7 @@ function currentActivity(message: ChatMessage | undefined): string {
 			if (block.running) runningTool = true;
 		}
 	}
-	// A running tool renders its own live row just above this line — don't
+	// A running tool renders its own live row just above this line, so don't
 	// parrot it. The line's value here is the elapsed time and token count.
 	if (runningTool) {
 		stagePhrase = "";
@@ -312,7 +576,7 @@ function currentActivity(message: ChatMessage | undefined): string {
 		}
 		return `${stagePhrase || "Thinking"}…`;
 	}
-	// Real output has started — the reasoning phrase has served its purpose.
+	// Real output has started: the reasoning phrase has served its purpose.
 	stagePhrase = "";
 	thinkingSince = 0;
 	if (last?.kind === "text" && last.text.trim() !== "") {
@@ -338,16 +602,26 @@ function WorkingLine({ message, running }: { message: ChatMessage | undefined; r
 	if (!running) return null;
 	const seconds = app.runStartedAt > 0 ? Math.floor((Date.now() - app.runStartedAt) / 1000) : 0;
 	const tokens = app.chat.usage ? app.chat.usage.input + app.chat.usage.output : 0;
-	const parts = [
-		formatElapsed(seconds),
-		...(tokens > 0 ? [formatTokens(tokens)] : []),
-		currentActivity(message),
-	];
+	// Blocked on an approval is not "responding": a bash request once sat
+	// unanswered for six minutes while this line claimed the model was busy.
+	// Say who the turn is actually waiting on, and for how long.
+	const approval = approvalsHere()[0];
+	const activity = approval
+		? `Waiting for your approval: ${approval.tool} (${formatElapsed(
+				Math.max(0, Math.floor((Date.now() - approval.createdAt) / 1000)),
+			)})`
+		: currentActivity(message);
+	const parts = [formatElapsed(seconds), ...(tokens > 0 ? [formatTokens(tokens)] : []), activity];
 	return (
-		<div className="mt-2.5 flex items-center gap-2 font-mono text-sm text-faint">
+		<button
+			type="button"
+			className="mt-2.5 flex w-full cursor-pointer items-center gap-2 rounded-md text-left font-mono text-sm text-faint transition-colors hover:text-muted-foreground"
+			title={app.showThinking ? "Hide the model's reasoning" : "Show the model's reasoning"}
+			onClick={() => toggleShowThinking()}
+		>
 			<TurnSpinner />
 			<span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{parts.join(" · ")}</span>
-		</div>
+		</button>
 	);
 }
 
@@ -477,7 +751,7 @@ function messageProse(message: ChatMessage): string {
 /**
  * The transcript flattened for display, with tool runs grouped ACROSS agent
  * steps: each step is its own assistant message, so grouping inside one
- * message never fires on a real run — a research sweep would read as thirty
+ * message never fires on a real run: a research sweep would read as thirty
  * bare rows. Consecutive tool calls fold into one summary until prose (or a
  * new user turn) interrupts, the way the reference app reads.
  */
@@ -485,6 +759,7 @@ type Segment =
 	| { kind: "user"; message: ChatMessage; index: number; userIndex: number }
 	| { kind: "system"; message: ChatMessage; index: number }
 	| { kind: "prose"; text: string; streaming: boolean }
+	| { kind: "thinking"; text: string; level?: string }
 	| { kind: "picture"; data: string; mimeType: string }
 	| { kind: "tools"; blocks: ToolBlock[]; scope: string }
 	| { kind: "footer"; message: ChatMessage | undefined };
@@ -517,14 +792,30 @@ function buildSegments(messages: ChatMessage[], running: boolean): Segment[] {
 			segments.push({ kind: "system", message, index });
 			return;
 		}
+		let thinkingLabeled = false;
 		for (const block of message.blocks) {
 			if (block.kind === "tool") {
 				if (run.length === 0) runScope = `main-${index}`;
 				run.push(block);
 				continue;
 			}
-			// Reasoning never enters the transcript; empty text is stream padding.
-			if (block.kind === "thinking") continue;
+			// Reasoning renders only when the reader asked for it (click the
+			// working line); empty text is stream padding. The message's first
+			// thinking segment carries the level it ran at — under
+			// auto-thinking that changes per task, and "which effort produced
+			// this" is what the reader wants to know.
+			if (block.kind === "thinking") {
+				if (app.showThinking && block.text.trim() !== "") {
+					flushTools();
+					segments.push({
+						kind: "thinking",
+						text: block.text,
+						level: thinkingLabeled ? undefined : message.thinkingLevel || undefined,
+					});
+					thinkingLabeled = true;
+				}
+				continue;
+			}
 			if (block.kind === "image") {
 				flushTools();
 				segments.push({ kind: "picture", data: block.data, mimeType: block.mimeType });
@@ -678,6 +969,21 @@ export function Transcript() {
 						}
 						if (segment.kind === "picture") {
 							return <ImageCard key={`pic${position}`} data={segment.data} mimeType={segment.mimeType} />;
+						}
+						if (segment.kind === "thinking") {
+							return (
+								<div
+									key={`th${position}`}
+									className="mb-4 whitespace-pre-wrap text-sm italic leading-relaxed text-faint"
+								>
+									{segment.level !== undefined && (
+										<span className="mr-2 rounded border border-border px-1.5 py-px font-mono text-[11px] not-italic">
+											{segment.level}
+										</span>
+									)}
+									{segment.text}
+								</div>
+							);
 						}
 						return (
 							<div key={`p${position}`} className="group/row mb-4">

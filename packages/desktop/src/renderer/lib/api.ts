@@ -19,7 +19,7 @@ export interface AgentCallResult {
 export interface SmoltApi {
 	call(method: string, ...args: unknown[]): Promise<AgentCallResult>;
 	status(): Promise<{ running: boolean; error: string | null }>;
-	sessions(): Promise<SessionRow[]>;
+	sessions(query?: string): Promise<SessionRow[]>;
 	info(): Promise<{
 		cwd: string;
 		version: string;
@@ -64,6 +64,7 @@ export interface SmoltApi {
 	permissionReply(id: string, answer: string): Promise<{ ok: boolean; error?: string }>;
 	pendingApprovals(): Promise<unknown[]>;
 	onPermissionRequest(cb: (request: unknown) => void): void;
+	onPermissionRemoved(cb: (id: string) => void): void;
 	diff(): Promise<AgentCallResult>;
 	permissionMode(mode?: string): Promise<AgentCallResult>;
 	worktrees(): Promise<AgentCallResult>;
@@ -79,6 +80,7 @@ export interface SmoltApi {
 	onStarted(cb: (status: { running: boolean; error: string | null }) => void): void;
 	onBusySessions(cb: (paths: string[]) => void): void;
 	onBackgroundSettled(cb: (info: { sessionPath: string }) => void): void;
+	onAgentExited(cb: (info: { slotId: number; wasActive: boolean; code: number | null }) => void): void;
 	ready(): void;
 }
 

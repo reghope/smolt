@@ -58,6 +58,7 @@ import type {
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeResult,
 	SessionShutdownEvent,
+	ThinkingLevelSelectorEntry,
 	ToolCallEvent,
 	ToolCallEventResult,
 	ToolResultEvent,
@@ -693,6 +694,17 @@ export class ExtensionRunner {
 	getRegisteredCommands(): ResolvedCommand[] {
 		this.commandDiagnostics = [];
 		return this.resolveRegisteredCommands();
+	}
+
+	/** Thinking selector entries contributed by extensions (first per value wins). */
+	getThinkingLevelEntries(): ThinkingLevelSelectorEntry[] {
+		const entries = new Map<string, ThinkingLevelSelectorEntry>();
+		for (const ext of this.extensions) {
+			for (const [value, entry] of ext.thinkingLevelEntries) {
+				if (!entries.has(value)) entries.set(value, entry);
+			}
+		}
+		return Array.from(entries.values());
 	}
 
 	getCommandDiagnostics(): ResourceDiagnostic[] {

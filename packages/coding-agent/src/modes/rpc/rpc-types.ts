@@ -87,6 +87,8 @@ export interface RpcSlashCommand {
 	source: "extension" | "prompt" | "skill";
 	/** Source metadata for the owning resource */
 	sourceInfo: SourceInfo;
+	/** Development tooling; front ends hide it from user-facing lists. */
+	internal?: boolean;
 }
 
 // ============================================================================
@@ -106,6 +108,8 @@ export interface RpcSessionState {
 	autoCompactionEnabled: boolean;
 	messageCount: number;
 	pendingMessageCount: number;
+	/** Active extension thinking entry ("auto"), when one is engaged. */
+	activeThinkingEntry?: string;
 }
 
 // ============================================================================
@@ -276,6 +280,8 @@ export type RpcExtensionUIRequest =
 			widgetKey: string;
 			widgetLines: string[] | undefined;
 			widgetPlacement?: "aboveEditor" | "belowEditor";
+			/** Structured data behind the lines (ExtensionWidgetOptions.details). */
+			widgetDetails?: unknown;
 	  }
 	| { type: "extension_ui_request"; id: string; method: "setTitle"; title: string }
 	| { type: "extension_ui_request"; id: string; method: "set_editor_text"; text: string };

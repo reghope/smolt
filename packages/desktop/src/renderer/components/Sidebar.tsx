@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { api, type SessionRow } from "../lib/api.ts";
 import { cn } from "../lib/cn.ts";
 import { storedPreference, storePreference } from "../lib/prefs.ts";
@@ -56,15 +56,37 @@ function ambiguousTitles(rows: SessionRow[]): Set<string> {
 	return new Set([...seen].filter(([, count]) => count > 1).map(([title]) => title));
 }
 
-function SessionEntry({ row, active, ambiguous }: { row: SessionRow; active: boolean; ambiguous?: boolean }) {
-	const pinned = app.pinned.has(row.path);
+/**
+ * Memoized, with every read state passed in as a prop: the transcript
+ * repaints on a timer while the agent streams, and re-rendering fifty radix
+ * dropdown rows per paint was measurable engine churn for rows that had not
+ * changed at all.
+ */
+const SessionEntry = memo(function SessionEntry({
+	row,
+	active,
+	ambiguous,
+	pinned,
+	selected,
+	busy,
+	waiting,
+}: {
+	row: SessionRow;
+	active: boolean;
+	ambiguous?: boolean;
+	pinned: boolean;
+	selected: boolean;
+	busy: boolean;
+	/** This chat's agent is waiting on an approval; the dot turns amber. */
+	waiting: boolean;
+}) {
 	return (
 		<DropdownMenu>
 			<div
 				className={cn(
 					"group/session flex items-center rounded-lg transition-colors hover:bg-accent/60",
 					active && "bg-primary/10",
-					app.selectedSessions.has(row.path) && "bg-primary/20",
+					selected && "bg-primary/20",
 				)}
 				onContextMenu={(event) => {
 					// Radix opens on the trigger; route a right-click to the same menu.
@@ -85,7 +107,8 @@ function SessionEntry({ row, active, ambiguous }: { row: SessionRow; active: boo
 							className={cn(
 								"size-1.5 rounded-full border border-faint",
 								active && "bg-faint",
-								app.busySessions.has(row.path) && "animate-pulse-soft border-salmon bg-salmon",
+								busy && "animate-pulse-soft border-salmon bg-salmon",
+								waiting && "animate-pulse-soft border-warn bg-warn",
 							)}
 						/>
 					</span>
@@ -108,6 +131,7 @@ function SessionEntry({ row, active, ambiguous }: { row: SessionRow; active: boo
 						type="button"
 						data-session-menu
 						title="More"
+						aria-label="Session menu"
 						className="mr-1 size-6 flex-none rounded-md text-sm leading-none text-faint opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover/session:opacity-100 data-[state=open]:opacity-100"
 					>
 						⋮
@@ -143,7 +167,7 @@ function SessionEntry({ row, active, ambiguous }: { row: SessionRow; active: boo
 			</DropdownMenuContent>
 		</DropdownMenu>
 	);
-}
+});
 
 function Group({ label, rows, ambiguous }: { label: string; rows: SessionRow[]; ambiguous: Set<string> }) {
 	const collapsed = app.collapsedGroups.has(label);
@@ -183,6 +207,10 @@ function Group({ label, rows, ambiguous }: { label: string; rows: SessionRow[]; 
 						row={row}
 						active={row.path === app.currentSessionPath}
 						ambiguous={ambiguous.has(row.title)}
+						pinned={app.pinned.has(row.path)}
+						selected={app.selectedSessions.has(row.path)}
+						busy={app.busySessions.has(row.path)}
+						waiting={app.pendingApprovals.some((request) => request.session === row.path)}
 					/>
 				))}
 		</>
@@ -216,13 +244,30 @@ export function Sidebar() {
 	// side, so hovering there still reveals the grip and a drag reopens it.
 	const hidden = state.sidebarHidden;
 
-	// Search matches the title and the first message, so a half-remembered
-	// phrase from the conversation finds it as well as its name.
+	// Search reaches the stored transcripts, not just the titles: the main
+	// process scans recent session files for the phrase, so a half-remembered
+	// word from a reply finds the chat even when no title mentions it. The
+	// local filter stands in until the answer lands, so typing stays instant.
 	const needle = state.sessionQuery.trim().toLowerCase();
+	const [contentRows, setContentRows] = useState<SessionRow[] | null>(null);
+	useEffect(() => {
+		if (needle === "") {
+			setContentRows(null);
+			return;
+		}
+		let live = true;
+		void api.sessions(needle).then((rows) => {
+			if (live) setContentRows(rows ?? []);
+		});
+		return () => {
+			live = false;
+		};
+	}, [needle]);
 	const visible = needle
-		? state.sessionRows.filter(
+		? (contentRows ??
+			state.sessionRows.filter(
 				(row) => row.title.toLowerCase().includes(needle) || row.preview.toLowerCase().includes(needle),
-			)
+			))
 		: state.sessionRows;
 	const shown = visible.filter((row) => !state.archived.has(row.path));
 	const pinned = shown.filter((row) => state.pinned.has(row.path));
@@ -285,7 +330,7 @@ export function Sidebar() {
 					"flex h-full flex-col gap-1 overflow-hidden px-2 pt-10 pb-2",
 					// At width zero the wrapper's own padding still paints 16px wide
 					// (border-box cannot shrink below it), letting child borders peek
-					// past the closed edge — so the closed content does not paint.
+					// past the closed edge, so the closed content does not paint.
 					hidden && "opacity-0",
 				)}
 			>

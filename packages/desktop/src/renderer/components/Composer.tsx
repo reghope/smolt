@@ -20,6 +20,7 @@ import {
 	chooseThinking,
 	abortTurn,
 	clearQueued,
+	approvalsHere,
 	queuedHere,
 	sendQueuedNow,
 	compactNow,
@@ -58,6 +59,7 @@ import {
 import { FolderBar } from "./FolderBar.tsx";
 import { Icon } from "./ui/icon.tsx";
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "./ui/popover.tsx";
+import { Input } from "./ui/input.tsx";
 import { Slider } from "./ui/slider.tsx";
 import { Switch } from "./ui/switch.tsx";
 /** Number keys pick an entry from an open menu, as in the reference app. */
@@ -88,62 +90,99 @@ function Chip({
 	);
 }
 
-/** The model menu: last-used first, then one section per provider. */
+/** How many model rows render per page; scrolling near the bottom loads more. */
+const MODEL_PAGE = 40;
+
+/**
+ * The model menu: a search box on top, last-used first, and the catalogue
+ * rendered a page at a time — a 200-model registry must not mount 200 rows
+ * the moment the menu opens.
+ */
 function ModelMenu() {
 	const state = useApp();
 	const current = state.model;
+	const pending = state.pendingModel;
+	const [query, setQuery] = useState("");
+	const [limit, setLimit] = useState(MODEL_PAGE);
 
-	const rows: React.ReactNode[] = [];
-	let position = 0;
-	const item = (option: ModelOption, key: string): React.ReactNode => {
-		const active = `${option.provider}/${option.id}` === current;
-		const hint = position < 9 ? String(position + 1) : "";
-		position += 1;
+	const setOpen = (open: boolean): void => {
+		app.modelMenuOpen = open;
+		if (open) {
+			void ensureModels();
+			setQuery("");
+			setLimit(MODEL_PAGE);
+		}
+		bump();
+	};
+
+	const pick = (option: ModelOption): void => {
+		setOpen(false);
+		void chooseModel(option.provider, option.id);
+	};
+
+	const row = (option: ModelOption, key: string): React.ReactNode => {
+		const ref = `${option.provider}/${option.id}`;
+		const active = ref === current;
+		const queued = pending !== null && `${pending.provider}/${pending.id}` === ref;
 		return (
-			<DropdownMenuItem key={key} onSelect={() => void chooseModel(option.provider, option.id)}>
+			<button
+				type="button"
+				key={key}
+				onClick={() => pick(option)}
+				className="flex h-8 w-full flex-none items-center gap-2 rounded-lg px-2.5 text-left text-sm transition-colors hover:bg-accent"
+			>
 				<span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{option.id}</span>
 				{option.reasoning && <Badge>Reasoning</Badge>}
+				{queued && <span className="flex-none text-xs text-warn">next</span>}
 				{active && <Icon name="check" className="text-salmon-text" />}
-				{hint && <span className="w-4 text-center font-mono text-xs text-faint">{hint}</span>}
-			</DropdownMenuItem>
+			</button>
 		);
 	};
 
-	// The current model counts as last-used even before anything is stored.
-	const recents = [...new Set([...(current ? [current] : []), ...recentModels()])]
-		.map((label) => state.availableModels.find((option) => `${option.provider}/${option.id}` === label))
-		.filter((option): option is ModelOption => option !== undefined)
-		.slice(0, 5);
-	if (recents.length > 0) {
-		rows.push(<DropdownMenuLabel key="lu">Last used</DropdownMenuLabel>);
-		for (const option of recents) rows.push(item(option, `r-${option.provider}/${option.id}`));
-	}
+	const heading = (key: string, text: string): React.ReactNode => (
+		<div key={key} className="px-2.5 pt-2 pb-0.5 text-xs font-medium uppercase tracking-wide text-faint">
+			{text}
+		</div>
+	);
 
+	const needle = query.trim().toLowerCase();
+	const rows: React.ReactNode[] = [];
+	// The current model counts as last-used even before anything is stored.
+	if (needle === "") {
+		const recents = [...new Set([...(current ? [current] : []), ...recentModels()])]
+			.map((label) => state.availableModels.find((option) => `${option.provider}/${option.id}` === label))
+			.filter((option): option is ModelOption => option !== undefined)
+			.slice(0, 5);
+		if (recents.length > 0) {
+			rows.push(heading("lu", "Last used"));
+			for (const option of recents) rows.push(row(option, `r-${option.provider}/${option.id}`));
+		}
+	}
 	const display = state.availableModels
 		.map((option, index) => ({ option, index }))
+		.filter(({ option }) => needle === "" || `${option.provider}/${option.id}`.toLowerCase().includes(needle))
 		.sort((a, b) => a.option.provider.localeCompare(b.option.provider) || a.index - b.index);
 	let lastProvider: string | undefined;
+	let shown = 0;
 	for (const { option } of display) {
+		if (shown >= limit) break;
 		if (option.provider !== lastProvider) {
 			lastProvider = option.provider;
-			rows.push(<DropdownMenuLabel key={`p-${option.provider}`}>{option.provider}</DropdownMenuLabel>);
+			rows.push(heading(`p-${option.provider}`, option.provider));
 		}
-		rows.push(item(option, `${option.provider}/${option.id}`));
+		rows.push(row(option, `${option.provider}/${option.id}`));
+		shown += 1;
 	}
+	const remaining = display.length - shown;
 
 	return (
-		<DropdownMenu
-			open={state.modelMenuOpen}
-			onOpenChange={(open) => {
-				app.modelMenuOpen = open;
-				if (open) void ensureModels();
-				bump();
-			}}
-		>
-			<DropdownMenuTrigger asChild>
-				<Chip title="Model (Ctrl+Shift+I)">{current ? current.split("/").pop() : "no model"}</Chip>
-			</DropdownMenuTrigger>
-			<DropdownMenuContent align="end" className="max-h-80 w-80" onKeyDown={pickByNumber}>
+		<Popover open={state.modelMenuOpen} onOpenChange={setOpen}>
+			<PopoverTrigger asChild>
+				<Chip title="Model (Ctrl+Shift+I)">
+					{pending ? `${pending.id} · next` : current ? current.split("/").pop() : "no model"}
+				</Chip>
+			</PopoverTrigger>
+			<PopoverContent align="end" className="w-80 p-1.5">
 				{state.availableModels.length === 0 ? (
 					<div className="flex flex-col gap-2 px-2.5 py-2.5">
 						<p className="text-sm leading-relaxed text-muted-foreground">
@@ -160,10 +199,39 @@ function ModelMenu() {
 						</Button>
 					</div>
 				) : (
-					rows
+					<>
+						<Input
+							autoFocus
+							type="search"
+							placeholder={`Search ${state.availableModels.length} models…`}
+							value={query}
+							className="mb-1.5 h-8"
+							onChange={(event) => {
+								setQuery(event.target.value);
+								setLimit(MODEL_PAGE);
+							}}
+						/>
+						<div
+							className="flex max-h-72 flex-col overflow-y-auto"
+							onScroll={(event) => {
+								const el = event.currentTarget;
+								if (remaining > 0 && el.scrollTop + el.clientHeight >= el.scrollHeight - 120) {
+									setLimit((value) => value + MODEL_PAGE);
+								}
+							}}
+						>
+							{rows}
+							{remaining > 0 && (
+								<div className="flex-none px-2.5 py-1.5 text-xs text-faint">{remaining} more — scroll to load</div>
+							)}
+							{display.length === 0 && (
+								<div className="px-2.5 py-2 text-sm text-faint">No model matches “{query.trim()}”.</div>
+							)}
+						</div>
+					</>
 				)}
-			</DropdownMenuContent>
-		</DropdownMenu>
+			</PopoverContent>
+		</Popover>
 	);
 }
 
@@ -211,7 +279,11 @@ function ModeMenu() {
 function EffortPopover() {
 	const state = useApp();
 	const [preview, setPreview] = useState<string | null>(null);
-	const levels = state.availableThinking;
+	// Extension entries ("auto") are modes, not points on the faster↔smarter
+	// axis: the slider carries only real levels, auto gets its own switch.
+	const levels = state.availableThinking.filter((level) => level !== "auto");
+	const autoAvailable = state.availableThinking.includes("auto");
+	const autoOn = (preview ?? state.thinking) === "auto";
 	const index = Math.max(0, levels.indexOf(preview ?? state.thinking));
 	if (state.thinking === "") return null;
 	return (
@@ -241,21 +313,40 @@ function EffortPopover() {
 						?
 					</span>
 				</div>
-				<div className="mb-1 flex justify-between text-xs text-faint">
-					<span>Faster</span>
-					<span>Smarter</span>
+				{autoAvailable && (
+					<button
+						type="button"
+						onClick={() => {
+							setPreview(null);
+							void chooseThinking("auto");
+						}}
+						className={cn(
+							"mb-2 flex w-full items-baseline justify-between rounded-lg border px-3 py-1.5 text-left text-sm transition-colors hover:bg-accent",
+							autoOn && "border-salmon/50 bg-primary/10",
+						)}
+					>
+						<span className={cn(autoOn && "font-medium")}>Auto</span>
+						<span className="text-xs text-faint">picks the effort per task</span>
+					</button>
+				)}
+				<div className={cn(autoOn && "pointer-events-auto opacity-40")}>
+					<div className="mb-1 flex justify-between text-xs text-faint">
+						<span>Faster</span>
+						<span>Smarter</span>
+					</div>
+					<Slider
+						min={0}
+						max={Math.max(0, levels.length - 1)}
+						step={1}
+						value={[index]}
+						onValueChange={([value]) => setPreview(levels[value ?? 0] ?? null)}
+						onValueCommit={([value]) => {
+							// A concrete pick stands auto down — manual always wins.
+							const level = levels[value ?? 0];
+							if (level) void chooseThinking(level);
+						}}
+					/>
 				</div>
-				<Slider
-					min={0}
-					max={Math.max(0, levels.length - 1)}
-					step={1}
-					value={[index]}
-					onValueChange={([value]) => setPreview(levels[value ?? 0] ?? null)}
-					onValueCommit={([value]) => {
-						const level = levels[value ?? 0];
-						if (level) void chooseThinking(level);
-					}}
-				/>
 			</PopoverContent>
 		</Popover>
 	);
@@ -265,13 +356,13 @@ function EffortPopover() {
 const COMPACT_RESERVE_TOKENS = 16_384;
 
 /**
- * A quiet ring showing context-window fill — muted at rest, warming to amber
+ * A quiet ring showing context-window fill: muted at rest, warming to amber
  * and then red only once context is genuinely filling up. Always present:
  * its popover is also where upkeep (auto-compaction and auto-retry) lives.
  */
 function ContextRing() {
 	const state = useApp();
-	// The agent's own accounting first — the same figure the TUI footer shows
+	// The agent's own accounting first, the same figure the TUI footer shows
 	// and auto-compaction acts on. While a turn streams, the live usage of the
 	// current request is fresher, so the larger of the two wins.
 	const window_ = (() => {
@@ -297,6 +388,7 @@ function ContextRing() {
 					title={
 						hasFigures ? `Context ${shortTokens(used)} / ${shortTokens(window_)} (${pct}%)` : "Context window"
 					}
+					aria-label="Context window"
 					className="flex size-8 items-center justify-center rounded-lg text-faint transition-colors hover:bg-accent hover:text-foreground"
 				>
 					<svg width="16" height="16" viewBox="0 0 18 18" style={{ transform: "rotate(-90deg)" }} aria-hidden="true">
@@ -430,7 +522,7 @@ function MicMenu() {
 				navigator.mediaDevices
 					.enumerateDevices()
 					.then((all) => setDevices(all.filter((device) => device.kind === "audioinput")))
-					.catch(() => toast("Could not list microphones — check the system permission for smolt.", "error"));
+					.catch(() => toast("Could not list microphones. Check the system permission for smolt.", "error"));
 			}}
 		>
 			<DropdownMenuTrigger asChild>
@@ -475,8 +567,9 @@ function MicMenu() {
 
 /** A tool call waiting on a decision: a louder card when it cannot be undone. */
 function ApprovalCard() {
-	const state = useApp();
-	const request = state.pendingApprovals[0];
+	useApp();
+	// Only this chat's own question: a background chat's approval waits there.
+	const request = approvalsHere()[0];
 	if (!request) return null;
 	return (
 		<div
@@ -512,7 +605,7 @@ function ApprovalCard() {
 }
 
 function QueuedBanner() {
-	useApp();
+	const state = useApp();
 	// This chat's queue. Another chat's waiting messages are its own business.
 	const queued = queuedHere();
 	if (queued.length === 0) return null;
@@ -531,10 +624,11 @@ function QueuedBanner() {
 				variant="ghost"
 				size="sm"
 				className="h-6 flex-none px-2 text-xs text-muted-foreground hover:text-foreground"
-				title="Deliver now, interrupting the current turn"
+				title="Interrupt the current turn and send this immediately"
+				disabled={state.sendingQueuedNow}
 				onClick={() => void sendQueuedNow()}
 			>
-				Send now
+				{state.sendingQueuedNow ? "Sending…" : "Send now"}
 			</Button>
 			<Button variant="ghost" size="icon" className="size-6" title="Discard queued messages" onClick={() => void clearQueued()}>
 				<Icon name="close" />
@@ -549,7 +643,7 @@ function RepoBar() {
 	const changed = state.diffFiles.length;
 	const folder = projectName();
 	// The folder and branch are always worth showing: they say where the next
-	// turn will run. The review half is what waits for evidence — builds and
+	// turn will run. The review half is what waits for evidence: builds and
 	// other sessions also move the working tree, and a conversation that never
 	// touched a file should never be told it changed one.
 	const reviewable = changed > 0 && !state.repoBarDismissed && chatDidToolWork();
@@ -616,10 +710,13 @@ interface PaletteItem {
 function CommandPalette({
 	items,
 	selected,
+	hidden,
 	children,
 }: {
 	items: PaletteItem[];
 	selected: number;
+	/** Set when the reader dismissed the palette for the current query. */
+	hidden: boolean;
 	children: React.ReactNode;
 }) {
 	const listRef = useRef<HTMLDivElement>(null);
@@ -628,13 +725,13 @@ function CommandPalette({
 		listRef.current?.querySelector("[data-selected=true]")?.scrollIntoView({ block: "nearest" });
 	}, [selected]);
 	return (
-		<Popover open={items.length > 0}>
+		<Popover open={items.length > 0 && !hidden}>
 			<PopoverAnchor asChild>{children}</PopoverAnchor>
 			<PopoverContent
 				ref={listRef}
 				side="top"
 				align="start"
-				className="max-h-72 w-[28rem] max-w-[90vw] overflow-y-auto p-1.5"
+				className="max-h-72 w-[28rem] max-w-[90vw] overflow-x-hidden overflow-y-auto p-1.5"
 				onOpenAutoFocus={(event) => event.preventDefault()}
 			>
 				{items.map((item, index) => (
@@ -652,7 +749,10 @@ function CommandPalette({
 						}}
 					>
 						{index < 9 && <span className="w-4 flex-none text-center font-mono text-xs text-faint">{index + 1}</span>}
-						<span className={cn("font-medium", item.plain ? "min-w-0 overflow-hidden text-ellipsis" : "flex-none")}>
+						{/* The title shrinks and ellipsifies before the description, so a
+						    long command name can never push the row into a horizontal
+						    scroll: the palette is read, not panned. */}
+						<span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap font-medium">
 							{item.plain ? item.title : `/${item.title}`}
 						</span>
 						<span className="ml-auto min-w-0 flex-none overflow-hidden text-ellipsis whitespace-nowrap text-xs text-faint max-w-[55%]">
@@ -672,6 +772,15 @@ export function Composer() {
 	const inputRef = useRef<HTMLTextAreaElement>(null);
 	const [dropping, setDropping] = useState(false);
 	const [paletteIndex, setPaletteIndex] = useState(0);
+	/**
+	 * Whether the reader dismissed the palette for the current query.
+	 *
+	 * The palette's open state is derived from the draft: a "/" in it is
+	 * what summons the list, so Escape and an outside click need somewhere
+	 * to record "dismissed" until the draft changes again, or the list would
+	 * ignore them entirely.
+	 */
+	const [paletteHidden, setPaletteHidden] = useState(false);
 	const historyIndexRef = useRef(-1);
 	const historyDraftRef = useRef("");
 
@@ -703,9 +812,26 @@ export function Composer() {
 	const paletteQuery = paletteMatch ? (paletteMatch[1] ?? "") : null;
 	useEffect(() => {
 		if (paletteQuery !== null) void ensureCommands();
-		// A new query means a new list; selection starts back at the top.
+		// A new query means a new list; selection starts back at the top and
+		// any dismissal is forgotten.
 		setPaletteIndex(0);
+		setPaletteHidden(false);
 	}, [paletteQuery]);
+
+	// An outside click dismisses the palette: it is a suggestion popup, not
+	// a panel that holds its ground against the rest of the app. Clicking
+	// back into the composer brings it back, since the "/" is still there.
+	useEffect(() => {
+		if (paletteQuery === null || paletteHidden) return;
+		const onPointerDown = (event: PointerEvent): void => {
+			const target = event.target as HTMLElement | null;
+			if (target?.closest('[data-slot="popover-content"]')) return;
+			if (target?.closest("textarea")) return;
+			setPaletteHidden(true);
+		};
+		document.addEventListener("pointerdown", onPointerDown);
+		return () => document.removeEventListener("pointerdown", onPointerDown);
+	}, [paletteQuery, paletteHidden]);
 
 	const finishAction = (): void => {
 		app.draft = "";
@@ -737,8 +863,10 @@ export function Composer() {
 		{ title: "compact", description: "Compact the conversation context", kind: "action", run: act(() => void compactNow()) },
 		{ title: "export", description: "Export this session as HTML", kind: "action", run: act(async () => {
 			const result = await call<{ path: string }>("exportHtml");
-			// Showing the file beats announcing it: no popup, and it can be found.
-			if (result) void api.reveal(result.path, "reveal");
+			if (result) {
+				void api.reveal(result.path, "reveal");
+				toast(`Session exported to ${result.path}`);
+			}
 		}) },
 		{ title: "model", description: "Choose the model", kind: "action", run: act(() => {
 			app.modelMenuOpen = true;
@@ -846,6 +974,13 @@ export function Composer() {
 
 	return (
 		<div className="relative mx-auto w-full max-w-[804px] px-8 pb-3.5 @container">
+			{state.agentLost && (
+				<div className="mb-1.5 flex items-center gap-2.5 rounded-xl border border-warn bg-warn/5 py-2 pr-2 pl-3 text-sm">
+					<span className="min-w-0 flex-1 text-muted-foreground">
+						The agent stopped unexpectedly and was restarted. If a reply was cut off, send it again.
+					</span>
+				</div>
+			)}
 			<ApprovalCard />
 			<QueuedBanner />
 			{state.chat.messages.length === 0 && <FolderBar />}
@@ -875,6 +1010,7 @@ export function Composer() {
 								<button
 									type="button"
 									title="Remove"
+									aria-label={`Remove ${item.name}`}
 									className="absolute top-1 right-1 flex size-4.5 items-center justify-center rounded-full bg-black/70 text-white opacity-0 transition-opacity hover:bg-destructive group-hover/att:opacity-100"
 									onClick={() => removeAttachment(index)}
 								>
@@ -884,16 +1020,26 @@ export function Composer() {
 						))}
 					</div>
 				)}
-				<CommandPalette items={paletteItems} selected={Math.min(paletteIndex, Math.max(0, paletteItems.length - 1))}>
+				<CommandPalette
+					items={paletteItems}
+					selected={Math.min(paletteIndex, Math.max(0, paletteItems.length - 1))}
+					hidden={paletteHidden}
+				>
 					<textarea
 						ref={inputRef}
 						rows={1}
 						value={state.draft}
 						placeholder={state.chat.streaming ? "Queue a message for when it finishes…" : "Type / for commands"}
 						className="max-h-60 min-h-[26px] w-full resize-none bg-transparent px-0.5 pb-1 text-sm leading-relaxed outline-none placeholder:text-faint"
+						// Returning to the composer with the "/" still in it brings the
+						// palette back up after a dismissal.
+						onFocus={() => setPaletteHidden(false)}
 						onChange={(event) => {
 							app.draft = event.target.value;
 							historyIndexRef.current = -1;
+							// Editing the draft is what the palette listens to; a change
+							// also revokes a dismissal, since the query moved on.
+							setPaletteHidden(false);
 							// Only the composer reads the draft; waking the transcript to add
 							// one character is what made typing feel behind the keyboard.
 							bumpDraft();
@@ -946,6 +1092,13 @@ export function Composer() {
 								return;
 							}
 							if (event.key === "Escape") {
+								// The palette yields to Escape before anything else: with a
+								// list up, Esc means "put that away", not "stop the turn".
+								if (paletteItems.length > 0 && !paletteHidden) {
+									event.preventDefault();
+									setPaletteHidden(true);
+									return;
+								}
 								if (state.chat.streaming) void call("abort");
 								return;
 							}
@@ -996,7 +1149,7 @@ export function Composer() {
 										: state.voiceActive
 											? "Stop and insert"
 											: state.voiceDenied
-												? "Microphone unavailable — open the setting"
+												? "Microphone unavailable. Open the setting"
 												: state.voiceSilent !== ""
 													? `No sound reached ${state.voiceSilent}. Choose another microphone in the menu beside this button.`
 													: "Dictate (Ctrl+M)"

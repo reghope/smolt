@@ -32,6 +32,8 @@ export interface ToolBlock {
 	output: string;
 	isError: boolean;
 	running: boolean;
+	/** The call was stopped before it finished — by the reader or a dead agent. */
+	aborted?: boolean;
 	/** Images the tool returned (screenshots, read image files). */
 	images?: { data: string; mimeType: string }[];
 }
@@ -42,6 +44,8 @@ export interface ChatMessage {
 	role: "user" | "assistant" | "system";
 	blocks: Block[];
 	streaming?: boolean;
+	/** Thinking level the session held when this message streamed. */
+	thinkingLevel?: string;
 	/** How long the turn took, kept so the footer survives the turn. */
 	tookMs?: number;
 	/** Tokens the turn cost, likewise. */
@@ -53,13 +57,30 @@ export interface ChatMessage {
 export interface UiState {
 	messages: ChatMessage[];
 	streaming: boolean;
+	/**
+	 * What THIS TURN has consumed so far, across every LLM request it has
+	 * made: completed requests summed in `turnBase`, plus the in-flight
+	 * request's latest snapshot. The old display showed only the newest
+	 * request, which read as the turn's cost and understated a long agentic
+	 * turn by however many calls it had already made.
+	 */
 	usage: { input: number; output: number; cost: number } | null;
+	/** Completed requests' totals for the running turn; the in-flight request rides on top. */
+	turnBase: { input: number; output: number; cost: number };
 	/** When the current turn began, for the footer's elapsed time. */
 	turnStartedAt?: number;
+	/** The session's thinking level right now, stamped onto streamed messages. */
+	currentThinking: string;
 }
 
 export function initialState(): UiState {
-	return { messages: [], streaming: false, usage: null };
+	return {
+		messages: [],
+		streaming: false,
+		usage: null,
+		turnBase: { input: 0, output: 0, cost: 0 },
+		currentThinking: "",
+	};
 }
 
 function isObj(v: unknown): v is Record<string, unknown> {
@@ -120,6 +141,9 @@ export function fromAgentMessage(message: Record<string, unknown>): ChatMessage 
 	return { role: "assistant", blocks };
 }
 
+/** The bash tool's marker for a call the reader stopped mid-run. */
+const ABORTED_SUFFIX = /(^|\n)Command aborted\s*$/;
+
 /** Attach a stored toolResult message to its tool block when loading history. */
 export function attachToolResult(messages: ChatMessage[], raw: Record<string, unknown>): void {
 	const toolCallId = String(raw.toolCallId ?? "");
@@ -130,6 +154,7 @@ export function attachToolResult(messages: ChatMessage[], raw: Record<string, un
 				block.running = false;
 				block.isError = raw.isError === true;
 				block.output = textOf(raw.content).slice(0, 20_000);
+				if (ABORTED_SUFFIX.test(block.output)) block.aborted = true;
 				const images = imagesOf(raw.content);
 				if (images.length > 0) block.images = images;
 				return;
@@ -161,6 +186,10 @@ export function reduce(state: UiState, event: unknown): UiState {
 		case "agent_start": {
 			state.streaming = true;
 			state.turnStartedAt = Date.now();
+			// A fresh turn counts from zero: the footer's number is this turn's
+			// spend, not a leftover from the last one.
+			state.turnBase = { input: 0, output: 0, cost: 0 };
+			state.usage = null;
 			break;
 		}
 		case "agent_settled": {
@@ -185,6 +214,7 @@ export function reduce(state: UiState, event: unknown): UiState {
 				for (const block of message.blocks) {
 					if (block.kind === "tool" && block.running) {
 						block.running = false;
+						block.aborted = true;
 						if (block.output === "") block.output = "Interrupted.";
 					}
 				}
@@ -206,7 +236,13 @@ export function reduce(state: UiState, event: unknown): UiState {
 					earlier.streaming = false;
 					earlier.tookMs = earlier.startedAt ? Date.now() - earlier.startedAt : undefined;
 				}
-				state.messages.push({ role: "assistant", blocks: [], streaming: true, startedAt: Date.now() });
+				state.messages.push({
+					role: "assistant",
+					blocks: [],
+					streaming: true,
+					startedAt: Date.now(),
+					thinkingLevel: state.currentThinking || undefined,
+				});
 			}
 			break;
 		}
@@ -222,13 +258,32 @@ export function reduce(state: UiState, event: unknown): UiState {
 			const usage = isObj(event.usage) ? event.usage : null;
 			if (usage && typeof usage.input === "number") {
 				const cost = isObj(usage.cost) && typeof usage.cost.total === "number" ? usage.cost.total : 0;
-				state.usage = { input: usage.input as number, output: (usage.output as number) ?? 0, cost };
+				// The turn so far: every finished request (turnBase) plus this
+				// in-flight request's latest snapshot. Snapshots grow and then
+				// reset per request, so they are never summed directly.
+				state.usage = {
+					input: state.turnBase.input + (usage.input as number),
+					output: state.turnBase.output + ((usage.output as number) ?? 0),
+					cost: state.turnBase.cost + cost,
+				};
 			}
 			break;
 		}
 		case "message_end": {
 			const message = isObj(event.message) ? event.message : {};
 			if (message.role === "assistant") {
+				// This request is finished; bank its final usage so the next
+				// request's snapshots stack on top instead of replacing it.
+				const done = isObj(message.usage) ? message.usage : null;
+				if (done && typeof done.input === "number") {
+					const cost = isObj(done.cost) && typeof done.cost.total === "number" ? done.cost.total : 0;
+					state.turnBase = {
+						input: state.turnBase.input + (done.input as number),
+						output: state.turnBase.output + ((done.output as number) ?? 0),
+						cost: state.turnBase.cost + cost,
+					};
+					state.usage = { ...state.turnBase };
+				}
 				const mapped = fromAgentMessage(message);
 				const existing = currentAssistant(state);
 				if (mapped) {
@@ -258,12 +313,32 @@ export function reduce(state: UiState, event: unknown): UiState {
 			break;
 		}
 		case "tool_execution_end": {
+			// A tool can carry its own spend — battletest's wait reports the
+			// background testers' tokens this way. Bank it into the turn, so
+			// the counter is the whole run's cost, not just the parent's.
+			const toolUsage =
+				isObj(event.result) && isObj((event.result as Record<string, unknown>).usage)
+					? ((event.result as Record<string, unknown>).usage as {
+							input?: number;
+							output?: number;
+							cost?: { total?: number };
+						})
+					: null;
+			if (toolUsage && ((toolUsage.input ?? 0) > 0 || (toolUsage.output ?? 0) > 0)) {
+				state.turnBase = {
+					input: state.turnBase.input + (toolUsage.input ?? 0),
+					output: state.turnBase.output + (toolUsage.output ?? 0),
+					cost: state.turnBase.cost + (toolUsage.cost?.total ?? 0),
+				};
+				state.usage = { ...state.turnBase };
+			}
 			const block = findToolBlock(state, String(event.toolCallId ?? ""));
 			if (block) {
 				block.running = false;
 				const result = isObj(event.result) ? event.result : {};
 				block.isError = result.isError === true;
 				block.output = textOf(result.content).slice(0, 20_000);
+				if (ABORTED_SUFFIX.test(block.output)) block.aborted = true;
 				const images = imagesOf(result.content);
 				if (images.length > 0) block.images = images;
 			}
@@ -271,6 +346,12 @@ export function reduce(state: UiState, event: unknown): UiState {
 		}
 		case "compaction_end": {
 			state.messages.push({ role: "system", blocks: [{ kind: "text", text: "Context compacted." }] });
+			break;
+		}
+		case "thinking_level_changed": {
+			// Stamped onto each assistant message as it starts, so reasoning can
+			// say which level produced it even after auto-thinking moves on.
+			state.currentThinking = String((event as { level?: unknown }).level ?? "");
 			break;
 		}
 		default:

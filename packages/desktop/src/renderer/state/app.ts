@@ -31,6 +31,15 @@ export interface SlashCommand {
 	name: string;
 	description?: string;
 	source: "extension" | "prompt" | "skill";
+	/** Development tooling; kept out of the user-facing palette. */
+	internal?: boolean;
+}
+
+/** A live extension widget: display lines plus optional structured data behind them. */
+export interface ExtensionWidget {
+	lines: string[];
+	/** Extension-shaped payload (e.g. battletest per-tester tickets/actions). */
+	details?: unknown;
 }
 
 /** An extension dialog forwarded from the agent (extension_ui_request). */
@@ -48,6 +57,10 @@ export interface PermissionRequest {
 	tool: string;
 	summary: string;
 	mode: string;
+	/** The chat slot whose agent asked; the card renders only in that chat. */
+	slot?: number;
+	/** That chat's session file, so the sidebar can mark the waiting row. */
+	session?: string;
 	/** Why the command looks destructive, when it does. */
 	danger?: string;
 	createdAt: number;
@@ -104,6 +117,15 @@ export interface ConfirmRequest {
 	resolve: (confirmed: boolean) => void;
 }
 
+/** An in-app single-line prompt, in place of the operating system's dialog. */
+export interface InputRequest {
+	title: string;
+	message?: string;
+	placeholder?: string;
+	initial: string;
+	resolve: (value: string | null) => void;
+}
+
 interface AppState {
 	chat: UiState;
 	side: UiState;
@@ -139,10 +161,22 @@ interface AppState {
 	contextUsage: ContextUsage | null;
 	diffFiles: DiffFile[];
 	preexistingChanges: number;
+	/** Why the diff pane cannot read the tree (e.g. not a git repository), or "" when it can. */
+	diffUnavailable: string;
 	/** The diff as it stood when the repo bar's × was clicked (path → hunks), or null when not dismissed. */
 	repoBarDismissed: Map<string, string> | null;
 	/** Messages waiting on a turn, per chat: a queue belongs to its own conversation. */
 	queuedBySession: Map<string, QueuedMessage[]>;
+	/** True while Send now is mid-flight, so the button can refuse a double-click. */
+	sendingQueuedNow: boolean;
+	/** A model picked mid-turn, applied with the next user message. */
+	pendingModel: { provider: string; id: string; remember: boolean } | null;
+	/** Render the model's reasoning in the transcript. Toggled by clicking the working line. */
+	showThinking: boolean;
+	/** Live status lines pushed by extensions (battletest tester roster, subagent threads). */
+	extensionWidgets: Map<string, ExtensionWidget>;
+	/** Floating transient cards, newest last. */
+	toasts: { id: number; message: string; tone: "default" | "error" }[];
 	/** Where the rendered window starts in the chat; above 0 there is more above it. */
 	historyStart: number;
 	/** User messages before the window, so a rewind still names the right one. */
@@ -159,7 +193,11 @@ interface AppState {
 	attachedSlot: number | null;
 	pendingApprovals: PermissionRequest[];
 	uiRequests: UiDialogRequest[];
+	/** True when the active agent died and was replaced, until the next message. */
+	agentLost: boolean;
 	confirm: ConfirmRequest | null;
+	/** A pending in-app prompt (rename chat, name a worktree). */
+	inputRequest: InputRequest | null;
 	stats: UsageStats | null;
 	statsTab: "overview" | "models" | "rhythm";
 	statsWindow: number;
@@ -234,8 +272,14 @@ export const app: AppState = {
 	contextUsage: null,
 	diffFiles: [],
 	preexistingChanges: 0,
+	diffUnavailable: "",
 	repoBarDismissed: null,
 	queuedBySession: new Map(),
+	sendingQueuedNow: false,
+	pendingModel: null,
+	showThinking: readShowThinking(),
+	extensionWidgets: new Map(),
+	toasts: [],
 	historyStart: 0,
 	historyUserStart: 0,
 	historySource: "disk",
@@ -245,7 +289,9 @@ export const app: AppState = {
 	attachedSlot: null,
 	pendingApprovals: [],
 	uiRequests: [],
+	agentLost: false,
 	confirm: null,
+	inputRequest: null,
 	stats: null,
 	statsTab: "overview",
 	statsWindow: 0,
@@ -303,6 +349,23 @@ export function bump(): void {
 	draftVersion += 1;
 	for (const listener of listeners) listener();
 	for (const listener of draftListeners) listener();
+}
+
+/** How often streaming deltas are allowed to repaint the app. */
+const STREAM_PAINT_MS = 150;
+let bumpTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Coalesced bump for high-frequency events: the first call paints on a short
+ * timer and the calls that pile up behind it ride along. Anything urgent can
+ * still call bump() directly and the pending timer becomes a no-op repaint.
+ */
+export function bumpSoon(): void {
+	if (bumpTimer !== null) return;
+	bumpTimer = setTimeout(() => {
+		bumpTimer = null;
+		bump();
+	}, STREAM_PAINT_MS);
 }
 
 /**
@@ -373,14 +436,46 @@ export function reportAgentError(message: string | null): void {
 	if (message !== null && message !== "") toast(message, "error");
 }
 
-/** Show a transient card that dismisses itself; errors linger a little longer. */
+let toastSeq = 0;
+
+/** Show a transient floating card that dismisses itself; errors linger longer. */
 export function toast(message: string, tone: "default" | "error" = "default"): void {
 	if (message.trim() === "") return;
-	// Nothing pops up any more: the cards were more intrusive than the things
-	// they reported. Failures go to the console so they can still be traced,
-	// and the call sites stay put should a quieter surface ever be wanted.
 	if (tone === "error") console.error(message);
 	else console.info(message);
+	const id = ++toastSeq;
+	app.toasts = [...app.toasts, { id, message, tone }].slice(-4);
+	bump();
+	// Lifetime belongs to the Radix toast (duration, paused while hovered);
+	// it reports the close back through the Toaster's onOpenChange.
+}
+
+export function dismissToast(id: number): void {
+	if (!app.toasts.some((entry) => entry.id === id)) return;
+	app.toasts = app.toasts.filter((entry) => entry.id !== id);
+	bump();
+}
+
+/** The reasoning toggle survives restarts: a preference, not a session whim. */
+function readShowThinking(): boolean {
+	try {
+		return localStorage.getItem("smolt-show-thinking") === "true";
+	} catch {
+		return false;
+	}
+}
+
+export function toggleShowThinking(): void {
+	app.showThinking = !app.showThinking;
+	try {
+		localStorage.setItem("smolt-show-thinking", String(app.showThinking));
+	} catch {
+		// Preference just won't survive the restart.
+	}
+	// A brief confirmation, not a standing badge: the thinking text itself is
+	// the visible state once it renders.
+	toast(app.showThinking ? "Showing thoughts" : "Hiding thoughts");
+	bump();
 }
 
 /** Ask the user to confirm in an in-app dialog, never the OS one. */
@@ -410,6 +505,41 @@ export function resolveConfirm(confirmed: boolean): void {
 	app.confirm = null;
 	bump();
 	pending?.resolve(confirmed);
+}
+
+/**
+ * Ask the user to type one line, in an in-app dialog — never through
+ * window.prompt, which Electron does not implement: it throws, and every
+ * flow that relied on it (renaming a chat, naming a worktree) silently
+ * did nothing.
+ */
+export function requestInput(options: {
+	title: string;
+	message?: string;
+	placeholder?: string;
+	initial?: string;
+}): Promise<string | null> {
+	return new Promise((resolve) => {
+		// A second request while one is open orphans the first answer, as
+		// with confirmations: cancel the older one and move on.
+		app.inputRequest?.resolve(null);
+		app.inputRequest = {
+			title: options.title,
+			message: options.message,
+			placeholder: options.placeholder,
+			initial: options.initial ?? "",
+			resolve,
+		};
+		bump();
+	});
+}
+
+export function resolveInput(value: string | null): void {
+	const pending = app.inputRequest;
+	if (!pending) return;
+	app.inputRequest = null;
+	bump();
+	pending.resolve(value);
 }
 
 /** Answer one extension dialog and remove it from the queue. */
@@ -659,7 +789,12 @@ export async function refreshState(): Promise<void> {
 	if (rpcState) {
 		const m = rpcState.model as Record<string, unknown> | undefined;
 		app.model = m ? `${m.provider ?? ""}/${m.id ?? ""}`.replace(/^\//, "") : String(rpcState.modelId ?? "");
-		app.thinking = String(rpcState.thinkingLevel ?? "");
+		// An engaged extension entry ("auto") is what the user picked; the
+		// concrete level underneath it changes per task and would misread.
+		app.thinking = String(rpcState.activeThinkingEntry ?? rpcState.thinkingLevel ?? "");
+		// The concrete level seeds the per-message stamp shown next to thinking
+		// text; live changes then arrive as thinking_level_changed events.
+		app.chat.currentThinking = String(rpcState.thinkingLevel ?? "");
 		const path = String(rpcState.sessionFile ?? "");
 		// A chat's first turn is where its file appears, so anything queued
 		// before then was filed under the empty path; move it with the chat
@@ -670,6 +805,9 @@ export async function refreshState(): Promise<void> {
 			app.queuedBySession.set(path, early);
 		}
 		app.currentSessionPath = path;
+		// The chat on screen is where a relaunch should land; remember it as it
+		// changes rather than trying to catch the app on its way out.
+		storePreference("smolt.lastSession", path);
 		app.sessionName = String(rpcState.sessionName ?? "");
 		app.autoCompaction = rpcState.autoCompactionEnabled !== false;
 		app.deliverAllQueued = rpcState.steeringMode === "all";
@@ -834,7 +972,7 @@ export async function refreshDiff(): Promise<void> {
 		reportAgentError(result.error ?? "Could not read the working tree");
 		return;
 	}
-	const { files, branch, preexisting } = (result.value ?? {}) as {
+	const { files, branch, preexisting, unavailable } = (result.value ?? {}) as {
 		files?: DiffFile[];
 		unavailable?: string;
 		branch?: string;
@@ -842,6 +980,10 @@ export async function refreshDiff(): Promise<void> {
 	};
 	app.preexistingChanges = preexisting ?? 0;
 	app.repoBranch = branch ?? "";
+	// A folder with no git says so itself: an empty list here would read as
+	// "this chat changed nothing", which is a lie the moment the agent has
+	// edited a file the pane cannot diff.
+	app.diffUnavailable = unavailable ?? "";
 	const next = files ?? [];
 	// The × holds until a genuinely new change appears: a file the dismissal
 	// never saw, or one whose diff has moved since. Changes merely vanishing
@@ -905,13 +1047,25 @@ export async function send(): Promise<void> {
 	const text = app.draft.trim();
 	const images = app.attachments.map(({ data, mimeType }) => ({ type: "image" as const, data, mimeType }));
 	if (text === "" && images.length === 0) return;
+	// A model picked mid-turn lands now, with the message that starts using it.
+	await applyPendingModel();
 	app.draft = "";
+	// The banner about a replaced agent is answered by carrying on: a message
+	// that goes through is proof the app is whole again.
+	app.agentLost = false;
 	if (text !== "") {
 		promptHistory.push(text);
 		if (promptHistory.length > 200) promptHistory.shift();
 	}
 	app.attachments = [];
 	bump();
+	// One call for both states, decided in the agent process: idle starts a
+	// turn, streaming steers the message in at the next tool boundary (not a
+	// follow-up — a follow-up waits out the whole run, which on a long agentic
+	// turn is minutes of the message sitting there looking ignored). Choosing
+	// steer-vs-prompt here from app.chat.streaming raced the turn's end: a
+	// bare steer landing on a just-idle agent put the message in a queue
+	// nothing drained, and it silently vanished.
 	if (app.chat.streaming) {
 		const label =
 			images.length > 0 ? `${images.length === 1 ? "[Image]" : `[${images.length} images]`} ${text}`.trim() : text;
@@ -919,18 +1073,29 @@ export async function send(): Promise<void> {
 			app.queuedBySession.set(app.currentSessionPath, [...queuedHere(), { label, text, images }]);
 			bump();
 		}
-		// Steered, not followed up. A follow-up waits for the whole run to
-		// finish — every tool call, every retry — which on a long agentic turn
-		// is minutes of the message sitting there looking ignored. Steering
-		// delivers it at the next tool boundary, which is the first moment the
-		// agent can actually read it.
-		await call("steer", text, images);
+		const sent = await call("prompt", text, images, "steer");
+		if (sent === null) {
+			// The agent never received it: take the phantom out of the banner
+			// and put the words back where the user can see them.
+			app.queuedBySession.set(
+				app.currentSessionPath,
+				queuedHere().filter((message) => message.text !== text),
+			);
+			if (queuedHere().length === 0) app.queuedBySession.delete(app.currentSessionPath);
+			app.draft = text;
+			bump();
+		}
 	} else {
 		// A first message is what turns a scratch chat into a stored one. Put the
 		// row in the sidebar now, titled from the message, rather than leaving the
 		// chat unlisted until the agent has written its file and a refresh lands.
 		const firstMessage = app.chat.messages.length === 0;
-		await call("prompt", text, images);
+		const sent = await call("prompt", text, images, "steer");
+		if (sent === null) {
+			app.draft = text;
+			bump();
+			return;
+		}
 		if (firstMessage) await adoptNewChat(text);
 	}
 }
@@ -1012,6 +1177,19 @@ function titleFrom(text: string): string {
 }
 
 /** What this chat has waiting — never another chat's queue. */
+/**
+ * The approval requests that belong to the chat on screen. A background
+ * chat's agent asking about a command must not interrupt the conversation the
+ * reader is actually in — its card waits in its own chat. A request without a
+ * slot (an older agent, the side chat) is shown wherever the reader is, so
+ * nothing can wait invisibly.
+ */
+export function approvalsHere(): PermissionRequest[] {
+	return app.pendingApprovals.filter(
+		(request) => request.slot === undefined || app.attachedSlot === null || request.slot === app.attachedSlot,
+	);
+}
+
 export function queuedHere(): QueuedMessage[] {
 	return app.queuedBySession.get(app.currentSessionPath) ?? [];
 }
@@ -1025,7 +1203,12 @@ export function queuedHere(): QueuedMessage[] {
  * its own kind of wrong. This takes the message out of the agent's queue
  * and steers it in instead.
  */
+let sendingQueuedNow = false;
+
 export async function sendQueuedNow(): Promise<void> {
+	// Single-shot: the awaits below leave a window where a second click used
+	// to read the same queue and send the same message again.
+	if (sendingQueuedNow) return;
 	const path = app.currentSessionPath;
 	const waiting = queuedHere();
 	if (waiting.length === 0) return;
@@ -1035,19 +1218,39 @@ export async function sendQueuedNow(): Promise<void> {
 		.join("\n\n");
 	const images = waiting.flatMap((message) => message.images);
 	if (text === "" && images.length === 0) return;
-	// Take it out of the agent's queue so the send below is not a second
-	// copy of the same message.
-	if ((await call("clearQueue")) === null) return;
+	sendingQueuedNow = true;
+	app.sendingQueuedNow = true;
+	// Claim the queue synchronously, before any await, so nothing else can
+	// read it; on any failure below it is put back rather than lost.
 	app.queuedBySession.delete(path);
 	bump();
-	// A turn that finished while the message sat there cannot be steered:
-	// steering an idle agent puts the message somewhere nothing reads, and
-	// it was just taken out of the queue. Start a turn with it instead.
-	const method = app.chat.streaming ? "steer" : "prompt";
-	const sent = await call(method, text, images);
-	if (sent === null) {
-		// Delivery failed; put it back rather than losing what was typed.
+	const restore = () => {
 		app.queuedBySession.set(path, waiting);
+		bump();
+	};
+	try {
+		// Out of the agent's queue first, so the send below is not a second
+		// copy of the same message.
+		if ((await call("clearQueue")) === null) {
+			restore();
+			return;
+		}
+		// "Now" means now. Steering waits for the next tool boundary, which on
+		// a long generation is the end of the turn — the button read as doing
+		// nothing. Interrupt instead: abort stops the in-flight work (finished
+		// tool calls stay in the transcript) and resolves only once the agent
+		// is idle, so the prompt after it cannot race the turn's end. Aborting
+		// an idle agent is a no-op, so a stale streaming flag costs nothing.
+		if ((await call("abort")) === null) {
+			restore();
+			return;
+		}
+		if ((await call("prompt", text, images, "steer")) === null) {
+			restore();
+		}
+	} finally {
+		sendingQueuedNow = false;
+		app.sendingQueuedNow = false;
 		bump();
 	}
 }
@@ -1091,9 +1294,18 @@ export async function switchToSession(path: string): Promise<void> {
 	// transcript another half, so waiting for both before anything changes on
 	// screen reads as a hang rather than a load.
 	app.currentSessionPath = path;
+	storePreference("smolt.lastSession", path);
 	app.chat.messages = [];
 	app.chat.usage = null;
 	resetHistory(true);
+	// The old chat's name and diff must not stand in for this one during the
+	// seconds until the agent's state lands: the header falls back to the
+	// sidebar row, and the changes pane starts empty rather than foreign.
+	app.sessionName = "";
+	app.diffFiles = [];
+	app.diffUnavailable = "";
+	app.repoBranch = "";
+	app.repoBarDismissed = null;
 	// The pool tells the window which chats are working, so a turn in flight
 	// says so at once. Asking the agent instead means waiting on a process
 	// that is busy answering, which is what left the line missing for seconds.
@@ -1152,14 +1364,24 @@ async function loadStoredMessages(path: string): Promise<void> {
 }
 
 export async function newSession(): Promise<void> {
+	// The view moves first, as with switching: a fresh chat is empty by
+	// definition, and waiting out the agent's round-trip before clearing made
+	// the button read as dead whenever the agent was slow to answer.
 	resetHistory(false);
+	app.sessionName = "";
+	app.currentSessionPath = "";
+	app.chat.messages = [];
+	app.chat.usage = null;
+	app.diffFiles = [];
+	app.diffUnavailable = "";
+	app.repoBranch = "";
+	app.repoBarDismissed = null;
+	bump();
 	await call("newSession");
 	await reattach();
 	// A fresh chat starts at the effort chosen in settings, not at whatever the
 	// last one was left on.
 	if (app.defaultThinking !== "") await call("setThinkingLevel", app.defaultThinking, false);
-	app.chat.messages = [];
-	app.chat.usage = null;
 	await refreshState();
 }
 
@@ -1176,14 +1398,20 @@ export async function cycleSession(step: number): Promise<void> {
 }
 
 export async function renameSession(row: SessionRow): Promise<void> {
+	const isCurrent = row.path === app.currentSessionPath;
+	const name = await requestInput({
+		title: "Rename chat",
+		message: isCurrent ? undefined : `Switches to "${row.title}" first, since a chat is named from within it.`,
+		initial: (isCurrent ? app.sessionName : "") || row.title,
+	});
+	if (name === null) return;
+	const trimmed = name.trim();
+	if (trimmed === "") return;
 	// Naming writes into the session itself, so it has to be the open one.
 	if (row.path !== app.currentSessionPath) await switchToSession(row.path);
-	const name = window.prompt("Name this chat", app.sessionName || row.title);
-	if (name?.trim()) {
-		await call("setSessionName", name.trim());
-		app.sessionName = name.trim();
-		await refreshState();
-	}
+	await call("setSessionName", trimmed);
+	app.sessionName = trimmed;
+	await refreshState();
 }
 
 export async function forkSession(row: SessionRow): Promise<void> {
@@ -1289,11 +1517,33 @@ export function toggleGroupCollapsed(label: string): void {
  * renderer storage except the "last used" ordering for the menu.
  */
 export async function chooseModel(provider: string, id: string, remember = true): Promise<void> {
+	// Mid-turn, the pick is held rather than applied: yanking the model out
+	// from under a streaming response splits one answer across two models.
+	// It applies with the next user message (or the turn's end, whichever
+	// comes first), and every response after that uses it.
+	if (app.chat.streaming) {
+		app.pendingModel = { provider, id, remember };
+		toast(`Model queued: ${id} takes over from your next message.`);
+		bump();
+		return;
+	}
 	await call("setModel", provider, id, remember);
 	app.model = `${provider}/${id}`;
 	if (remember) rememberRecentModel(app.model);
 	app.availableThinking = (await call<string[]>("getAvailableThinkingLevels")) ?? [];
 	await refreshState();
+}
+
+/** Apply a model pick that was made mid-turn, once it is safe to. */
+export async function applyPendingModel(): Promise<void> {
+	const pending = app.pendingModel;
+	if (!pending) return;
+	app.pendingModel = null;
+	await call("setModel", pending.provider, pending.id, pending.remember);
+	app.model = `${pending.provider}/${pending.id}`;
+	if (pending.remember) rememberRecentModel(app.model);
+	app.availableThinking = (await call<string[]>("getAvailableThinkingLevels")) ?? [];
+	bump();
 }
 
 export async function chooseThinking(level: string, remember = true): Promise<void> {
@@ -1331,7 +1581,11 @@ export async function ensureThinkingLevels(): Promise<void> {
 
 export async function ensureCommands(): Promise<void> {
 	if (app.slashCommands.length === 0) {
-		app.slashCommands = (await call<SlashCommand[]>("getCommands")) ?? [];
+		// Internal commands are development tooling; the palette is how the app
+		// talks to its user, not to the harness that built it.
+		app.slashCommands = ((await call<SlashCommand[]>("getCommands")) ?? []).filter(
+			(command) => command.internal !== true,
+		);
 		bump();
 	}
 }
@@ -1416,9 +1670,15 @@ export function removeAttachment(index: number): void {
 // Approvals
 // ---------------------------------------------------------------------------
 
-export async function answerApproval(answer: string): Promise<void> {
-	const request = app.pendingApprovals.shift();
+export async function answerApproval(answer: string, id?: string): Promise<void> {
+	// Answer the exact request the user saw, never "whatever is first now":
+	// a card can be removed (answered elsewhere, expired) and another slide
+	// into its place between the reader's eyes and their click, and a blind
+	// shift() would record their decision against the wrong command.
+	const index = id === undefined ? 0 : app.pendingApprovals.findIndex((request) => request.id === id);
+	const request = index === -1 ? undefined : app.pendingApprovals[index];
 	if (!request) return;
+	app.pendingApprovals.splice(index, 1);
 	bump();
 	const result = await api.permissionReply(request.id, answer);
 	if (!result.ok) toast(result.error ?? "Could not send that decision", "error");
@@ -1669,6 +1929,16 @@ interface QueueUpdate {
 }
 
 export function boot(): void {
+	// Diagnosis hooks for the DevTools port: the state singleton and a running
+	// census of what the agent streams in, so a bloated or frozen renderer can
+	// be asked "what have you been fed" from outside.
+	const eventStats = { count: 0, byType: {} as Record<string, number>, startedAt: Date.now() };
+	(window as unknown as Record<string, unknown>).__smoltApp = app;
+	(window as unknown as Record<string, unknown>).__smoltEventStats = eventStats;
+
+	// The chat to reopen with, captured before the first refreshState can
+	// overwrite the stored value with the fresh agent's own empty session.
+	const rememberedSession = storedPreference("smolt.lastSession", "");
 	for (const [key, target] of [
 		["smolt.pinned", app.pinned],
 		["smolt.archived", app.archived],
@@ -1689,12 +1959,40 @@ export function boot(): void {
 	void reattach();
 
 	api.onEvent((event, slot) => {
+		eventStats.count++;
+		const kind = String((event as { type?: unknown }).type ?? "?");
+		eventStats.byType[kind] = (eventStats.byType[kind] ?? 0) + 1;
 		// Only the chat on screen. Anything else is a background turn, or the
 		// tail of the one just left, and reducing it here is what used to leak
 		// one conversation's words into another's transcript.
 		if (slotAware && slot !== app.attachedSlot) return;
-		const raw = event as { type?: string; id?: string; method?: string };
+		const raw = event as {
+			type?: string;
+			id?: string;
+			method?: string;
+			widgetKey?: string;
+			widgetLines?: string[];
+			widgetDetails?: unknown;
+			message?: string;
+			notifyType?: string;
+		};
 		if (raw.type === "extension_ui_request" && typeof raw.id === "string" && typeof raw.method === "string") {
+			// Live extension surfaces, previously dropped on the floor here — which
+			// made a battletest run completely invisible in the desktop.
+			if (raw.method === "setWidget" && typeof raw.widgetKey === "string") {
+				if (Array.isArray(raw.widgetLines) && raw.widgetLines.length > 0) {
+					app.extensionWidgets.set(raw.widgetKey, { lines: raw.widgetLines, details: raw.widgetDetails });
+				} else {
+					app.extensionWidgets.delete(raw.widgetKey);
+				}
+				bump();
+				return;
+			}
+			if (raw.method === "notify" && typeof raw.message === "string" && raw.message !== "") {
+				// Extension announcements float as toasts; errors linger longer.
+				toast(raw.message, raw.notifyType === "error" ? "error" : "default");
+				return;
+			}
 			handleExtensionUiRequest(raw as Parameters<typeof handleExtensionUiRequest>[0]);
 			return;
 		}
@@ -1717,7 +2015,13 @@ export function boot(): void {
 		reduce(app.chat, event);
 		trimLiveTranscript();
 		syncRunStart();
-		bump();
+		// Streaming deltas arrive tens of times a second, and painting each one
+		// re-rendered the whole app per delta — measured at ~2MB of engine-side
+		// style churn per pass, gigabytes per minute, which is what froze the
+		// window under GC. State is reduced immediately (above) so nothing is
+		// lost; the paint is coalesced to at most a few per second.
+		if (raw.type === "message_update") bumpSoon();
+		else bump();
 		const type = (event as { type?: string }).type;
 		// The agent reports its own queue as it drains it, so the banner clears
 		// when a message is actually delivered rather than when the turn ends.
@@ -1731,9 +2035,15 @@ export function boot(): void {
 				bump();
 			}
 		}
-		if (raw.type === "agent_start") app.aborting = false;
+		if (raw.type === "agent_start") {
+			app.aborting = false;
+			app.agentLost = false;
+		}
 		if (type === "agent_settled") {
 			app.aborting = false;
+			// A model picked mid-turn applies now the turn is over, so the next
+			// message starts on it without the user doing anything further.
+			void applyPendingModel();
 			// Nothing can still be waiting once the run is over: a message the
 			// agent never drained is one it will not read now.
 			app.queuedBySession.delete(app.currentSessionPath);
@@ -1796,9 +2106,18 @@ export function boot(): void {
 		await refreshRecentProjects();
 		const mode = await api.permissionMode();
 		if (mode.ok) app.permissionMode = String(mode.value ?? "auto");
-		if (info.continueLatest && app.sessionRows.length > 0 && app.chat.messages.length === 0) {
-			const result = await call<{ cancelled: boolean }>("switchSession", app.sessionRows[0]!.path);
-			if (result && !result.cancelled) await refreshState();
+		// Reopening the app returns to the chat that was on screen when it
+		// closed. A turn that was mid-flight died with the process, so the
+		// transcript picks up from the last persisted message. The
+		// SMOLT_DESKTOP_CONTINUE=1 env var keeps its old meaning — newest
+		// session wins regardless of what was open.
+		const restoreTo = info.continueLatest
+			? (app.sessionRows[0]?.path ?? "")
+			: app.sessionRows.some((row) => row.path === rememberedSession)
+				? rememberedSession
+				: "";
+		if (restoreTo !== "" && restoreTo !== app.currentSessionPath && app.chat.messages.length === 0) {
+			await switchToSession(restoreTo);
 		}
 		await loadMessages();
 		bump();
@@ -1850,6 +2169,32 @@ export function boot(): void {
 		const request = raw as PermissionRequest;
 		if (!request?.id || app.pendingApprovals.some((pending) => pending.id === request.id)) return;
 		app.pendingApprovals.push(request);
+		bump();
+	});
+	// A request answered elsewhere, expired, or swept loses its card here too:
+	// deciding on a question that no longer exists is worse than no question.
+	api.onPermissionRemoved?.((id) => {
+		const next = app.pendingApprovals.filter((pending) => pending.id !== id);
+		if (next.length === app.pendingApprovals.length) return;
+		app.pendingApprovals = next;
+		bump();
+	});
+	// The main process replaces an agent that died on its own; this is the
+	// storytelling it cannot do from there — live tool cards close honestly,
+	// and the active chat says what happened instead of pretending it didn't.
+	api.onAgentExited?.((info) => {
+		for (const message of app.chat.messages) {
+			for (const block of message.blocks) {
+				if (block.kind !== "tool" || !block.running) continue;
+				block.running = false;
+				block.aborted = true;
+				if (block.output === "") block.output = "Interrupted.";
+			}
+		}
+		if (info?.wasActive) {
+			app.agentLost = true;
+			void refreshState();
+		}
 		bump();
 	});
 }

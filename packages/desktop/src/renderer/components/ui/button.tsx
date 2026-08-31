@@ -36,9 +36,14 @@ function Button({
 	className,
 	variant,
 	size,
+	title,
+	"aria-label": ariaLabel,
 	...props
 }: React.ComponentProps<"button"> & VariantProps<typeof buttonVariants>) {
-	return <button data-slot="button" className={cn(buttonVariants({ variant, size, className }))} {...props} />;
+	// Icon-only buttons carry their name in `title` alone; a screen reader
+	// should not depend on the tooltip surviving, so the title doubles as
+	// the accessible name unless one is given outright.
+	return <button data-slot="button" title={title} aria-label={ariaLabel ?? title} className={cn(buttonVariants({ variant, size, className }))} {...props} />;
 }
 
 export { Button, buttonVariants };

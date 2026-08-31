@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, session, shell, systemPreferences } from "electron";
 import { AgentBridge, findCliPath } from "./agent-bridge.ts";
 import { pendingPermissionRequests, requestPid, watchPermissionRequests, writePermissionReply } from "./approvals.ts";
+import { ensureCliShim } from "./cli-shim.ts";
 import {
 	captureDiffBaseline,
 	changedBetween,
@@ -623,6 +624,9 @@ function createWindow(): BrowserWindow {
 app.whenReady().then(async () => {
 	// Snapshot before the window can ask, so the first answer is already right.
 	void rebaseline();
+	// One install, both surfaces: keep the terminal's `smolt` pointed at the
+	// CLI this build shipped with.
+	ensureCliShim();
 	const win = createWindow();
 
 	let active: AgentSlot = {

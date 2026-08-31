@@ -15,8 +15,10 @@ smolt is a minimal terminal coding agent with one addition that compounds: it re
 ## Install
 
 ```bash
-npm install -g --ignore-scripts @smolt/cli
+npm install -g @smolt/cli
 ```
+
+Prefer a window? [smolt desktop](https://smolt.dev/desktop) is the same agent, same memory, same sessions.
 
 ## Use
 

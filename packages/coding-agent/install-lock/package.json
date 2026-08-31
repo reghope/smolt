@@ -1,10 +1,10 @@
 {
 	"name": "@smolt/coding-agent-install",
-	"version": "0.2.1",
+	"version": "0.2.2",
 	"private": true,
 	"description": "Lockfile root used by the Smolt installer and updater.",
 	"dependencies": {
-		"smolt": "0.2.1"
+		"smolt": "0.2.2"
 	},
 	"overrides": {
 		"protobufjs": "7.6.5",

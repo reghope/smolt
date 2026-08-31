@@ -47,10 +47,8 @@ Smolt runs in four modes: interactive, print or JSON, RPC for process integratio
 ## Quick Start
 
 ```bash
-npm install -g --ignore-scripts @smolt/cli
+npm install -g @smolt/cli
 ```
-
-`--ignore-scripts` disables dependency lifecycle scripts during install. Smolt does not require install scripts for normal npm installs.
 
 Authenticate with an API key:
 

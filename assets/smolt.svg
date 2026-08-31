@@ -1,6 +1,4 @@
-<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Smolt">
-  <!-- A single roe pearl: flat black bead with a comma-shaped specular highlight. -->
-  <circle cx="64" cy="64" r="56" fill="#000000"/>
-  <path d="M26 61 A38 38 0 0 1 51 28"
-        fill="none" stroke="#ffffff" stroke-width="16" stroke-linecap="round"/>
+<svg width="128" height="56" viewBox="0 9 32 14" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="smolt">
+  <!-- The smolt mark: the pixel fish, eye punched out. -->
+  <path fill-rule="evenodd" fill="#fa8072" d="M0 9H2V11H4V13H6V15H8V13H12V11H16V9H24V11H28V13H30V15H32V17H30V19H28V21H24V23H16V21H12V19H8V17H6V19H4V21H2V23H0V19H2V13H0ZM26 13H24V15H26Z"/>
 </svg>

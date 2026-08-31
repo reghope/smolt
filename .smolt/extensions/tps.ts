@@ -42,6 +42,8 @@ export default function (smolt: ExtensionAPI) {
 		const elapsedSeconds = elapsedMs / 1000;
 		const tokensPerSecond = output / elapsedSeconds;
 		const message = `TPS ${tokensPerSecond.toFixed(1)} tok/s. out ${output.toLocaleString()}, in ${input.toLocaleString()}, cache r/w ${cacheRead.toLocaleString()}/${cacheWrite.toLocaleString()}, total ${totalTokens.toLocaleString()}, ${elapsedSeconds.toFixed(1)}s`;
-		ctx.ui.notify(message, "info");
+		// Status, not notify: a toast after every single turn was noise. The
+		// figure sits in the TUI footer instead, and the desktop stays quiet.
+		ctx.ui.setStatus("tps", message);
 	});
 }

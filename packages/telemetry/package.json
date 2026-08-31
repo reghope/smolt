@@ -1,6 +1,6 @@
 {
 	"name": "@smolt/telemetry",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"description": "Vendor-neutral telemetry contracts and typed schema utilities for smolt",
 	"type": "module",
 	"main": "./dist/index.js",

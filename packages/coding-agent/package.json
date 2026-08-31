@@ -1,6 +1,6 @@
 {
 	"name": "smolt",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"description": "smolt - a coding agent that keeps what it learns: curated memory, self-authored skills, and session recall.",
 	"type": "module",
 	"smoltConfig": {
@@ -45,11 +45,11 @@
 		"prepublishOnly": "npm run clean && npm run build && npm run shrinkwrap"
 	},
 	"dependencies": {
-		"@smolt/agent-core": "^0.2.0",
-		"@smolt/ai": "^0.2.0",
-		"@smolt/client": "^0.2.0",
-		"@smolt/protocol": "^0.2.0",
-		"@smolt/tui": "^0.2.0",
+		"@smolt/agent-core": "^0.2.1",
+		"@smolt/ai": "^0.2.1",
+		"@smolt/client": "^0.2.1",
+		"@smolt/protocol": "^0.2.1",
+		"@smolt/tui": "^0.2.1",
 		"@silvia-odwyer/photon-node": "0.3.4",
 		"chalk": "5.6.2",
 		"cross-spawn": "7.0.6",

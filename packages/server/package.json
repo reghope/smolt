@@ -1,6 +1,6 @@
 {
 	"name": "@smolt/server",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"description": "experimental server package for smolt",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -47,8 +47,8 @@
 		"node": ">=22.19.0"
 	},
 	"dependencies": {
-		"@smolt/ai": "^0.2.0",
-		"@smolt/protocol": "^0.2.0"
+		"@smolt/ai": "^0.2.1",
+		"@smolt/protocol": "^0.2.1"
 	},
 	"devDependencies": {
 		"shx": "0.4.0",

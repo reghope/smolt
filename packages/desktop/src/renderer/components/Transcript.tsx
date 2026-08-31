@@ -8,6 +8,7 @@ import { renderMarkdown } from "../markdown.ts";
 import {
 	app,
 	approvalsHere,
+	branchFromResponse,
 	type ExtensionWidget,
 	loadEarlier,
 	rewindToUserMessage,
@@ -223,7 +224,10 @@ function ToolLiveActivity({ widget }: { widget: ExtensionWidget }) {
 					const open = expanded?.index === index ? expanded.kind : null;
 					return (
 						<div key={line} className="flex min-w-0 flex-col">
-							<span className="overflow-hidden text-ellipsis whitespace-nowrap text-xs leading-relaxed text-faint">
+							{/* Wraps rather than truncates: the live action at the end of
+							    the line is the part worth reading, and single-line
+							    ellipsis cut it off almost every time. */}
+							<span className="min-w-0 break-words text-xs leading-relaxed text-faint">
 								<WidgetLine
 									line={line}
 									detail={detail}
@@ -665,6 +669,23 @@ function ActionButton({ title, onClick, children }: { title: string; onClick: ()
 	);
 }
 
+function BranchGlyph() {
+	return (
+		<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+			<circle cx="4.5" cy="3.5" r="1.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+			<circle cx="4.5" cy="12.5" r="1.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+			<circle cx="11.5" cy="6" r="1.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+			<path
+				d="M4.5 5v6M4.5 9.5c0-2 2.5-2 4.5-2 1.2 0 2.1-.4 2.5-1.2"
+				fill="none"
+				stroke="currentColor"
+				strokeWidth="1.5"
+				strokeLinecap="round"
+			/>
+		</svg>
+	);
+}
+
 function CopyGlyph({ copied }: { copied: boolean }) {
 	return copied ? (
 		<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
@@ -758,7 +779,7 @@ function messageProse(message: ChatMessage): string {
 type Segment =
 	| { kind: "user"; message: ChatMessage; index: number; userIndex: number }
 	| { kind: "system"; message: ChatMessage; index: number }
-	| { kind: "prose"; text: string; streaming: boolean }
+	| { kind: "prose"; text: string; streaming: boolean; branchAfterUser?: number }
 	| { kind: "thinking"; text: string; level?: string }
 	| { kind: "picture"; data: string; mimeType: string }
 	| { kind: "tools"; blocks: ToolBlock[]; scope: string }
@@ -793,6 +814,7 @@ function buildSegments(messages: ChatMessage[], running: boolean): Segment[] {
 			return;
 		}
 		let thinkingLabeled = false;
+		let lastProse = -1;
 		for (const block of message.blocks) {
 			if (block.kind === "tool") {
 				if (run.length === 0) runScope = `main-${index}`;
@@ -824,6 +846,13 @@ function buildSegments(messages: ChatMessage[], running: boolean): Segment[] {
 			if (block.text.trim() === "") continue;
 			flushTools();
 			segments.push({ kind: "prose", text: block.text, streaming: message.streaming === true });
+			lastProse = segments.length - 1;
+		}
+		// A finished response's last prose carries the branch point: forking at
+		// the NEXT user message copies the context up to and including it.
+		if (message.role === "assistant" && message.streaming !== true && lastProse >= 0) {
+			const segment = segments[lastProse];
+			if (segment?.kind === "prose") segment.branchAfterUser = userIndex + 1;
 		}
 		// Only a turn in flight gets a footer; a finished one says nothing.
 		if (message.streaming === true) {
@@ -993,6 +1022,14 @@ export function Transcript() {
 								{!segment.streaming && (
 									<ActionRow>
 										<CopyAction text={segment.text} />
+										{segment.branchAfterUser !== undefined && (
+											<ActionButton
+												title="Branch into a new chat from here"
+												onClick={() => void branchFromResponse(segment.branchAfterUser ?? 0)}
+											>
+												<BranchGlyph />
+											</ActionButton>
+										)}
 									</ActionRow>
 								)}
 							</div>

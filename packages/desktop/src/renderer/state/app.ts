@@ -74,7 +74,17 @@ export interface DiffFile {
 	status: string;
 }
 
+/** What the agent has written down for itself, for the home screen. */
+export interface LearnedSummary {
+	memoryEntries: number;
+	latestMemory: string | null;
+	memoryPath: string;
+	memoryUpdatedAt: number | null;
+	skills: string[];
+}
+
 export interface UsageStats {
+	learned: LearnedSummary;
 	sessions: number;
 	messages: number;
 	tokens: number;
@@ -1415,6 +1425,32 @@ export async function renameSession(row: SessionRow): Promise<void> {
 	await call("setSessionName", trimmed);
 	app.sessionName = trimmed;
 	await refreshState();
+}
+
+/**
+ * Branch a new chat from an assistant response: the new session carries the
+ * conversation up to and including that response, and the original stays
+ * untouched. Mechanically a fork at the NEXT user message (whose entry marks
+ * the first thing the branch should not contain), or a clone when the
+ * response is the newest thing in the chat.
+ */
+export async function branchFromResponse(nextUserIndex: number): Promise<void> {
+	if (app.chat.streaming) {
+		toast("Wait for the current turn to finish before branching.");
+		return;
+	}
+	const forkable = (await call<{ entryId: string; text: string }[]>("getForkMessages")) ?? [];
+	const target = forkable[app.historyUserStart + nextUserIndex];
+	const result = target
+		? await call<{ cancelled: boolean }>("fork", target.entryId)
+		: await call<{ cancelled: boolean }>("clone");
+	if (!result || result.cancelled) return;
+	// The fork hands back the removed user message for re-editing; a branch
+	// starts fresh instead, so the draft stays whatever the user had typed.
+	toast("Branched into a new chat.");
+	await refreshState();
+	await loadMessages();
+	void refreshSessionRows();
 }
 
 export async function forkSession(row: SessionRow): Promise<void> {

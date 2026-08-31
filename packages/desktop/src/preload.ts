@@ -43,6 +43,8 @@ contextBridge.exposeInMainWorld("smolt", {
 		ipcRenderer.on("update:state", (_e, state: unknown) => cb(state));
 	},
 	authList: (): Promise<string[]> => ipcRenderer.invoke("app:auth-list"),
+	knownProviders: (): Promise<{ id: string; name: string; apiKey: boolean; oauth: boolean }[]> =>
+		ipcRenderer.invoke("app:known-providers"),
 	authSet: (provider: string, key: string): Promise<AgentCallResult> =>
 		ipcRenderer.invoke("app:auth-set", provider, key),
 	openCli: (): Promise<AgentCallResult> => ipcRenderer.invoke("app:open-cli"),

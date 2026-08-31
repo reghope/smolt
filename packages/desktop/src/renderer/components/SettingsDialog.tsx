@@ -484,7 +484,6 @@ export function SettingsDialog() {
 										    exists — pool credentials and new providers are added here. */}
 										{state.availableModels.length > 0 && (
 											<Button
-												variant="ghost"
 												size="sm"
 												className="self-start"
 												onClick={() => {
@@ -492,7 +491,7 @@ export function SettingsDialog() {
 													bump();
 												}}
 											>
-												Add a provider or failover credential…
+												Add provider
 											</Button>
 										)}
 									</div>

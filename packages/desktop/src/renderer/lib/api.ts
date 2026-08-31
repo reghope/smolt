@@ -54,6 +54,7 @@ export interface SmoltApi {
 	updateInstall(): Promise<{ ok: boolean }>;
 	onUpdateState(cb: (state: UpdateState) => void): void;
 	authList(): Promise<string[]>;
+	knownProviders(): Promise<{ id: string; name: string; apiKey: boolean; oauth: boolean }[]>;
 	authSet(provider: string, key: string): Promise<{ ok: boolean; error?: string }>;
 	openCli(): Promise<{ ok: boolean; error?: string }>;
 	addFolder(path: string): Promise<{ ok: boolean; value?: unknown; error?: string }>;

@@ -1,4 +1,5 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { projectDirName, sessionsDir } from "./sessions.ts";
 
@@ -11,7 +12,22 @@ import { projectDirName, sessionsDir } from "./sessions.ts";
  * front of you rather than every folder smolt has ever run in.
  */
 
+/** What the agent has written down for itself, for the home screen. */
+export interface LearnedSummary {
+	/** Number of § entries in the global MEMORY.md; 0 when the file is absent. */
+	memoryEntries: number;
+	/** The most recent memory entry, verbatim. */
+	latestMemory: string | null;
+	/** Absolute path of MEMORY.md, for the reveal affordance. */
+	memoryPath: string;
+	/** Epoch ms of the last MEMORY.md write; null when absent. */
+	memoryUpdatedAt: number | null;
+	/** Directory names of self-authored skills under the agent's skills root. */
+	skills: string[];
+}
+
 export interface UsageStats {
+	learned: LearnedSummary;
 	sessions: number;
 	messages: number;
 	tokens: number;
@@ -175,8 +191,46 @@ function streaks(days: string[]): { current: number; longest: number } {
 	return { current, longest };
 }
 
+/** The learning extension's stores, read the same way stats reads sessions:
+ * straight from the files the agent itself writes. Entries in MEMORY.md are
+ * separated by lines carrying a lone `§`. */
+export function collectLearned(): LearnedSummary {
+	const memoryPath = join(homedir(), ".smolt", "memories", "MEMORY.md");
+	const summary: LearnedSummary = {
+		memoryEntries: 0,
+		latestMemory: null,
+		memoryPath,
+		memoryUpdatedAt: null,
+		skills: [],
+	};
+	try {
+		const raw = readFileSync(memoryPath, "utf-8");
+		const entries = raw
+			.split(/\n?§\n?/)
+			.map((entry) => entry.trim())
+			.filter((entry) => entry !== "");
+		summary.memoryEntries = entries.length;
+		summary.latestMemory = entries.at(-1) ?? null;
+		summary.memoryUpdatedAt = statSync(memoryPath).mtimeMs;
+	} catch {
+		// no memory yet
+	}
+	try {
+		// Skills live beside the sessions dir under the agent root.
+		const skillsRoot = join(sessionsDir(), "..", "skills");
+		summary.skills = readdirSync(skillsRoot, { withFileTypes: true })
+			.filter((entry) => entry.isDirectory())
+			.map((entry) => entry.name)
+			.sort();
+	} catch {
+		// no skills yet
+	}
+	return summary;
+}
+
 export function collectStats(cwd: string, root: string = sessionsDir()): UsageStats {
 	const empty: UsageStats = {
+		learned: collectLearned(),
 		sessions: 0,
 		messages: 0,
 		tokens: 0,
@@ -256,6 +310,7 @@ export function collectStats(cwd: string, root: string = sessionsDir()): UsageSt
 		.sort((a, b) => b.messages - a.messages);
 
 	return {
+		learned: empty.learned,
 		sessions,
 		messages,
 		tokens,

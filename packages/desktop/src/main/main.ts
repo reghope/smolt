@@ -1205,6 +1205,22 @@ app.whenReady().then(async () => {
 	 * Only the names: the window never needs a key, and a key that reaches the
 	 * renderer is a key that can end up in a screenshot or a log.
 	 */
+	// Every provider the agent's catalog knows, so the add-provider dialog is
+	// exhaustive rather than a hand-picked eight. Ids and capability flags
+	// only — no credentials, no model lists.
+	ipcMain.handle("app:known-providers", async () => {
+		try {
+			const { builtinProviders } = await import("../../../ai/src/providers/all.ts");
+			return builtinProviders().map((provider) => ({
+				id: provider.id,
+				name: provider.name,
+				apiKey: provider.auth.apiKey !== undefined,
+				oauth: provider.auth.oauth !== undefined,
+			}));
+		} catch {
+			return [];
+		}
+	});
 	ipcMain.handle("app:auth-list", async () => {
 		try {
 			// The names only, straight from the file the CLI shares. Reading keys

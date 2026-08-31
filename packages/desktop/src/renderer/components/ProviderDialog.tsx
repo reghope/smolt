@@ -5,6 +5,7 @@ import { useApp } from "../state/useApp.ts";
 import { Button } from "./ui/button.tsx";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog.tsx";
 import { Input } from "./ui/input.tsx";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select.tsx";
 
 /**
  * Adding a model provider, without sending anyone to the terminal.
@@ -15,25 +16,57 @@ import { Input } from "./ui/input.tsx";
  * than pretending.
  */
 
-const PROVIDERS: { id: string; label: string; hint: string }[] = [
-	{ id: "anthropic", label: "Anthropic", hint: "sk-ant-…" },
-	{ id: "openai", label: "OpenAI", hint: "sk-…" },
-	{ id: "google", label: "Google", hint: "AIza…" },
-	{ id: "openrouter", label: "OpenRouter", hint: "sk-or-…" },
-	{ id: "groq", label: "Groq", hint: "gsk_…" },
-	{ id: "deepseek", label: "DeepSeek", hint: "sk-…" },
-	{ id: "mistral", label: "Mistral", hint: "…" },
-	{ id: "cerebras", label: "Cerebras", hint: "csk-…" },
-];
+/** Key-shape placeholders for the providers whose format is well known. */
+const KEY_HINTS: Record<string, string> = {
+	anthropic: "sk-ant-…",
+	openai: "sk-…",
+	google: "AIza…",
+	openrouter: "sk-or-…",
+	groq: "gsk_…",
+	deepseek: "sk-…",
+	cerebras: "csk-…",
+	xai: "xai-…",
+};
+
+/** The common picks, surfaced ahead of the full alphabetical catalog. */
+const FAVOURITE_ORDER = ["anthropic", "openai", "google", "openrouter", "groq", "deepseek", "mistral", "cerebras"];
+
+interface KnownProvider {
+	id: string;
+	name: string;
+	apiKey: boolean;
+	oauth: boolean;
+}
+
+/** Favourites in their fixed order, then everything else alphabetically. */
+function orderProviders(known: KnownProvider[]): KnownProvider[] {
+	const byId = new Map(known.map((entry) => [entry.id, entry]));
+	const favourites = FAVOURITE_ORDER.map((id) => byId.get(id)).filter(
+		(entry): entry is KnownProvider => entry !== undefined,
+	);
+	const rest = known
+		.filter((entry) => !FAVOURITE_ORDER.includes(entry.id))
+		.sort((a, b) => a.name.localeCompare(b.name));
+	return [...favourites, ...rest];
+}
+
+/** Stand-in when the catalog cannot be read, so the dialog still works. */
+const FALLBACK_PROVIDERS: KnownProvider[] = FAVOURITE_ORDER.map((id) => ({
+	id,
+	name: id.charAt(0).toUpperCase() + id.slice(1),
+	apiKey: true,
+	oauth: false,
+}));
 
 export function ProviderDialog() {
 	const state = useApp();
-	const [provider, setProvider] = useState(PROVIDERS[0]!.id);
+	const [provider, setProvider] = useState(FAVOURITE_ORDER[0]!);
 	const [custom, setCustom] = useState("");
 	const [key, setKey] = useState("");
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [configured, setConfigured] = useState<string[]>([]);
+	const [known, setKnown] = useState<KnownProvider[]>(FALLBACK_PROVIDERS);
 	const [poolMode, setPoolMode] = useState(false);
 	const [poolLabel, setPoolLabel] = useState("");
 
@@ -45,10 +78,21 @@ export function ProviderDialog() {
 			.authList()
 			.then(setConfigured)
 			.catch(() => setConfigured([]));
+		// The full catalog from the agent's own provider list, not a curated few.
+		void api
+			.knownProviders?.()
+			.then((list) => {
+				if (Array.isArray(list) && list.length > 0) setKnown(orderProviders(list));
+			})
+			.catch(() => undefined);
 	}, [state.providerDialogOpen]);
 
 	const chosen = provider === "other" ? custom.trim() : provider;
-	const hint = PROVIDERS.find((p) => p.id === provider)?.hint ?? "";
+	const selected = known.find((entry) => entry.id === provider);
+	const hint = KEY_HINTS[provider] ?? "";
+	// A provider without API-key auth signs in through a browser; pasting a
+	// key at it would store something nothing ever reads.
+	const oauthOnly = selected !== undefined && !selected.apiKey && selected.oauth;
 
 	const close = (): void => {
 		app.providerDialogOpen = false;
@@ -99,19 +143,20 @@ export function ProviderDialog() {
 				<div className="flex flex-col gap-3">
 					<label className="flex flex-col gap-1.5 text-sm">
 						Provider
-						<select
-							className="h-9 rounded-lg border bg-transparent px-3 text-sm outline-none focus-visible:border-border-strong"
-							value={provider}
-							onChange={(event) => setProvider(event.target.value)}
-						>
-							{PROVIDERS.map((option) => (
-								<option key={option.id} value={option.id}>
-									{option.label}
-									{configured.includes(option.id) ? " (already set up)" : ""}
-								</option>
-							))}
-							<option value="other">Something else…</option>
-						</select>
+						<Select value={provider} onValueChange={setProvider}>
+							<SelectTrigger>
+								<SelectValue />
+							</SelectTrigger>
+							<SelectContent>
+								{known.map((option) => (
+									<SelectItem key={option.id} value={option.id}>
+										{option.name}
+										{configured.includes(option.id) ? " (already set up)" : ""}
+									</SelectItem>
+								))}
+								<SelectItem value="other">Something else…</SelectItem>
+							</SelectContent>
+						</Select>
 					</label>
 
 					{provider === "other" && (
@@ -125,7 +170,13 @@ export function ProviderDialog() {
 						</label>
 					)}
 
-					{!poolMode && (
+					{oauthOnly && (
+						<p className="text-xs leading-relaxed text-warn">
+							{selected?.name} signs in through the browser rather than an API key — use “Sign in through the
+							CLI” below.
+						</p>
+					)}
+					{!poolMode && !oauthOnly && (
 						<label className="flex flex-col gap-1.5 text-sm">
 							API key
 							<Input
@@ -193,7 +244,7 @@ export function ProviderDialog() {
 						</Button>
 						<Button
 							size="sm"
-							disabled={busy || chosen === "" || (!poolMode && key.trim() === "")}
+							disabled={busy || chosen === "" || oauthOnly || (!poolMode && key.trim() === "")}
 							onClick={() => void save()}
 						>
 							{busy ? "Saving…" : poolMode ? "Continue in chat" : "Save"}

@@ -17,11 +17,19 @@ A self-contained extension giving the agent durable memory across sessions:
 - **hindsight** — observed (measured, not self-reported) learning about
   tool usage. Every tool call is recorded with duration and outcome,
   failures are normalized into error classes, and retries are linked to
-  the failure they retried. Two read paths: a "Tool field notes" block
-  (recurring failure patterns with real counts) folded into the frozen
-  prompt block at session start, and a reactive remedy hint appended to a
-  failing tool result the moment a known error class with an established
-  fix recurs (at most once per tool+class per session). Rows live in
+  the failure they retried. Nonzero exits that are a command's normal
+  answer (grep finding nothing, diff finding differences) are recorded as
+  the successes they are rather than polluting the exit-nonzero class, and
+  every stored argument is redacted first — rows reach the system prompt,
+  so credentials must never reach a row. Two read paths: a "Tool field
+  notes" block (recurring failure patterns with real counts) folded into
+  the frozen prompt block at session start, and a reactive remedy hint
+  appended to a failing tool result the moment a known error class with an
+  established fix recurs (at most once per tool+class per session). Both
+  aggregate machine-caused classes (ebusy, eacces, network, missing
+  binaries) across every project and everything else within the current
+  cwd, and both quote observed durations when advising on a timeout. Rows
+  live in
   `state.db` but in self-versioned `hindsight_*` tables with additive
   migrations — the session index's drop-and-rebuild never touches them,
   which also means `state.db` is no longer safe to delete casually: it now

@@ -101,6 +101,7 @@ const ADVICE: Record<string, string> = {
 	enoent: "verify the path exists before retrying",
 	"command-not-found": "check the tool is installed and on PATH",
 	ebusy: "retry the same call once",
+	timeout: "pass a larger timeout",
 };
 
 export const GENERIC_ADVICE = "retry the same call once before changing approach";
@@ -158,6 +159,83 @@ const RUNNER_TOKENS = new Set([
 	"make",
 ]);
 
+/** Assignment and flag names whose value must never be stored. */
+const SECRET_NAME_RE = /(key|token|secret|password|passwd|pwd|auth|credential|bearer|session|cookie|private)/i;
+
+/** Credential shapes masked wherever they appear, named or not. */
+const SECRET_VALUE_RES: RegExp[] = [
+	/\bsk-[A-Za-z0-9_-]{8,}/g,
+	/\bgh[pousr]_[A-Za-z0-9]{16,}/g,
+	/\bgithub_pat_[A-Za-z0-9_]{20,}/g,
+	/\bxox[baprs]-[A-Za-z0-9-]{10,}/g,
+	/\bAKIA[0-9A-Z]{16}\b/g,
+	/\bey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/g,
+];
+
+const REDACTED = "<redacted>";
+
+/**
+ * Strip credentials from a command, path, or URL before it is stored. Rows
+ * are written to disk and the most frequent detail is quoted back into the
+ * system prompt, so nothing secret-shaped may survive this function.
+ */
+export function redactSecrets(text: string): string {
+	if (text === "") return text;
+	let out = text;
+	// scheme://user:password@host
+	out = out.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi, `$1${REDACTED}@`);
+	// NAME=value, --name=value, ?name=value — every assignment form at once.
+	out = out.replace(/([A-Za-z0-9_.-]+)\s*=\s*("[^"]*"|'[^']*'|[^\s&"']+)/g, (match, name: string) =>
+		SECRET_NAME_RE.test(name) ? `${name}=${REDACTED}` : match,
+	);
+	// --token value (the separated flag form)
+	out = out.replace(/(--?[A-Za-z0-9_-]+)\s+("[^"]*"|'[^']*'|\S+)/g, (match, flag: string) =>
+		SECRET_NAME_RE.test(flag) ? `${flag} ${REDACTED}` : match,
+	);
+	out = out.replace(/\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi, `$1 ${REDACTED}`);
+	for (const re of SECRET_VALUE_RES) out = out.replace(re, REDACTED);
+	return out;
+}
+
+/**
+ * Commands that report a *result* through a nonzero exit: grep finding
+ * nothing, diff finding differences. The shell tool throws on any nonzero
+ * exit, so without this every such call would be filed as a failure and
+ * would pollute the exit-nonzero class it lands in.
+ */
+const BENIGN_EXIT1_KEYS = new Set([
+	"grep",
+	"egrep",
+	"fgrep",
+	"rg",
+	"ag",
+	"ack",
+	"diff",
+	"cmp",
+	"test",
+	"git diff",
+	"git diff-index",
+	"git diff-files",
+	"git grep",
+	"npm outdated",
+]);
+
+/** The exit code a shell tool reported, when its result carried one. */
+export function parseExitCode(errorText: string): number | undefined {
+	const match = EXIT_CODE_RE.exec(errorText);
+	return match ? Number(match[1]) : undefined;
+}
+
+/** True when a nonzero exit is this command's normal way of answering "no". */
+export function isBenignExit(toolName: string, argKey: string, exitCode: number | undefined): boolean {
+	if (!SHELL_TOOLS.has(toolName) || exitCode !== 1) return false;
+	return BENIGN_EXIT1_KEYS.has(argKey);
+}
+
+function formatDuration(ms: number): string {
+	return ms >= 1000 ? `${Math.round(ms / 1000)}s` : `${ms}ms`;
+}
+
 const PATH_ARG_TOOLS = new Set(["read", "write", "edit"]);
 
 function firstStringArg(args: Record<string, unknown>, keys: string[]): string {
@@ -201,7 +279,7 @@ export function deriveArgKey(
 		primary = firstStringArg(args, ["path", "file_path", "command", "pattern", "query", "url", "name"]);
 		key = looksLikePath(primary) ? basename(primary) : primary;
 	}
-	return { argKey: key.slice(0, 80), argDetail: primary.slice(0, 200) };
+	return { argKey: redactSecrets(key).slice(0, 80), argDetail: redactSecrets(primary).slice(0, 200) };
 }
 
 // ---------------------------------------------------------------------------
@@ -221,12 +299,16 @@ export interface ToolCallRow {
 	isError: boolean;
 	errorClass: string | undefined;
 	retryOf: string | undefined;
+	/** Shell exit code, when the failing result carried one. */
+	exitCode: number | undefined;
 }
 
 export interface RemedyStat {
 	seen: number;
 	attempts: number;
 	successes: number;
+	/** Slowest successful run of a call that has failed this way, if any. */
+	slowestSuccessMs: number | null;
 }
 
 interface SqliteStatement {
@@ -268,7 +350,54 @@ const MIGRATIONS: string[][] = [
 		"CREATE INDEX IF NOT EXISTS idx_hindsight_retry ON hindsight_tool_calls(retry_of) " +
 			"WHERE retry_of IS NOT NULL",
 	],
+	["ALTER TABLE hindsight_tool_calls ADD COLUMN exit_code INTEGER"],
 ];
+
+/** Retry-linkage subqueries, shared by every aggregate over failures. */
+const RETRY_ATTEMPTS_SQL =
+	"(SELECT COUNT(*) FROM hindsight_tool_calls r JOIN hindsight_tool_calls x " +
+	"ON r.retry_of = x.tool_call_id WHERE x.tool = f.tool AND x.error_class = f.error_class)";
+
+const RETRY_SUCCESSES_SQL =
+	"(SELECT COUNT(*) FROM hindsight_tool_calls r JOIN hindsight_tool_calls x " +
+	"ON r.retry_of = x.tool_call_id WHERE x.tool = f.tool AND x.error_class = f.error_class AND r.is_error = 0)";
+
+/**
+ * The slowest successful run of any call that has failed this way. For the
+ * timeout class this is the observed evidence for how long the call really
+ * needs \u2014 the one piece of advice duration_ms can support by itself.
+ */
+const SLOWEST_SUCCESS_SQL =
+	"(SELECT MAX(s.duration_ms) FROM hindsight_tool_calls s " +
+	"WHERE s.tool = f.tool AND s.is_error = 0 AND s.arg_key != '' AND s.arg_key IN " +
+	"(SELECT a.arg_key FROM hindsight_tool_calls a WHERE a.tool = f.tool AND a.error_class = f.error_class))";
+
+/**
+ * Failures the machine causes \u2014 a locked file, a missing binary, no network
+ * \u2014 are true in every directory, so they aggregate machine-wide. Everything
+ * else (a failing command, a bad edit, a missing local path) is a property of
+ * the project it happened in and would be noise anywhere else.
+ */
+const MACHINE_SCOPED_CLASSES = [
+	"ebusy",
+	"eacces",
+	"command-not-found",
+	"network",
+	"disk-space",
+	"exit-126",
+	"exit-127",
+];
+
+const MACHINE_SCOPED_SQL = MACHINE_SCOPED_CLASSES.map((cls) => `'${cls}'`).join(", ");
+
+/** Narrow an aggregate to this project plus the machine-wide classes. */
+function scopeClause(cwd: string): string {
+	return cwd === "" ? "" : `AND (f.error_class IN (${MACHINE_SCOPED_SQL}) OR f.cwd = ?) `;
+}
+
+function scopeParams(cwd: string): string[] {
+	return cwd === "" ? [] : [cwd];
+}
 
 const NOTES_HEADER =
 	"## Tool field notes (observed, this machine)\n" +
@@ -284,6 +413,11 @@ export class HindsightStore {
 		this.dbPath = dbPath;
 	}
 
+	/** True once an open attempt failed: telemetry is silently off. */
+	get unavailable(): boolean {
+		return this.sqliteFailed;
+	}
+
 	/** Release the SQLite handle (used by tests and shutdown paths). */
 	close(): void {
 		try {
@@ -292,6 +426,34 @@ export class HindsightStore {
 			// already closed
 		}
 		this.db = undefined;
+	}
+
+	/**
+	 * Re-redact rows written before redaction existed. The only place stored
+	 * rows are ever rewritten, and it exists because arg_detail is quoted
+	 * back into the system prompt: a credential captured before would
+	 * otherwise resurface in every session.
+	 */
+	private scrubStoredSecrets(db: SqliteDatabase): void {
+		try {
+			const rows = db.prepare("SELECT tool_call_id, arg_key, arg_detail FROM hindsight_tool_calls").all() as {
+				tool_call_id: string;
+				arg_key: string;
+				arg_detail: string;
+			}[];
+			const update = db.prepare(
+				"UPDATE hindsight_tool_calls SET arg_key = ?, arg_detail = ? WHERE tool_call_id = ?",
+			);
+			for (const row of rows) {
+				const argKey = redactSecrets(row.arg_key ?? "");
+				const argDetail = redactSecrets(row.arg_detail ?? "");
+				if (argKey !== row.arg_key || argDetail !== row.arg_detail) {
+					update.run(argKey, argDetail, row.tool_call_id);
+				}
+			}
+		} catch {
+			// Best effort; a failed scrub must not stop the session.
+		}
 	}
 
 	private async openDb(): Promise<SqliteDatabase | undefined> {
@@ -319,6 +481,10 @@ export class HindsightStore {
 				db.prepare("INSERT OR REPLACE INTO hindsight_meta(key, value) VALUES ('schema_version', ?)").run(
 					String(MIGRATIONS.length),
 				);
+				// Rows written before redaction existed may hold credentials
+				// in arg_detail, which distillNotes quotes into the system
+				// prompt. Repair them once, on the migration that adds it.
+				if (version < 2) this.scrubStoredSecrets(db);
 			}
 			this.db = db;
 			return db;
@@ -337,8 +503,8 @@ export class HindsightStore {
 			const insert = db.prepare(
 				"INSERT OR REPLACE INTO hindsight_tool_calls(" +
 					"tool_call_id, session_id, turn_index, tool, arg_key, arg_detail, cwd, " +
-					"started_at, duration_ms, is_error, error_class, retry_of, ts) " +
-					"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+					"started_at, duration_ms, is_error, error_class, retry_of, exit_code, ts) " +
+					"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			);
 			for (const row of rows) {
 				insert.run(
@@ -354,6 +520,7 @@ export class HindsightStore {
 					row.isError ? 1 : 0,
 					row.errorClass ?? null,
 					row.retryOf ?? null,
+					row.exitCode ?? null,
 					new Date(row.startedAt).toISOString(),
 				);
 			}
@@ -364,34 +531,40 @@ export class HindsightStore {
 
 	/**
 	 * Per (tool, error_class): how often the failure was seen, how often it
-	 * was retried, and how often the retry succeeded. Loaded once at session
-	 * start and held in memory so hints stay deterministic and cheap.
+	 * was retried, how often the retry succeeded, and the slowest successful
+	 * run of a call that has failed this way. Loaded once at session start
+	 * and held in memory so hints stay deterministic and cheap.
 	 */
-	async loadRemedyStats(): Promise<Map<string, RemedyStat>> {
+	async loadRemedyStats(cwd = ""): Promise<Map<string, RemedyStat>> {
 		const stats = new Map<string, RemedyStat>();
 		const db = await this.openDb();
 		if (!db) return stats;
 		try {
 			const rows = db
 				.prepare(
-					"SELECT f.tool AS tool, f.error_class AS error_class, " +
-						"COUNT(*) AS seen, " +
-						"(SELECT COUNT(*) FROM hindsight_tool_calls r JOIN hindsight_tool_calls x " +
-						"ON r.retry_of = x.tool_call_id " +
-						"WHERE x.tool = f.tool AND x.error_class = f.error_class) AS attempts, " +
-						"(SELECT COUNT(*) FROM hindsight_tool_calls r JOIN hindsight_tool_calls x " +
-						"ON r.retry_of = x.tool_call_id " +
-						"WHERE x.tool = f.tool AND x.error_class = f.error_class AND r.is_error = 0) AS successes " +
+					"SELECT f.tool AS tool, f.error_class AS error_class, COUNT(*) AS seen, " +
+						`${RETRY_ATTEMPTS_SQL} AS attempts, ` +
+						`${RETRY_SUCCESSES_SQL} AS successes, ` +
+						`${SLOWEST_SUCCESS_SQL} AS slowest_success_ms ` +
 						"FROM hindsight_tool_calls f " +
 						"WHERE f.is_error = 1 AND f.error_class IS NOT NULL AND f.error_class != 'unclassified' " +
+						scopeClause(cwd) +
 						"GROUP BY f.tool, f.error_class",
 				)
-				.all() as { tool: string; error_class: string; seen: number; attempts: number; successes: number }[];
+				.all(...scopeParams(cwd)) as {
+				tool: string;
+				error_class: string;
+				seen: number;
+				attempts: number;
+				successes: number;
+				slowest_success_ms: number | null;
+			}[];
 			for (const row of rows) {
 				stats.set(`${row.tool}|${row.error_class}`, {
 					seen: row.seen,
 					attempts: row.attempts,
 					successes: row.successes,
+					slowestSuccessMs: row.slowest_success_ms,
 				});
 			}
 		} catch {
@@ -404,7 +577,7 @@ export class HindsightStore {
 	 * Distill the accumulated telemetry into the "Tool field notes" block.
 	 * Returns "" when nothing crosses the sample threshold (prompt untouched).
 	 */
-	async distillNotes(config: HindsightConfig): Promise<string> {
+	async distillNotes(config: HindsightConfig, cwd = ""): Promise<string> {
 		const db = await this.openDb();
 		if (!db) return "";
 		let rows: {
@@ -413,6 +586,7 @@ export class HindsightStore {
 			err_count: number;
 			attempts: number;
 			successes: number;
+			slowest_success_ms: number | null;
 			top_arg: string | null;
 		}[];
 		try {
@@ -420,22 +594,20 @@ export class HindsightStore {
 				.prepare(
 					"SELECT f.tool AS tool, f.error_class AS error_class, " +
 						"COUNT(*) AS err_count, MAX(f.started_at) AS last_seen, " +
-						"(SELECT COUNT(*) FROM hindsight_tool_calls r JOIN hindsight_tool_calls x " +
-						"ON r.retry_of = x.tool_call_id " +
-						"WHERE x.tool = f.tool AND x.error_class = f.error_class) AS attempts, " +
-						"(SELECT COUNT(*) FROM hindsight_tool_calls r JOIN hindsight_tool_calls x " +
-						"ON r.retry_of = x.tool_call_id " +
-						"WHERE x.tool = f.tool AND x.error_class = f.error_class AND r.is_error = 0) AS successes, " +
+						`${RETRY_ATTEMPTS_SQL} AS attempts, ` +
+						`${RETRY_SUCCESSES_SQL} AS successes, ` +
+						`${SLOWEST_SUCCESS_SQL} AS slowest_success_ms, ` +
 						"(SELECT a.arg_detail FROM hindsight_tool_calls a " +
 						"WHERE a.tool = f.tool AND a.error_class = f.error_class AND a.arg_detail != '' " +
 						"GROUP BY a.arg_detail ORDER BY COUNT(*) DESC, MAX(a.started_at) DESC LIMIT 1) AS top_arg " +
 						"FROM hindsight_tool_calls f " +
 						"WHERE f.is_error = 1 AND f.error_class IS NOT NULL AND f.error_class != 'unclassified' " +
+						scopeClause(cwd) +
 						"GROUP BY f.tool, f.error_class " +
 						"HAVING err_count >= ? " +
 						"ORDER BY err_count DESC, last_seen DESC LIMIT 10",
 				)
-				.all(config.minSamples) as typeof rows;
+				.all(...scopeParams(cwd), config.minSamples) as typeof rows;
 		} catch {
 			return "";
 		}
@@ -446,7 +618,10 @@ export class HindsightStore {
 			if (row.top_arg) line += ` (most often \`${row.top_arg}\`)`;
 			if (row.attempts >= 3) line += `; retry succeeded ${row.successes}/${row.attempts}`;
 			const advice = adviceFor(row.error_class);
-			if (advice) line += ` — ${advice}`;
+			if (advice) line += ` \u2014 ${advice}`;
+			if (row.error_class === "timeout" && row.slowest_success_ms !== null) {
+				line += ` (successful runs have taken up to ${formatDuration(row.slowest_success_ms)})`;
+			}
 			if (block.length + line.length > config.notesBudgetChars) break;
 			block += line;
 		}
@@ -643,6 +818,9 @@ interface PendingCall {
 	durationMs: number | undefined;
 	isError: boolean;
 	errorClass: string | undefined;
+	exitCode: number | undefined;
+	/** A nonzero exit that is the command's normal answer, not a failure. */
+	benign: boolean;
 	hasTiming: boolean;
 	hasResult: boolean;
 }
@@ -670,21 +848,23 @@ export class HindsightTracker {
 	private hinted = new Set<string>();
 	private remedyStats = new Map<string, RemedyStat>();
 	private sessionId = "";
+	private cwd = "";
 	turnIndex = 0;
 
 	constructor(store: HindsightStore) {
 		this.store = store;
 	}
 
-	async onSessionStart(sessionId: string): Promise<void> {
+	async onSessionStart(sessionId: string, cwd = ""): Promise<void> {
 		this.starts.clear();
 		this.pending.clear();
 		this.recent = [];
 		this.buffer = [];
 		this.hinted.clear();
 		this.sessionId = sessionId;
+		this.cwd = cwd;
 		this.turnIndex = 0;
-		this.remedyStats = await this.store.loadRemedyStats();
+		this.remedyStats = await this.store.loadRemedyStats(cwd);
 	}
 
 	onToolStart(toolCallId: string, toolName: string, args: Record<string, unknown> | undefined): void {
@@ -722,12 +902,17 @@ export class HindsightTracker {
 			call.argKey = argKey;
 			call.argDetail = argDetail;
 		}
-		call.cwd = cwd;
+		if (cwd !== "") call.cwd = cwd;
 		call.isError = call.isError || isError;
-		if (isError) call.errorClass = classifyError(toolName, extractErrorText(content));
+		if (isError) {
+			const text = extractErrorText(content);
+			call.exitCode = parseExitCode(text);
+			call.benign = isBenignExit(toolName, call.argKey, call.exitCode);
+			call.errorClass = call.benign ? undefined : classifyError(toolName, text);
+		}
 		call.hasResult = true;
 		this.maybeFinalize(toolCallId);
-		if (!isError || !call.errorClass || call.errorClass === "unclassified") return undefined;
+		if (!isError || call.benign || !call.errorClass || call.errorClass === "unclassified") return undefined;
 		return this.hintFor(toolName, call.errorClass);
 	}
 
@@ -757,6 +942,8 @@ export class HindsightTracker {
 				durationMs: undefined,
 				isError: false,
 				errorClass: undefined,
+				exitCode: undefined,
+				benign: false,
 				hasTiming: false,
 				hasResult: false,
 			};
@@ -783,6 +970,13 @@ export class HindsightTracker {
 	private finalize(call: PendingCall): void {
 		this.pending.delete(call.toolCallId);
 		this.starts.delete(call.toolCallId);
+		// A nonzero exit that is the command's way of answering "no" reaches
+		// us as an error. Recording it as one would pollute the class it
+		// lands in, so it is stored as the success it actually is.
+		if (call.benign) {
+			call.isError = false;
+			call.errorClass = undefined;
+		}
 		const retryOf = this.linkRetry(call);
 		this.recent.push({
 			toolCallId: call.toolCallId,
@@ -793,19 +987,31 @@ export class HindsightTracker {
 		});
 		if (this.recent.length > RECENT_CAP) this.recent.shift();
 		this.buffer.push({
-			toolCallId: call.toolCallId,
+			toolCallId: this.rowId(call.toolCallId),
 			sessionId: this.sessionId,
 			turnIndex: this.turnIndex,
 			tool: call.tool,
 			argKey: call.argKey,
 			argDetail: call.argDetail,
-			cwd: call.cwd,
+			cwd: call.cwd !== "" ? call.cwd : this.cwd,
 			startedAt: call.startedAt ?? Date.now(),
 			durationMs: call.durationMs,
 			isError: call.isError,
 			errorClass: call.errorClass,
-			retryOf,
+			exitCode: call.exitCode,
+			retryOf: retryOf === undefined ? undefined : this.rowId(retryOf),
 		});
+	}
+
+	/**
+	 * Provider tool-call ids are only guaranteed unique within a session, but
+	 * the table's primary key is global. Qualifying with the session id keeps
+	 * a provider that numbers its calls from one out of the previous
+	 * session's rows. Retry links are qualified the same way, so the join
+	 * still resolves.
+	 */
+	private rowId(toolCallId: string): string {
+		return this.sessionId === "" ? toolCallId : `${this.sessionId}:${toolCallId}`;
 	}
 
 	/**
@@ -840,10 +1046,16 @@ export class HindsightTracker {
 		if (stat.successes / stat.attempts < HINT_MIN_RATIO) return undefined;
 		this.hinted.add(key);
 		const advice = adviceFor(errorClass) ?? GENERIC_ADVICE;
+		// The one place duration_ms becomes advice: a timeout is only
+		// actionable next to how long the call actually needs.
+		const observed =
+			errorClass === "timeout" && stat.slowestSuccessMs !== null
+				? ` (successful runs have taken up to ${formatDuration(stat.slowestSuccessMs)})`
+				: "";
 		return (
 			`[hindsight] Known error pattern: ${toolName} + ${errorClass} on this machine ` +
 			`(seen ${stat.seen}x in past sessions; retry succeeded ${stat.successes}/${stat.attempts} times). ` +
-			`Suggested: ${advice}.`
+			`Suggested: ${advice}${observed}.`
 		);
 	}
 }
@@ -882,10 +1094,12 @@ export function wireHindsight(smolt: ExtensionAPI, options: HindsightOptions): H
 	if (!config.enabled) return { store, tracker, config };
 
 	let frozenNotes: string | undefined;
+	let sessionCwd = "";
 
 	smolt.on("session_start", async (_event, ctx) => {
 		frozenNotes = undefined;
-		await tracker.onSessionStart(ctx?.sessionManager?.getSessionId?.() ?? "");
+		sessionCwd = ctx?.cwd ?? "";
+		await tracker.onSessionStart(ctx?.sessionManager?.getSessionId?.() ?? "", sessionCwd);
 	});
 
 	smolt.on("turn_start", async (event) => {
@@ -922,8 +1136,8 @@ export function wireHindsight(smolt: ExtensionAPI, options: HindsightOptions): H
 	});
 
 	if (options.injectNotes !== false) {
-		smolt.on("before_agent_start", async (event) => {
-			if (frozenNotes === undefined) frozenNotes = await store.distillNotes(config);
+		smolt.on("before_agent_start", async (event, ctx) => {
+			if (frozenNotes === undefined) frozenNotes = await store.distillNotes(config, ctx?.cwd ?? sessionCwd);
 			if (frozenNotes === "") return;
 			return { systemPrompt: `${event.systemPrompt}\n\n${frozenNotes}` };
 		});
@@ -935,7 +1149,12 @@ export function wireHindsight(smolt: ExtensionAPI, options: HindsightOptions): H
 			const query = args.trim();
 			const summary = await store.summary();
 			if (!summary) {
-				ctx.ui.notify("No hindsight data yet — telemetry accumulates as tools run.", "info");
+				ctx.ui.notify(
+					store.unavailable
+						? "Hindsight telemetry is unavailable — the database could not be opened, so nothing is being recorded."
+						: "No hindsight data yet — telemetry accumulates as tools run.",
+					"info",
+				);
 				return;
 			}
 			if (query === "") {

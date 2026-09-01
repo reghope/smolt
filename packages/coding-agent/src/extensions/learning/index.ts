@@ -148,14 +148,14 @@ export function createLearningExtension(smolt: ExtensionAPI, paths: LearningPath
 		if (turnCount > 0 && turnCount % NUDGE_EVERY_TURNS === 0) nudgePending = true;
 	});
 
-	smolt.on("before_agent_start", async (event) => {
+	smolt.on("before_agent_start", async (event, ctx) => {
 		if (frozen === undefined) {
 			memory.loadFromDisk();
 			const blocks = [memory.formatForSystemPrompt("memory"), memory.formatForSystemPrompt("user")].filter(
 				(block) => block !== "",
 			);
 			if (hindsight.config.enabled) {
-				const notes = await hindsight.store.distillNotes(hindsight.config);
+				const notes = await hindsight.store.distillNotes(hindsight.config, ctx?.cwd ?? "");
 				if (notes !== "") blocks.push(notes);
 			}
 			frozen = [LEARNING_INSTRUCTIONS, ...blocks].join("\n\n");

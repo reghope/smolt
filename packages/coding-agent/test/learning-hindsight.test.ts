@@ -10,7 +10,10 @@ import {
 	extractErrorText,
 	HindsightStore,
 	type HindsightWiring,
+	isBenignExit,
+	parseExitCode,
 	readHindsightConfig,
+	redactSecrets,
 	type ToolCallRow,
 	wireHindsight,
 } from "../src/extensions/learning/hindsight.ts";
@@ -29,13 +32,13 @@ interface FakeCommand {
 }
 
 class FakeSmolt {
-	handlers = new Map<string, ((event: Record<string, unknown>) => Promise<unknown>)[]>();
+	handlers = new Map<string, ((event: Record<string, unknown>, ctx?: unknown) => Promise<unknown>)[]>();
 	commands = new Map<string, FakeCommand>();
 	sentMessages: Record<string, unknown>[] = [];
 	sentUserMessages: string[] = [];
 	notifications: string[] = [];
 
-	on(event: string, handler: (event: Record<string, unknown>) => Promise<unknown>): void {
+	on(event: string, handler: (event: Record<string, unknown>, ctx?: unknown) => Promise<unknown>): void {
 		const list = this.handlers.get(event) ?? [];
 		list.push(handler);
 		this.handlers.set(event, list);
@@ -62,10 +65,10 @@ class FakeSmolt {
 		await command.handler(args, ctx);
 	}
 
-	async fire(event: string, payload: Record<string, unknown> = {}): Promise<unknown> {
+	async fire(event: string, payload: Record<string, unknown> = {}, ctx?: unknown): Promise<unknown> {
 		let result: unknown;
 		for (const handler of this.handlers.get(event) ?? []) {
-			result = await handler({ type: event, ...payload });
+			result = await handler({ type: event, ...payload }, ctx);
 		}
 		return result;
 	}
@@ -107,6 +110,7 @@ function mkRow(id: string, over: Partial<ToolCallRow> = {}): ToolCallRow {
 		durationMs: 5,
 		isError: false,
 		errorClass: undefined,
+		exitCode: undefined,
 		retryOf: undefined,
 		...over,
 	};
@@ -263,7 +267,7 @@ describe("store", () => {
 		const store = track(new HindsightStore(dbPath));
 		await store.flush(remedyRows());
 		const stats = await store.loadRemedyStats();
-		expect(stats.get("write|ebusy")).toEqual({ seen: 3, attempts: 3, successes: 3 });
+		expect(stats.get("write|ebusy")).toEqual({ seen: 3, attempts: 3, successes: 3, slowestSuccessMs: 5 });
 	});
 
 	test("distillNotes renders counts, remedies, and top args", async () => {
@@ -666,5 +670,180 @@ describe("learning integration", () => {
 		expect(result.systemPrompt.indexOf("## Self-learning")).toBeLessThan(
 			result.systemPrompt.indexOf("## Tool field notes"),
 		);
+	});
+});
+
+describe("redaction", () => {
+	test("masks named secrets, flags, URL credentials, and token shapes", () => {
+		expect(redactSecrets("API_KEY=abcdef npm run deploy")).toBe("API_KEY=<redacted> npm run deploy");
+		expect(redactSecrets("gh auth --token abcdef1234")).toBe("gh auth --token <redacted>");
+		expect(redactSecrets("curl https://bob:hunter2@example.com/x")).toBe("curl https://<redacted>@example.com/x");
+		expect(redactSecrets("curl 'https://api.test/v1?api_key=abc123&page=2'")).toContain("api_key=<redacted>");
+		expect(redactSecrets("echo sk-abcdefghijklmnop")).toBe("echo <redacted>");
+		expect(redactSecrets("curl -H 'Authorization: Bearer abcdefghij'")).toContain("Bearer <redacted>");
+	});
+
+	test("leaves ordinary commands untouched", () => {
+		expect(redactSecrets("npm test -- --run")).toBe("npm test -- --run");
+		expect(redactSecrets("git commit -m fix")).toBe("git commit -m fix");
+		expect(redactSecrets("")).toBe("");
+	});
+
+	test("nothing secret survives into a stored row", () => {
+		const { argKey, argDetail } = deriveArgKey("bash", { command: "AWS_SECRET_ACCESS_KEY=zzzz aws s3 ls" });
+		expect(argKey).toBe("aws");
+		expect(argDetail).not.toContain("zzzz");
+		expect(argDetail).toContain("<redacted>");
+	});
+});
+
+describe("benign nonzero exits", () => {
+	test("recognizes result-bearing exit codes", () => {
+		expect(parseExitCode("no matches\n\nCommand exited with code 1")).toBe(1);
+		expect(parseExitCode("boom")).toBeUndefined();
+		expect(isBenignExit("bash", "grep", 1)).toBe(true);
+		expect(isBenignExit("bash", "git diff", 1)).toBe(true);
+		expect(isBenignExit("bash", "npm test", 1)).toBe(false);
+		expect(isBenignExit("bash", "grep", 2)).toBe(false);
+		expect(isBenignExit("read", "grep", 1)).toBe(false);
+	});
+});
+
+describe("store scoping and observed durations", () => {
+	const config = { ...DEFAULT_HINDSIGHT_CONFIG, minSamples: 2 };
+
+	test("machine-caused classes cross projects; project-caused ones do not", async () => {
+		const store = track(new HindsightStore(dbPath));
+		await store.flush([
+			mkRow("b1", { tool: "write", isError: true, errorClass: "ebusy", cwd: "/proj-b" }),
+			mkRow("b2", { tool: "write", isError: true, errorClass: "ebusy", cwd: "/proj-b" }),
+			mkRow("b3", { tool: "edit", isError: true, errorClass: "edit-mismatch", cwd: "/proj-b" }),
+			mkRow("b4", { tool: "edit", isError: true, errorClass: "edit-mismatch", cwd: "/proj-b" }),
+		]);
+		const scoped = await store.distillNotes(config, "/proj-a");
+		expect(scoped).toContain("write: ebusy");
+		expect(scoped).not.toContain("edit-mismatch");
+		const unscoped = await store.distillNotes(config, "");
+		expect(unscoped).toContain("write: ebusy");
+		expect(unscoped).toContain("edit-mismatch");
+	});
+
+	test("a timeout note carries how long successful runs actually took", async () => {
+		const store = track(new HindsightStore(dbPath));
+		await store.flush([
+			mkRow("t1", { tool: "bash", argKey: "npm test", isError: true, errorClass: "timeout" }),
+			mkRow("t2", { tool: "bash", argKey: "npm test", isError: true, errorClass: "timeout" }),
+			mkRow("t3", { tool: "bash", argKey: "npm test", durationMs: 47_000 }),
+		]);
+		const notes = await store.distillNotes(config, "");
+		expect(notes).toContain("bash: timeout 2x");
+		expect(notes).toContain("pass a larger timeout");
+		expect(notes).toContain("up to 47s");
+	});
+
+	test("reports unavailability separately from emptiness", async () => {
+		const blocked = join(dir, "not-a-db");
+		mkdirSync(blocked);
+		const store = track(new HindsightStore(blocked));
+		expect(await store.summary()).toBeUndefined();
+		expect(store.unavailable).toBe(true);
+	});
+});
+
+describe("hindsight repairs and scopes what it records", () => {
+	let smolt: FakeSmolt;
+	let wiring: HindsightWiring;
+
+	function wire(path = dbPath): void {
+		smolt = new FakeSmolt();
+		wiring = wireHindsight(smolt as unknown as ExtensionAPI, { dbPath: path });
+		track(wiring.store);
+	}
+
+	const ctx = { sessionManager: { getSessionId: () => "s9" }, cwd: "/proj" };
+
+	test("a grep that matched nothing is recorded as the success it is", async () => {
+		wire();
+		await smolt.fire("session_start");
+		await fireCall(smolt, {
+			id: "g1",
+			tool: "bash",
+			args: { command: "grep -n needle src/a.ts" },
+			isError: true,
+			errorText: "Command exited with code 1",
+		});
+		await smolt.fire("turn_end", {});
+		const [row] = await queryRows(dbPath);
+		expect(row?.is_error).toBe(0);
+		expect(row?.error_class).toBeNull();
+		expect(row?.exit_code).toBe(1);
+	});
+
+	test("a genuinely failing command still counts as a failure", async () => {
+		wire();
+		await smolt.fire("session_start");
+		await fireCall(smolt, {
+			id: "n1",
+			tool: "bash",
+			args: { command: "npm test" },
+			isError: true,
+			errorText: "Command exited with code 1",
+		});
+		await smolt.fire("turn_end", {});
+		const [row] = await queryRows(dbPath);
+		expect(row?.is_error).toBe(1);
+		expect(row?.error_class).toBe("exit-nonzero");
+		expect(row?.exit_code).toBe(1);
+	});
+
+	test("rows carry the session-qualified id and the session cwd", async () => {
+		wire();
+		await smolt.fire("session_start", {}, ctx);
+		await fireCall(smolt, { id: "f1", tool: "bash", args: { command: "npm test" }, isError: true });
+		await fireCall(smolt, { id: "r1", tool: "bash", args: { command: "npm test" } });
+		await smolt.fire("turn_end", {});
+		const rows = await queryRows(dbPath);
+		expect(rows.map((r) => r.tool_call_id)).toEqual(["s9:f1", "s9:r1"]);
+		expect(rows[1]?.retry_of).toBe("s9:f1");
+		expect(rows[0]?.cwd).toBe("/proj");
+	});
+
+	test("/hindsight distinguishes broken telemetry from no telemetry", async () => {
+		const blocked = join(dir, "blocked-db");
+		mkdirSync(blocked);
+		wire(blocked);
+		await smolt.runCommand("hindsight", "");
+		expect(smolt.notifications[0]).toContain("unavailable");
+	});
+});
+
+describe("stored-secret scrub", () => {
+	test("redacts rows written before redaction existed", async () => {
+		const specifier = "node:sqlite";
+		const mod = (await import(specifier)) as {
+			DatabaseSync: new (p: string) => { exec(sql: string): void; close(): void };
+		};
+		const db = new mod.DatabaseSync(dbPath);
+		db.exec("CREATE TABLE hindsight_meta(key TEXT PRIMARY KEY, value TEXT)");
+		db.exec("INSERT INTO hindsight_meta(key, value) VALUES ('schema_version', '1')");
+		db.exec(
+			"CREATE TABLE hindsight_tool_calls (tool_call_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, " +
+				"turn_index INTEGER NOT NULL, tool TEXT NOT NULL, arg_key TEXT NOT NULL DEFAULT '', " +
+				"arg_detail TEXT NOT NULL DEFAULT '', cwd TEXT NOT NULL DEFAULT '', started_at INTEGER NOT NULL, " +
+				"duration_ms INTEGER, is_error INTEGER NOT NULL DEFAULT 0, error_class TEXT, retry_of TEXT, " +
+				"ts TEXT NOT NULL)",
+		);
+		db.exec(
+			"INSERT INTO hindsight_tool_calls(tool_call_id, session_id, turn_index, tool, arg_key, arg_detail, " +
+				"cwd, started_at, is_error, ts) VALUES ('old', 's0', 0, 'bash', 'npm run', " +
+				"'API_KEY=supersecret npm run deploy', '', 1, 0, '2026-01-01T00:00:00.000Z')",
+		);
+		db.close();
+
+		const store = track(new HindsightStore(dbPath));
+		// Any read opens the database, which migrates and scrubs.
+		await store.summary();
+		const [row] = await queryRows(dbPath);
+		expect(row?.arg_detail).toBe("API_KEY=<redacted> npm run deploy");
 	});
 });

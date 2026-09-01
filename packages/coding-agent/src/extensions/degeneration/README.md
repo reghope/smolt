@@ -8,9 +8,12 @@ attractor); if the retry degenerates too, the run stops with a visible
 `auto_retry_end` failure instead of streaming garbage until a human aborts.
 
 - **detector.ts** — pure, conservative detection: ≥ `minRepeats` (default
-  10) consecutive identical prose-like lines, or a periodic tail of exact
-  fragment repetitions; short units, letterless dividers, and distinct
-  code lines never count. Throttled to re-check every ~400 streamed chars.
+  10) consecutive identical prose-like lines, a template loop (3x that many
+  consecutive lines sharing one long stem with a varying slot — "…should do
+  more Materials Science work." / "…Nanotechnology work."), or a periodic
+  tail of exact fragment repetitions; short units, letterless dividers, and
+  distinct code lines never count. Throttled to re-check every ~400
+  streamed chars.
 - **index.ts** — the policy: per-turn retry budget, once-per-response
   tripping, wired to core's `smolt.abortResponse(reason, {retry})`
   primitive (a deterministic abort + re-issue that bypasses the host's

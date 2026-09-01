@@ -77,6 +77,28 @@ describe("detectDegeneration", () => {
 	test("ignores short accumulations entirely", () => {
 		expect(detectDegeneration(`${sentence}\n`.repeat(5), MIN_REPEATS)).toBeUndefined();
 	});
+
+	test("trips on a template loop with a varying slot", () => {
+		// The real glm failure shape: identical stem, one word cycling.
+		const topics = Array.from({ length: 40 }, (_, i) => `Topic ${i}`);
+		const lines = topics.map((t) => `- The question about whether they think their org should do more ${t} work.`);
+		const reason = detectDegeneration(filler(100) + lines.join("\n"), MIN_REPEATS);
+		expect(reason).toContain("sharing the stem");
+		expect(reason).toContain("The question about whether");
+	});
+
+	test("a legitimate list sharing a stem stays under the template bar", () => {
+		const lines = Array.from(
+			{ length: 20 },
+			(_, i) => `- The question about whether option ${i} fits the budget for quarter ${i % 4}.`,
+		);
+		expect(detectDegeneration(filler(400) + lines.join("\n"), MIN_REPEATS)).toBeUndefined();
+	});
+
+	test("many lines with only a short shared stem never count as a template", () => {
+		const lines = Array.from({ length: 50 }, (_, i) => `Check item ${i}: verified against source ${i * 7}.`);
+		expect(detectDegeneration(filler(200) + lines.join("\n"), MIN_REPEATS)).toBeUndefined();
+	});
 });
 
 describe("DegenerationWatcher", () => {

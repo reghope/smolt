@@ -66,6 +66,49 @@ function detectRepeatedLines(text: string, minRepeats: number): string | undefin
 }
 
 /**
+ * Trip on template loops: many consecutive lines that are not identical but
+ * share one long stem, the failure shape of a model cycling a sentence with
+ * one varying slot ("...should do more Materials Science work." /
+ * "...Nanotechnology work."). Legitimate lists share stems too, so the bar
+ * is much higher than for exact repeats: 3x minRepeats consecutive lines
+ * all sharing a stem of at least TEMPLATE_MIN_STEM characters.
+ */
+const TEMPLATE_MIN_STEM = 24;
+const TEMPLATE_SCAN_CAP = 400;
+
+function sharedPrefix(a: string, b: string): string {
+	const max = Math.min(a.length, b.length);
+	let i = 0;
+	while (i < max && a[i] === b[i]) i++;
+	return a.slice(0, i);
+}
+
+function detectTemplatedLines(text: string, minRepeats: number): string | undefined {
+	const threshold = minRepeats * 3;
+	const lines = text.split("\n");
+	let stem: string | undefined;
+	let run = 0;
+	for (let i = lines.length - 1, scanned = 0; i >= 0 && scanned < TEMPLATE_SCAN_CAP; i--, scanned++) {
+		const line = normalizeLine(lines[i]!);
+		if (line === "") continue;
+		if (stem === undefined) {
+			stem = line;
+			run = 1;
+			continue;
+		}
+		const next = sharedPrefix(stem, line);
+		if (next.length < TEMPLATE_MIN_STEM) break;
+		stem = next;
+		run += 1;
+		if (run >= threshold) break;
+	}
+	if (stem !== undefined && run >= threshold && isCountableUnit(stem)) {
+		return `${run}+ consecutive lines sharing the stem "${clip(stem)}"`;
+	}
+	return undefined;
+}
+
+/**
  * Trip when the tail of the text is at least `minRepeats` exact repetitions
  * of one unit — catches loops that never emit a newline. Smallest period
  * wins, so a doubled unit reports its true length.
@@ -93,7 +136,11 @@ function detectPeriodicTail(text: string, minRepeats: number): string | undefine
  */
 export function detectDegeneration(text: string, minRepeats: number): string | undefined {
 	if (text.length < MIN_TEXT_LENGTH) return undefined;
-	return detectRepeatedLines(text, minRepeats) ?? detectPeriodicTail(text, minRepeats);
+	return (
+		detectRepeatedLines(text, minRepeats) ??
+		detectTemplatedLines(text, minRepeats) ??
+		detectPeriodicTail(text, minRepeats)
+	);
 }
 
 /**

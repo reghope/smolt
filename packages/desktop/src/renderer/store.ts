@@ -121,6 +121,14 @@ export function fromAgentMessage(message: Record<string, unknown>): ChatMessage 
 		for (const image of imagesOf(message.content)) blocks.push({ kind: "image", ...image });
 		return { role: "user", blocks, ...(message.internal === true ? { internal: true } : {}) };
 	}
+	if (role === "custom") {
+		// Extension-authored messages (e.g. the /hindsight report). Only ones
+		// marked for display; the rest are context-only nudges.
+		if (message.display !== true) return null;
+		const text = typeof message.content === "string" ? message.content : textOf(message.content);
+		if (text.trim() === "") return null;
+		return { role: "system", blocks: [{ kind: "text", text }] };
+	}
 	if (role !== "assistant") return null;
 	const blocks: Block[] = [];
 	const content = Array.isArray(message.content) ? message.content : [];
@@ -232,6 +240,11 @@ export function reduce(state: UiState, event: unknown): UiState {
 			if (message.role === "user") {
 				const mapped = fromAgentMessage(message);
 				if (mapped && textOf(message.content).trim() !== "") state.messages.push(mapped);
+			} else if (message.role === "custom") {
+				// Displayable extension messages arrive complete at message_start
+				// (message_end repeats them, so only one of the two may append).
+				const mapped = fromAgentMessage(message);
+				if (mapped) state.messages.push(mapped);
 			} else if (message.role === "assistant") {
 				// Close every message still marked live, not just the one before this.
 				// A steered message lands between two assistant turns, so the one that

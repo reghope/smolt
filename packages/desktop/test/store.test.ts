@@ -168,6 +168,36 @@ describe("run lifecycle", () => {
 		const state = feed([{ type: "totally_unknown" }, null, "garbage", 42]);
 		expect(state.messages).toHaveLength(0);
 	});
+
+	test("displayable custom messages land as system messages, once", () => {
+		const custom = {
+			role: "custom",
+			customType: "hindsight-report",
+			content: "## Hindsight\n- 3 calls",
+			display: true,
+		};
+		const state = feed([
+			{ type: "message_start", message: custom },
+			{ type: "message_end", message: custom },
+		]);
+		expect(state.messages).toHaveLength(1);
+		expect(state.messages[0]).toMatchObject({ role: "system" });
+		expect(state.messages[0]!.blocks[0]).toMatchObject({ kind: "text", text: "## Hindsight\n- 3 calls" });
+	});
+
+	test("display:false custom messages stay hidden", () => {
+		const state = feed([
+			{
+				type: "message_start",
+				message: { role: "custom", customType: "learning-nudge", content: "nudge", display: false },
+			},
+		]);
+		expect(state.messages).toHaveLength(0);
+		expect(fromAgentMessage({ role: "custom", content: "x", display: false })).toBeNull();
+		expect(
+			fromAgentMessage({ role: "custom", content: [{ type: "text", text: "block form" }], display: true }),
+		).toMatchObject({ role: "system" });
+	});
 });
 
 describe("extension briefs", () => {

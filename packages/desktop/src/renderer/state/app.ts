@@ -1082,6 +1082,32 @@ export async function send(): Promise<void> {
 	}
 	app.attachments = [];
 	bump();
+	// Extension commands (/hindsight, /auto-thinking, ...) execute inside the
+	// agent without emitting a user message event, so nothing would echo the
+	// input back into the chat. Show it ourselves; the command's own output
+	// arrives as a custom message or toast. Skill and prompt commands expand
+	// into real prompts and echo through the normal event path.
+	const commandName = text.startsWith("/") ? (text.slice(1).split(/\s+/, 1)[0] ?? "") : "";
+	if (commandName !== "") await ensureCommands();
+	const isExtensionCommand =
+		commandName !== "" &&
+		app.slashCommands.some((command) => command.source === "extension" && command.name === commandName);
+	if (isExtensionCommand) {
+		app.chat.messages.push({ role: "user", blocks: [{ kind: "text", text }] });
+		bump();
+		const sent = await call("prompt", text, images, "steer");
+		if (sent === null) {
+			// The agent never received it: take the echo back out and put the
+			// words back where the user can see them.
+			const echoed = app.chat.messages.at(-1);
+			if (echoed?.role === "user" && echoed.blocks[0]?.kind === "text" && echoed.blocks[0].text === text) {
+				app.chat.messages.pop();
+			}
+			app.draft = text;
+			bump();
+		}
+		return;
+	}
 	// One call for both states, decided in the agent process: idle starts a
 	// turn, streaming steers the message in at the next tool boundary (not a
 	// follow-up — a follow-up waits out the whole run, which on a long agentic

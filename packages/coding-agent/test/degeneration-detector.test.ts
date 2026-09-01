@@ -41,9 +41,15 @@ describe("detectDegeneration", () => {
 		expect(reason).toContain("I need to make sure the system understands");
 	});
 
-	test("stays quiet below minRepeats", () => {
-		const text = `${filler(700)}${`${sentence}\n\n`.repeat(MIN_REPEATS - 1)}`;
+	test("stays quiet below the sentence-recurrence bar", () => {
+		// 5 exact repeats: under every check's threshold (sentences trip at 6).
+		const text = `${filler(700)}${`${sentence}\n\n`.repeat(5)}`;
 		expect(detectDegeneration(text, MIN_REPEATS)).toBeUndefined();
+	});
+
+	test("nine identical sentences trip via sentence recurrence", () => {
+		const text = `${filler(700)}${`${sentence}\n\n`.repeat(MIN_REPEATS - 1)}`;
+		expect(detectDegeneration(text, MIN_REPEATS)).toContain("recurred");
 	});
 
 	test("blank lines between repeats do not hide the loop", () => {

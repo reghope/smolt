@@ -1,4 +1,8 @@
-<svg width="128" height="56" viewBox="0 9 32 14" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="smolt">
-  <!-- The smolt mark: the pixel fish, eye punched out. -->
-  <path fill-rule="evenodd" fill="#fa8072" d="M0 9H2V11H4V13H6V15H8V13H12V11H16V9H24V11H28V13H30V15H32V17H30V19H28V21H24V23H16V21H12V19H8V17H6V19H4V21H2V23H0V19H2V13H0ZM26 13H24V15H26Z"/>
+<svg width="136" height="76" viewBox="0 0 34 19" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="smolt">
+  <!-- The smolt mark: ><>, the fish everyone has already typed into a terminal. -->
+  <g fill="none" stroke="#fa8072" stroke-width="4.2" stroke-linecap="butt" stroke-linejoin="miter">
+    <path d="M2 3 7 9.5 2 16"/>
+    <path d="M19 3 14 9.5 19 16"/>
+    <path d="M23 3 31 9.5 23 16"/>
+  </g>
 </svg>

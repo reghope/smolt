@@ -26,16 +26,16 @@ const ANALYTICS_OPTIONS: Array<{ value: boolean; label: string }> = [
 	{ value: false, label: "Don't share" },
 ];
 
-// The smolt mark, half-block rendered from the same 32x14 pixel path as the
-// desktop and site logos.
+// The smolt mark: ><> drawn in blocks, the same three chevrons as the site
+// and desktop logos.
 const SETUP_LOGO_LINES = [
-	"██              ████████",
-	"████        ████████████████",
-	"  ████  ████████████████  ████",
-	"  ██████████████████████████████",
-	"  ████  ██████████████████████",
-	"████        ████████████████",
-	"██              ████████",
+	"██              ██  ██",
+	"  ██          ██      ██",
+	"    ██      ██          ██",
+	"      ██  ██              ██",
+	"    ██      ██          ██",
+	"  ██          ██      ██",
+	"██              ██  ██",
 ];
 
 /** First-time setup dialog: theme choice and analytics opt-in. */

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api.ts";
 import { cn } from "../lib/cn.ts";
 import { shortTokens } from "../lib/format.ts";
+import { AUTO_THINKING_ENTRY, thinkingLabel } from "../thinking.ts";
 import {
 	addImageFiles,
 	answerApproval,
@@ -43,7 +44,7 @@ import {
 	type SlashCommand,
 } from "../state/app.ts";
 import { useApp, useDraft } from "../state/useApp.ts";
-import { finishVoice, startVoice, toggleVoice } from "../state/voice.ts";
+import { finishVoice, startVoice, toggleVoice, voiceRunning } from "../state/voice.ts";
 import { Badge } from "./ui/badge.tsx";
 import { Button } from "./ui/button.tsx";
 import {
@@ -71,6 +72,21 @@ function pickByNumber(event: React.KeyboardEvent<HTMLElement>): void {
 		event.preventDefault();
 		target.click();
 	}
+}
+
+/**
+ * Send, closing dictation first if it is running.
+ *
+ * Enter while speaking means "that's the message": the microphone stops,
+ * the tail of the sentence is committed to the draft, and then the send
+ * happens — rather than the message going while the microphone stays open
+ * listening for a follow-up nobody is going to give it.
+ */
+function sendClosingVoice(): void {
+	void (async () => {
+		if (voiceRunning()) await finishVoice(true);
+		await send();
+	})();
 }
 
 function Chip({
@@ -281,9 +297,9 @@ function EffortPopover() {
 	const [preview, setPreview] = useState<string | null>(null);
 	// Extension entries ("auto") are modes, not points on the faster↔smarter
 	// axis: the slider carries only real levels, auto gets its own switch.
-	const levels = state.availableThinking.filter((level) => level !== "auto");
-	const autoAvailable = state.availableThinking.includes("auto");
-	const autoOn = (preview ?? state.thinking) === "auto";
+	const levels = state.availableThinking.filter((level) => level !== AUTO_THINKING_ENTRY);
+	const autoAvailable = state.availableThinking.includes(AUTO_THINKING_ENTRY);
+	const autoOn = (preview ?? state.thinking) === AUTO_THINKING_ENTRY;
 	const index = Math.max(0, levels.indexOf(preview ?? state.thinking));
 	if (state.thinking === "") return null;
 	return (
@@ -297,14 +313,17 @@ function EffortPopover() {
 			}}
 		>
 			<PopoverTrigger asChild>
-				<Chip title="Effort (Ctrl+Shift+E)" className="capitalize">
-					{state.thinking}
+				<Chip title="Effort (Ctrl+Shift+E)" className={cn(state.thinking !== AUTO_THINKING_ENTRY && "capitalize")}>
+					{thinkingLabel(state.thinking)}
 				</Chip>
 			</PopoverTrigger>
 			<PopoverContent align="end" className="w-64">
 				<div className="mb-3 flex items-center justify-between text-sm text-muted-foreground">
 					<span>
-						Effort <strong className="font-semibold capitalize text-foreground">{preview ?? state.thinking}</strong>
+						Effort{" "}
+						<strong className={cn("font-semibold text-foreground", !autoOn && "capitalize")}>
+							{thinkingLabel(preview ?? state.thinking)}
+						</strong>
 					</span>
 					<span
 						title="Higher effort means more reasoning before each step: slower, and better on hard problems."
@@ -318,14 +337,14 @@ function EffortPopover() {
 						type="button"
 						onClick={() => {
 							setPreview(null);
-							void chooseThinking("auto");
+							void chooseThinking(AUTO_THINKING_ENTRY);
 						}}
 						className={cn(
 							"mb-2 flex w-full items-baseline justify-between rounded-lg border px-3 py-1.5 text-left text-sm transition-colors hover:bg-accent",
 							autoOn && "border-salmon/50 bg-primary/10",
 						)}
 					>
-						<span className={cn(autoOn && "font-medium")}>Auto</span>
+						<span className={cn(autoOn && "font-medium")}>Auto thinking</span>
 						<span className="text-xs text-faint">picks the effort per task</span>
 					</button>
 				)}
@@ -1088,7 +1107,7 @@ export function Composer() {
 										return;
 									}
 								}
-								void send();
+								sendClosingVoice();
 								return;
 							}
 							if (event.key === "Escape") {
@@ -1213,7 +1232,7 @@ export function Composer() {
 											? "bg-destructive text-destructive-foreground hover:bg-destructive/90 disabled:bg-destructive/40"
 											: "disabled:bg-input disabled:text-faint",
 									)}
-									onClick={() => (showStop ? void abortTurn() : void send())}
+									onClick={() => (showStop ? void abortTurn() : sendClosingVoice())}
 								>
 									<Icon name={stopping ? "spinner" : showStop ? "stop" : "send"} className={cn(stopping && "animate-spin")} />
 								</Button>

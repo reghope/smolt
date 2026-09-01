@@ -23,6 +23,7 @@ import {
 	type ThemeChoice,
 	type WorktreeInfo,
 } from "../state/app.ts";
+import { AUTO_THINKING_ENTRY, thinkingLabel } from "../thinking.ts";
 import { useApp } from "../state/useApp.ts";
 import { Button } from "./ui/button.tsx";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog.tsx";
@@ -505,10 +506,13 @@ export function SettingsDialog() {
 													key={level}
 													variant="outline"
 													size="sm"
-													className={cn("capitalize", level === state.defaultThinking && "bg-primary/10 text-foreground")}
+													className={cn(
+														level !== AUTO_THINKING_ENTRY && "capitalize",
+														level === state.defaultThinking && "bg-primary/10 text-foreground",
+													)}
 													onClick={() => setDefaultThinking(level)}
 												>
-													{level}
+													{thinkingLabel(level)}
 												</Button>
 											))}
 										</div>

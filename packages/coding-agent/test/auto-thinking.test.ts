@@ -34,12 +34,44 @@ describe("classify", () => {
 		expect(classify(js).level).toBe("high");
 	});
 
-	test("reasoning-heavy verbs classify high", () => {
+	test("cause-hunting verbs classify high", () => {
 		for (const text of [
 			"debug why the pool drains tokens",
+			"investigate the flaky session teardown",
+			"why does compaction truncate history?",
+		]) {
+			expect(classify(text).level).toBe("high");
+		}
+	});
+
+	test("design-shaped work classifies medium, not high", () => {
+		for (const text of [
 			"refactor the session manager",
 			"design a migration path for the schema",
-			"why does compaction truncate history?",
+			"tighten the performance of the transcript renderer",
+		]) {
+			expect(classify(text).level).toBe("medium");
+		}
+	});
+
+	test("fixes paired with failure language classify high", () => {
+		for (const text of [
+			"fix the bug in the retry loop",
+			"please fix auto thinking, it seems to always pick low",
+			"resolve the flaky test issue",
+			"fix the footer, it should be pinned instead of scrolling",
+		]) {
+			const result = classify(text);
+			expect(result.level).toBe("high");
+			expect(result.confidence).toBe("confident");
+		}
+	});
+
+	test("described misbehavior is a bug report even without a fix verb", () => {
+		for (const text of [
+			"the settings dialog crashes when I open it twice",
+			"the sync spinner hangs after resume",
+			"saving stopped working after the last update",
 		]) {
 			expect(classify(text).level).toBe("high");
 		}
@@ -51,15 +83,34 @@ describe("classify", () => {
 
 	test("long prompts and multi-step requests classify medium", () => {
 		expect(classify("x".repeat(2500)).level).toBe("medium");
-		expect(classify("do three things:\n1) read the file\n2) fix the bug").level).toBe("medium");
+		expect(classify("do three things:\n1) read the file\n2) update the docs").level).toBe("medium");
 		expect(classify("review this:\n```ts\nconst x = 1;\n```").level).toBe("medium");
 	});
 
-	test("short scoped prompts with a file path classify low", () => {
+	test("substantive change requests classify medium", () => {
+		for (const text of [
+			"add retry support to the uploader",
+			"implement dark mode for the settings dialog",
+			"update the composer to send drafts on blur",
+		]) {
+			const result = classify(text);
+			expect(result.level).toBe("medium");
+			expect(result.reason).toContain("substantive");
+		}
+	});
+
+	test("cosmetic edits classify low even with change verbs", () => {
+		expect(classify("fix the typo in the welcome banner").level).toBe("low");
 		expect(classify("rename fetchData to loadPosts in src/api/posts.ts").level).toBe("low");
 	});
 
-	test("no strong signal falls back to the lowest thinking, uncertain", () => {
+	test("substantial prompts with no clear signal fall back to low, uncertain", () => {
+		const result = classify("go through the composer component and tidy the props so they group logically");
+		expect(result.level).toBe("low");
+		expect(result.confidence).toBe("uncertain");
+	});
+
+	test("short vague prompts fall back to the lowest thinking, uncertain", () => {
 		const result = classify("look at the build output when you get a chance");
 		expect(result.level).toBe("minimal");
 		expect(result.confidence).toBe("uncertain");
@@ -191,6 +242,21 @@ describe("auto-thinking extension", () => {
 		await smolt.fire("input", { text: "debug why the retry loop spins", source: "interactive" });
 		expect(smolt.level).toBe("high");
 		expect(smolt.status?.text).toContain("high");
+	});
+
+	test("a model missing the classified level clamps down, not up", async () => {
+		// e.g. a sparsely-mapped model with no 'high': the core clamp alone
+		// would round a high classification up to xhigh; auto thinking must
+		// prefer the cheaper neighbor instead.
+		smolt.modelRef = {
+			provider: "test",
+			id: "no-high",
+			reasoning: true,
+			thinkingLevelMap: { high: null, xhigh: "xhigh", max: "max" },
+		};
+		await smolt.fire("session_start");
+		await smolt.fire("input", { text: "debug why the retry loop spins", source: "interactive" });
+		expect(smolt.level).toBe("medium");
 	});
 
 	test("continuations keep the task's level", async () => {

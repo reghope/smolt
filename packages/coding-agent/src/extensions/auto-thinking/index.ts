@@ -4,7 +4,7 @@ import type { ThinkingLevel } from "@smolt/agent-core";
 import { clampThinkingLevel, getSupportedThinkingLevels } from "@smolt/ai/compat";
 import { getAgentDir } from "../../config.ts";
 import type { ExtensionAPI, ExtensionContext } from "../../core/extensions/types.ts";
-import { type Classification, classify, escalationLadder, nextRung } from "./classifier.ts";
+import { CANONICAL_LEVELS, type Classification, classify, escalationLadder, nextRung } from "./classifier.ts";
 
 /**
  * Auto thinking: the session classifies how much thinking each task needs
@@ -12,10 +12,11 @@ import { type Classification, classify, escalationLadder, nextRung } from "./cla
  *
  * When the "auto" entry is selected in the thinking selector, every real user
  * message is classified by a zero-usage heuristic (classifier.ts) before the
- * first request goes out. Confident bands map directly — conversational noise
- * runs without thinking, diagnosis and design requests run high — and the
- * uncertain band starts at the model's lowest thinking level rather than
- * paying for a classification call. If a task then struggles, escalation
+ * first request goes out. Conversational noise runs without thinking,
+ * diagnosis and design requests run high, substantive change requests run
+ * medium, and only prompts with no work signal at all start at the bottom
+ * bands rather than paying for a classification call. If a task then
+ * struggles, escalation
  * bumps the level one rung at a time: two consecutive tool errors, or a
  * burst of provider error responses, move minimal → low → medium, capped at
  * medium and never down-escalating mid-task. Every decision is visible in
@@ -33,6 +34,14 @@ export const AUTO_THINKING_ENTRY = "auto-thinking";
 
 /** The selector entry id. Distinct from every ThinkingLevel value. */
 const ENTRY_VALUE = "auto";
+
+/**
+ * What the mode is called wherever a person reads it: the selector entry, the
+ * footer status, the command output. The entry *value* stays "auto" — it is
+ * persisted as a default and matched by `/thinking auto`, so renaming that
+ * would break both.
+ */
+const MODE_NAME = "auto thinking";
 
 /** Footer status key. */
 const STATUS_KEY = "auto-thinking";
@@ -123,11 +132,11 @@ export function createAutoThinkingExtension(smolt: ExtensionAPI): AutoThinkingHa
 
 	const footerText = (): string => {
 		if (!state.autoMode) return "";
-		if (state.taskLevel === null) return "auto: on";
+		if (state.taskLevel === null) return `${MODE_NAME}: on`;
 		const level = state.escalated
 			? `${state.taskLevel} (escalated: ${state.reason})`
 			: `${state.taskLevel} · ${state.reason}`;
-		return `auto: ${level}`;
+		return `${MODE_NAME}: ${level}`;
 	};
 
 	const paint = (ctx: ExtensionContext): void => {
@@ -136,7 +145,7 @@ export function createAutoThinkingExtension(smolt: ExtensionAPI): AutoThinkingHa
 			ctx.ui.setWidget(STATUS_KEY, undefined);
 			return;
 		}
-		const text = supportsThinking(ctx) ? footerText() : "auto: model has no thinking";
+		const text = supportsThinking(ctx) ? footerText() : `${MODE_NAME}: model has no thinking`;
 		ctx.ui.setStatus(STATUS_KEY, text);
 		// Status only: a widget for this used to render as stray "auto: on"
 		// text below the TUI footer, and no surface shows a standalone widget
@@ -145,13 +154,25 @@ export function createAutoThinkingExtension(smolt: ExtensionAPI): AutoThinkingHa
 	};
 
 	/**
-	 * The level the session will actually hold after setting `level`: the
-	 * core clamps to model capabilities, and the thinking_level_select event
-	 * reports the effective level, so it must be expected in advance (the
-	 * event fires synchronously inside setThinkingLevel).
+	 * The level the session will actually hold: the classification, fitted to
+	 * the model. The core's own clamp rounds UP when a model lacks the
+	 * requested level, which on sparsely-mapped models collapsed every
+	 * classification into the top band — the opposite of what auto thinking
+	 * is for. Prefer the nearest supported level at or below the
+	 * classification ("off" only when off was asked for), and round up only
+	 * when nothing cheaper exists.
 	 */
-	const effectiveLevel = (level: ThinkingLevel, ctx: ExtensionContext): ThinkingLevel =>
-		ctx.model ? (clampThinkingLevel(ctx.model, level) as ThinkingLevel) : level;
+	const effectiveLevel = (level: ThinkingLevel, ctx: ExtensionContext): ThinkingLevel => {
+		const model = ctx.model;
+		if (!model) return level;
+		const supported = getSupportedThinkingLevels(model) as ThinkingLevel[];
+		if (supported.includes(level)) return level;
+		for (let i = CANONICAL_LEVELS.indexOf(level) - 1; i > 0; i--) {
+			const candidate = CANONICAL_LEVELS[i]!;
+			if (supported.includes(candidate)) return candidate;
+		}
+		return clampThinkingLevel(model, level) as ThinkingLevel;
+	};
 
 	/** Apply a classification to the session, deduplicating no-op sets. */
 	const applyLevel = (classification: Classification, ctx: ExtensionContext): void => {
@@ -164,7 +185,9 @@ export function createAutoThinkingExtension(smolt: ExtensionAPI): AutoThinkingHa
 		state.apiErrorCount = 0;
 		state.expectedLevel = effective === previous ? null : effective;
 		if (effective !== previous) {
-			smolt.setThinkingLevel(classification.level);
+			// Set the fitted level, not the raw classification: the core's own
+			// clamp would round the raw one up on models missing that level.
+			smolt.setThinkingLevel(effective);
 		}
 		paint(ctx);
 		smolt.appendEntry(AUTO_THINKING_ENTRY, {
@@ -189,7 +212,7 @@ export function createAutoThinkingExtension(smolt: ExtensionAPI): AutoThinkingHa
 			return;
 		}
 		state.expectedLevel = effective;
-		smolt.setThinkingLevel(rung);
+		smolt.setThinkingLevel(effective);
 		state.taskLevel = effective;
 		state.reason = cause;
 		state.escalated = true;
@@ -302,7 +325,7 @@ export function createAutoThinkingExtension(smolt: ExtensionAPI): AutoThinkingHa
 
 	smolt.registerThinkingLevelEntry({
 		value: ENTRY_VALUE,
-		label: "auto",
+		label: MODE_NAME,
 		description: "Classify thinking per task · no extra usage",
 		isCurrent: () => state.autoMode,
 		onSelect: (ctx) => {

@@ -53,3 +53,18 @@ export function thinkingSummary(reasoning: string): string {
 	}
 	return phrase.charAt(0).toUpperCase() + phrase.slice(1);
 }
+
+/** The selector entry the auto-thinking extension registers, as it arrives over RPC. */
+export const AUTO_THINKING_ENTRY = "auto";
+
+/**
+ * Display name for a thinking level or selector entry.
+ *
+ * Real levels are single lowercase words the UI title-cases itself. The auto
+ * entry arrives as the bare value "auto", which reads as a mode rather than a
+ * point on the effort axis, so it gets its full name — and its own casing,
+ * since `capitalize` would render it "Auto Thinking".
+ */
+export function thinkingLabel(level: string): string {
+	return level === AUTO_THINKING_ENTRY ? "Auto thinking" : level;
+}

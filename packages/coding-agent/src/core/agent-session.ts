@@ -1255,6 +1255,10 @@ export class AgentSession {
 				role: "user",
 				content: userContent,
 				timestamp: Date.now(),
+				// A prompt an extension sent is a brief, not the reader talking:
+				// marked here so every surface can render it collapsed rather
+				// than putting a command's instructions in the reader's voice.
+				...(options?.source === "extension" ? { internal: true } : {}),
 			});
 
 			// Inject any pending "nextTurn" messages as context alongside the user message

@@ -422,6 +422,13 @@ export interface UserMessage {
 	role: "user";
 	content: string | (TextContent | ImageContent)[];
 	timestamp: number; // Unix timestamp in milliseconds
+	/**
+	 * A brief the harness sent on an extension's behalf, not something the
+	 * person typed. It is ordinary context to the model; surfaces render it
+	 * collapsed so a command's instructions do not fill the transcript in the
+	 * reader's own voice. Local-only, like `timestamp` — never sent upstream.
+	 */
+	internal?: boolean;
 }
 
 export interface AssistantMessage {

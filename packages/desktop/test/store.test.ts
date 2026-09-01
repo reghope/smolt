@@ -170,6 +170,29 @@ describe("run lifecycle", () => {
 	});
 });
 
+describe("extension briefs", () => {
+	test("an internal user message is marked, an ordinary one is not", () => {
+		const brief = fromAgentMessage({
+			role: "user",
+			content: [{ type: "text", text: "Review code changes for real defects." }],
+			internal: true,
+		});
+		expect(brief?.internal).toBe(true);
+		const typed = fromAgentMessage({ role: "user", content: [{ type: "text", text: "hello" }] });
+		expect(typed?.internal).toBeUndefined();
+	});
+
+	test("a streamed internal message keeps the mark", () => {
+		const state = feed([
+			{
+				type: "message_start",
+				message: { role: "user", content: [{ type: "text", text: "Chart a wayfinder map." }], internal: true },
+			},
+		]);
+		expect(state.messages[0]?.internal).toBe(true);
+	});
+});
+
 describe("fromAgentMessage", () => {
 	test("maps assistant content blocks, skipping empties", () => {
 		const mapped = fromAgentMessage({

@@ -77,7 +77,10 @@ type _AiModelFieldsAccountedFor = Assert<
 type _AiModelCostFieldsAccountedFor = Assert<
 	ExactKeys<Model<Api>["cost"], "input" | "output" | "cacheRead" | "cacheWrite" | "tiers">
 >;
-type _AiUserMessageFieldsAccountedFor = Assert<ExactKeys<UserMessage, "role" | "content" | "timestamp">>;
+// `internal` marks a brief an extension sent rather than something the person
+// typed. It is a rendering hint the TUI and desktop use to collapse the brief;
+// the web transcript has no collapsed form for it yet, so it stays server-side.
+type _AiUserMessageFieldsAccountedFor = Assert<ExactKeys<UserMessage, "role" | "content" | "timestamp" | "internal">>;
 type _AiAssistantMessageFieldsAccountedFor = Assert<
 	ExactKeys<
 		AssistantMessage,

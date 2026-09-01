@@ -792,6 +792,14 @@ type Segment =
  * switched into mid-turn is drawn from its file, which cannot hold a
  * message still being written, and the working line belongs to the turn.
  */
+/** A brief opening sentence, for the collapsed line. */
+function briefSummary(prose: string): string {
+	const firstLine = prose.split("
+").find((line) => line.trim() !== "")?.trim() ?? "";
+	const sentence = /^(.{0,120}?[.!?])(s|$)/.exec(firstLine)?.[1] ?? firstLine;
+	return sentence.length > 120 ? `${sentence.slice(0, 117)}...` : sentence;
+}
+
 function buildSegments(messages: ChatMessage[], running: boolean): Segment[] {
 	const segments: Segment[] = [];
 	let run: ToolBlock[] = [];
@@ -962,6 +970,32 @@ export function Transcript() {
 					)}
 					{buildSegments(state.chat.messages, state.chat.streaming && !state.chatLoading).map(
 						(segment, position) => {
+						if (segment.kind === "user" && segment.message.internal === true) {
+							// A brief an extension sent, not the reader talking: one
+							// quiet line that opens, and no "edit and resend" — there
+							// is no message of theirs here to rewind to.
+							const prose = messageProse(segment.message);
+							return (
+								<Disclosure
+									key={`u${segment.index}`}
+									dkey={`brief-${segment.index}`}
+									className="group/brief my-4 text-sm text-muted-foreground"
+								>
+									<summary className="flex cursor-pointer list-none select-none items-baseline gap-2 [&::-webkit-details-marker]:hidden">
+										<span className="flex-none text-xs text-faint">Brief</span>
+										<span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap group-open/brief:whitespace-normal">
+											{briefSummary(prose)}
+										</span>
+										<span className="flex flex-none items-center text-faint transition-transform group-open/brief:rotate-90">
+											<Icon name="chevron" />
+										</span>
+									</summary>
+									<div className="mt-2 border-l-2 border-border pl-3">
+										<Markdown text={prose} />
+									</div>
+								</Disclosure>
+							);
+						}
 						if (segment.kind === "user") {
 							const prose = messageProse(segment.message);
 							return (

@@ -121,6 +121,7 @@ import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
+import { BriefMessageComponent } from "./components/brief-message.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
 import { CustomEditor } from "./components/custom-editor.ts";
 import { CustomEntryComponent } from "./components/custom-entry.ts";
@@ -3654,6 +3655,14 @@ export class InteractiveMode {
 				if (textContent) {
 					if (this.chatContainer.children.length > 0) {
 						this.chatContainer.addChild(new Spacer(1));
+					}
+					// A brief an extension sent is not the reader talking: one
+					// collapsed line, expandable like any other output.
+					if (message.internal === true) {
+						const briefComponent = new BriefMessageComponent(textContent, this.getMarkdownThemeWithSettings());
+						briefComponent.setExpanded(this.toolOutputExpanded);
+						this.chatContainer.addChild(briefComponent);
+						break;
 					}
 					const skillBlock = parseSkillBlock(textContent);
 					if (skillBlock) {

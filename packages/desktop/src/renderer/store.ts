@@ -44,6 +44,12 @@ export interface ChatMessage {
 	role: "user" | "assistant" | "system";
 	blocks: Block[];
 	streaming?: boolean;
+	/**
+	 * A brief an extension sent on the harness's behalf (the instructions
+	 * behind /review, /wayfinder, a battletest kickoff) rather than something
+	 * the reader typed. Rendered collapsed.
+	 */
+	internal?: boolean;
 	/** Thinking level the session held when this message streamed. */
 	thinkingLevel?: string;
 	/** How long the turn took, kept so the footer survives the turn. */
@@ -113,7 +119,7 @@ export function fromAgentMessage(message: Record<string, unknown>): ChatMessage 
 	if (role === "user") {
 		const blocks: Block[] = [{ kind: "text", text: textOf(message.content) }];
 		for (const image of imagesOf(message.content)) blocks.push({ kind: "image", ...image });
-		return { role: "user", blocks };
+		return { role: "user", blocks, ...(message.internal === true ? { internal: true } : {}) };
 	}
 	if (role !== "assistant") return null;
 	const blocks: Block[] = [];

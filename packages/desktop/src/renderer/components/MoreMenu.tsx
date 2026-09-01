@@ -61,7 +61,10 @@ export function MoreMenu() {
 					<DropdownMenuShortcut>Ctrl+Shift+D</DropdownMenuShortcut>
 				</DropdownMenuItem>
 				<DropdownMenuSeparator />
-				<div className="px-2.5 py-1 font-mono text-xs text-faint">smolt {state.appInfo.version}</div>
+				<div className="flex items-center gap-1.5 px-2.5 py-1 font-mono text-xs text-faint">
+					<span className="font-bold tracking-[-0.08em] text-salmon-text" aria-hidden="true">&gt;&lt;&gt;</span>
+					smolt {state.appInfo.version}
+				</div>
 			</DropdownMenuContent>
 		</DropdownMenu>
 	);

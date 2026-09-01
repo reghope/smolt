@@ -4,6 +4,7 @@ import { Type } from "typebox";
 // Type-only import: a standalone install of this module outside the smolt
 // tree switches this single line to `from "smolt"`.
 import type { ExtensionAPI } from "../../core/extensions/types.ts";
+import { type HindsightStore, wireHindsight } from "./hindsight.ts";
 import { MemoryStore, memoryTool } from "./memory.ts";
 import { SessionStore } from "./sessions.ts";
 import { SkillManager, skillManageTool } from "./skills.ts";
@@ -22,6 +23,10 @@ import { SkillManager, skillManageTool } from "./skills.ts";
  * - The `session_search` tool searches every prior session (SQLite FTS5
  *   when available, plain scan otherwise) with four calling shapes:
  *   discovery, scroll, read, and browse.
+ * - Hindsight (observed learning): every tool call is measured, failures
+ *   are classified, and recurring patterns feed back as "Tool field notes"
+ *   in the frozen prompt block plus reactive remedy hints on known
+ *   failures. See hindsight.ts.
  * - A periodic nudge reminds the model to persist anything durable.
  */
 
@@ -55,6 +60,10 @@ function stateDbPath(): string {
 	return join(getAgentDir(), "state.db");
 }
 
+function hindsightConfigPath(): string {
+	return join(getAgentDir(), "hindsight.json");
+}
+
 const LEARNING_INSTRUCTIONS = `## Self-learning
 
 You maintain durable memory and skills across sessions.
@@ -86,6 +95,8 @@ export interface LearningPaths {
 	skillsRoot: string;
 	sessionsRoot: string;
 	stateDbPath: string;
+	/** Optional hindsight.json path; defaults apply when absent. */
+	hindsightConfigPath?: string;
 }
 
 export default function learningExtension(smolt: ExtensionAPI): void {
@@ -94,6 +105,7 @@ export default function learningExtension(smolt: ExtensionAPI): void {
 		skillsRoot: skillsRoot(),
 		sessionsRoot: sessionsRoot(),
 		stateDbPath: stateDbPath(),
+		hindsightConfigPath: hindsightConfigPath(),
 	});
 }
 
@@ -101,12 +113,20 @@ export interface LearningStores {
 	memory: MemoryStore;
 	skills: SkillManager;
 	sessions: SessionStore;
+	hindsight: HindsightStore;
 }
 
 export function createLearningExtension(smolt: ExtensionAPI, paths: LearningPaths): LearningStores {
 	const memory = new MemoryStore(paths.memoriesDir);
 	const skills = new SkillManager(paths.skillsRoot);
 	const sessions = new SessionStore(paths.sessionsRoot, paths.stateDbPath);
+	// Hindsight (observed learning) shares state.db but versions its own
+	// tables; its notes are folded into the frozen block built below.
+	const hindsight = wireHindsight(smolt, {
+		dbPath: paths.stateDbPath,
+		configPath: paths.hindsightConfigPath,
+		injectNotes: false,
+	});
 
 	let frozen: string | undefined;
 	let turnCount = 0;
@@ -134,6 +154,10 @@ export function createLearningExtension(smolt: ExtensionAPI, paths: LearningPath
 			const blocks = [memory.formatForSystemPrompt("memory"), memory.formatForSystemPrompt("user")].filter(
 				(block) => block !== "",
 			);
+			if (hindsight.config.enabled) {
+				const notes = await hindsight.store.distillNotes(hindsight.config);
+				if (notes !== "") blocks.push(notes);
+			}
 			frozen = [LEARNING_INSTRUCTIONS, ...blocks].join("\n\n");
 		}
 		const systemPrompt = `${event.systemPrompt}\n\n${frozen}`;
@@ -361,5 +385,5 @@ export function createLearningExtension(smolt: ExtensionAPI, paths: LearningPath
 		},
 	});
 
-	return { memory, skills, sessions };
+	return { memory, skills, sessions, hindsight: hindsight.store };
 }

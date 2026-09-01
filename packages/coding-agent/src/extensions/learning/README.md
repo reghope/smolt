@@ -14,6 +14,21 @@ A self-contained extension giving the agent durable memory across sessions:
   (plain-scan fallback), four shapes: discovery (adaptive hydration with
   bookends), scroll, read, browse. Tool results are indexed under role
   `tool`, reachable via `role_filter`.
+- **hindsight** — observed (measured, not self-reported) learning about
+  tool usage. Every tool call is recorded with duration and outcome,
+  failures are normalized into error classes, and retries are linked to
+  the failure they retried. Two read paths: a "Tool field notes" block
+  (recurring failure patterns with real counts) folded into the frozen
+  prompt block at session start, and a reactive remedy hint appended to a
+  failing tool result the moment a known error class with an established
+  fix recurs (at most once per tool+class per session). Rows live in
+  `state.db` but in self-versioned `hindsight_*` tables with additive
+  migrations — the session index's drop-and-rebuild never touches them,
+  which also means `state.db` is no longer safe to delete casually: it now
+  holds source-of-truth telemetry alongside the rebuildable index. Config
+  via `~/.smolt/agent/hindsight.json`: `{ "enabled": true,
+  "notesBudgetChars": 1200, "minSamples": 5 }`. `hindsight.ts` is also a
+  complete standalone extension (default export) when copied out alone.
 - A periodic nudge (every 8 turns) reminds the model to persist anything
   durable.
 
@@ -28,5 +43,5 @@ type import at `smolt`, and it loads like any other
 extension. In-tree it is registered as a built-in in
 `../index.ts`.
 
-Tests live in `test/learning-*.test.ts` (memory, skills, sessions, and
-extension wiring — 130 tests).
+Tests live in `test/learning-*.test.ts` (memory, skills, sessions,
+hindsight, and extension wiring).

@@ -37,6 +37,12 @@ class FakeSmolt {
 		this.tools.set(tool.name, tool);
 	}
 
+	registerCommand(): void {}
+
+	sendMessage(): void {}
+
+	sendUserMessage(): void {}
+
 	async fire(event: string, payload: Record<string, unknown> = {}): Promise<unknown> {
 		let result: unknown;
 		for (const handler of this.handlers.get(event) ?? []) {
@@ -75,6 +81,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	stores.sessions.close();
+	stores.hindsight.close();
 	rmSync(dir, { recursive: true, force: true });
 });
 

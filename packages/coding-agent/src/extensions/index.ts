@@ -6,6 +6,7 @@ import learningExtension from "./learning/index.ts";
 import llamaExtension from "./llama/index.ts";
 import permissionsExtension from "./permissions/index.ts";
 import { poolExtension } from "./pool/index.ts";
+import reviewExtension from "./review/index.ts";
 import screenshotExtension from "./screenshot/index.ts";
 import subagentsExtension from "./subagents/index.ts";
 import tasteExtension from "./taste/index.ts";
@@ -26,6 +27,7 @@ export const builtInExtensions: InlineExtension[] = [
 	{ name: "taste", factory: tasteExtension, hidden: true },
 	{ name: "subagents", factory: subagentsExtension, hidden: true },
 	{ name: "battletest", factory: battleTestExtension, hidden: true },
+	{ name: "review", factory: reviewExtension, hidden: true },
 	{ name: "pool", factory: poolExtension, hidden: true },
 	{ name: "telegram", factory: telegramExtension, hidden: true },
 ];

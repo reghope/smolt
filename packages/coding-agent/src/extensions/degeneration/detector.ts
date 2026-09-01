@@ -115,16 +115,48 @@ function detectTemplatedLines(text: string, minRepeats: number): string | undefi
  */
 function detectPeriodicTail(text: string, minRepeats: number): string | undefined {
 	const tail = text.slice(-PERIODIC_TAIL_WINDOW);
-	const maxPeriod = Math.min(MAX_PERIOD, Math.floor(tail.length / minRepeats));
+	const shortBar = Math.max(4, Math.ceil(minRepeats / 2));
+	const maxPeriod = Math.min(MAX_PERIOD, Math.floor(tail.length / shortBar));
 	for (let period = MIN_UNIT_LENGTH; period <= maxPeriod; period++) {
+		// Multi-sentence units earn a lower repeat bar: five exact copies
+		// of a 130-char unit is already 650 identical characters — never
+		// legitimate. Single-sentence-sized units keep the full count so a
+		// deliberate "repeat this line" stays possible.
+		const required = period >= 80 ? shortBar : minRepeats;
 		const unit = tail.slice(-period);
 		if (!isCountableUnit(unit.trim())) continue;
 		let repeats = 1;
-		while (repeats < minRepeats && tail.slice(-(repeats + 1) * period, -repeats * period) === unit) {
+		while (repeats < required && tail.slice(-(repeats + 1) * period, -repeats * period) === unit) {
 			repeats += 1;
 		}
-		if (repeats >= minRepeats) {
+		if (repeats >= required) {
 			return `the fragment "${clip(unit.trim())}" repeated ${repeats}+ times`;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Trip on permutation loops: the same exact sentence resurfacing many times
+ * in a short span while its neighbors merely reshuffle the same words
+ * ("The highlighter highlights the text. The text is highlighted by the
+ * highlighter. ..."). Exact-repeat and template checks pass these because
+ * consecutive units differ; scattered exact recurrence gives them away.
+ */
+function detectRepeatedSentences(text: string, minRepeats: number): string | undefined {
+	const tail = text.slice(-PERIODIC_TAIL_WINDOW);
+	const sentences = tail
+		.split(/(?<=[.!?])\s+/)
+		.map((s) => normalizeLine(s))
+		.filter((s) => isCountableUnit(s) && s.length >= 24);
+	if (sentences.length < 8) return undefined;
+	const threshold = Math.max(5, Math.ceil(minRepeats * 0.6));
+	const counts = new Map<string, number>();
+	for (const sentence of sentences) {
+		const n = (counts.get(sentence) ?? 0) + 1;
+		counts.set(sentence, n);
+		if (n >= threshold) {
+			return `the sentence "${clip(sentence)}" recurred ${n}+ times in quick succession`;
 		}
 	}
 	return undefined;
@@ -139,7 +171,8 @@ export function detectDegeneration(text: string, minRepeats: number): string | u
 	return (
 		detectRepeatedLines(text, minRepeats) ??
 		detectTemplatedLines(text, minRepeats) ??
-		detectPeriodicTail(text, minRepeats)
+		detectPeriodicTail(text, minRepeats) ??
+		detectRepeatedSentences(text, minRepeats)
 	);
 }
 

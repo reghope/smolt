@@ -99,6 +99,50 @@ describe("detectDegeneration", () => {
 		const lines = Array.from({ length: 50 }, (_, i) => `Check item ${i}: verified against source ${i * 7}.`);
 		expect(detectDegeneration(filler(200) + lines.join("\n"), MIN_REPEATS)).toBeUndefined();
 	});
+
+	test("long alternating pairs trip at the reduced repeat bar", () => {
+		// The A/B loop shape: a ~130-char two-sentence unit, repeated 7x —
+		// under the full minRepeats bar but far past the long-unit bar.
+		const pair =
+			"The mp4 video document (native playback) case is handled by content.js. " +
+			"The image document case is handled by content.js. Continue: ";
+		const text = filler(100) + pair.repeat(7);
+		expect(detectDegeneration(text, MIN_REPEATS)).toContain("the fragment");
+	});
+
+	test("four copies of a long unit stay under the bar", () => {
+		const pair =
+			"The mp4 video document (native playback) case is handled by content.js. " +
+			"The image document case is handled by content.js. Continue: ";
+		expect(detectDegeneration(filler(600) + pair.repeat(4), MIN_REPEATS)).toBeUndefined();
+	});
+
+	test("trips on a permutation loop where one sentence keeps recurring", () => {
+		// The real glm failure shape: same words reshuffled, one exact
+		// sentence resurfacing between the variants.
+		const variants = [
+			"The text is highlighted by the highlighter.",
+			"The user uses the highlighter to highlight the text.",
+			"The highlighter is used by the user.",
+			"The text is highlighted.",
+		];
+		const parts: string[] = [];
+		for (let i = 0; i < 6; i++) {
+			parts.push("The highlighter highlights the text.");
+			parts.push(variants[i % variants.length]!);
+			parts.push(variants[(i + 1) % variants.length]!);
+		}
+		expect(detectDegeneration(filler(300) + parts.join(" "), MIN_REPEATS)).toContain("recurred");
+	});
+
+	test("prose that repeats a quoted error a few times stays quiet", () => {
+		const parts: string[] = [];
+		for (let i = 0; i < 4; i++) {
+			parts.push(`Attempt ${i} failed with "Cannot find module playwright" so I checked path ${i}.`);
+			parts.push("Cannot find module playwright appeared in the output again.");
+		}
+		expect(detectDegeneration(filler(400) + parts.join(" "), MIN_REPEATS)).toBeUndefined();
+	});
 });
 
 describe("DegenerationWatcher", () => {

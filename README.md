@@ -4,11 +4,11 @@
 
 # Smolt
 
-Smolt is a fork of the [Pi agent harness](https://github.com/earendil-works/pi) — a minimal, self-extensible coding agent. The CLI is `smolt`, config lives in `~/.smolt/`, and everything else works the way Pi does.
+Smolt is a minimal, self-extensible coding agent that keeps what it learns. The CLI is `smolt` and config lives in `~/.smolt/`.
 
 > A *smolt* is a young salmon at the stage where it adapts to new water and leaves the river it was born in.
 
-Upstream is by Mario Zechner and the Pi contributors, MIT licensed. This fork keeps that license and that credit; see [Pi's documentation](https://pi.dev/docs/latest) for anything not covered here, or just ask the agent to explain itself.
+Smolt was originally based on the [Pi agent harness](https://github.com/earendil-works/pi) by Mario Zechner and the Pi contributors, MIT licensed, and has diverged substantially since. This fork keeps that license and that credit. For anything this README does not cover, ask the agent to explain itself.
 
 ## Packages
 

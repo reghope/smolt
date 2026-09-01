@@ -1,7 +1,7 @@
 {
 	"name": "smolt",
 	"version": "0.2.2",
-	"description": "smolt - a coding agent that keeps what it learns: curated memory, self-authored skills, and session recall.",
+	"description": "smolt: a coding agent that keeps what it learns. Curated project memory and full-text recall over every past session.",
 	"type": "module",
 	"smoltConfig": {
 		"name": "smolt",

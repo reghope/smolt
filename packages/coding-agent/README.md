@@ -8,7 +8,7 @@
   <a href="https://github.com/reghope/smolt/blob/main/LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-b45f43?style=flat-square" /></a>
 </p>
 
-<p align="center"><em>The coding agent that keeps what it learns. A fork of the <a href="https://github.com/earendil-works/pi">Pi agent harness</a>.</em></p>
+<p align="center"><em>The coding agent that keeps what it learns. Originally based on the <a href="https://github.com/earendil-works/pi">Pi agent harness</a>.</em></p>
 
 ---
 

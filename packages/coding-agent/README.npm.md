@@ -10,7 +10,7 @@
 
 ---
 
-smolt is a minimal terminal coding agent with one addition that compounds: it remembers. Curated memory, self-authored skills, and full-text recall over every past session — so Tuesday's dead end never costs you Thursday.
+smolt is a minimal terminal coding agent with one addition that compounds: it remembers. Curated project memory and full-text recall over every past session, so Tuesday's dead end never costs you Thursday.
 
 ## Install
 

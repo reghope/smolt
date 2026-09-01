@@ -2,6 +2,33 @@ import { describe, expect, test } from "vitest";
 import { escapeHtml, renderMarkdown } from "../src/renderer/markdown.ts";
 
 describe("renderMarkdown", () => {
+	test("renders GFM tables with alignment and inline markup in cells", () => {
+		const html = renderMarkdown("| # | Finding | Sev |\n|---|:---:|---:|\n| 1 | ~~gone~~ **bad** | major |");
+		expect(html).toContain("<table><thead><tr><th>#</th>");
+		expect(html).toContain(`<th style="text-align:center">Finding</th>`);
+		expect(html).toContain(`<th style="text-align:right">Sev</th>`);
+		expect(html).toContain("<td>1</td>");
+		expect(html).toContain("<del>gone</del> <strong>bad</strong>");
+		expect(html).toContain("</tbody></table>");
+	});
+
+	test("pipe lines without a separator row fall back to a paragraph", () => {
+		const html = renderMarkdown("| just | pipes |\nplain text after");
+		expect(html).not.toContain("<table>");
+		expect(html).toContain("| just | pipes |");
+	});
+
+	test("renders strikethrough and horizontal rules", () => {
+		const html = renderMarkdown("before\n\n---\n\nafter with ~~struck~~ text");
+		expect(html).toContain("<hr>");
+		expect(html).toContain("<del>struck</del>");
+	});
+
+	test("a table at the end of the message still closes", () => {
+		const html = renderMarkdown("| a | b |\n|---|---|\n| 1 | 2 |");
+		expect(html).toContain("<td>2</td></tr></tbody></table>");
+	});
+
 	test("escapes HTML before applying markup", () => {
 		const html = renderMarkdown('<script>alert("x")</script>');
 		expect(html).not.toContain("<script>");

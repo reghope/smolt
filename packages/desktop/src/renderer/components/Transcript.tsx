@@ -157,7 +157,7 @@ function ToolRow({ block, dkey }: { block: ToolBlock; dkey: string }) {
 					{state === "aborted" ? "⏹" : "⏺"}
 				</span>
 				<span className={cn("text-sm text-foreground", state === "error" && "text-destructive")}>{block.name}</span>
-				{state === "aborted" && <span className="flex-none text-xs text-warn">stopped</span>}
+				{state === "aborted" && <span className="mx-1.5 flex-none text-sm text-warn">stopped</span>}
 				<span className="overflow-hidden text-ellipsis whitespace-nowrap text-sm text-muted-foreground before:content-['('] after:content-[')']">
 					{summarizeArgs(block.args)}
 				</span>

@@ -56,6 +56,8 @@ export interface BridgeOptions {
 	env?: Record<string, string | undefined>;
 	/** Executable to run the CLI with; Electron's own Node once packaged. */
 	execPath?: string;
+	/** Where slow-request warnings land (the desktop's crash log). */
+	onDiagnostic?: (line: string) => void;
 }
 
 /** Locate the workspace CLI build relative to the desktop package. */
@@ -94,6 +96,7 @@ export class AgentBridge {
 				args: options.args,
 				env: options.env,
 				execPath: options.execPath,
+				onDiagnostic: options.onDiagnostic,
 			});
 			for (const listener of this.exitListeners) client.onExit(listener);
 			client.onEvent((event) => {

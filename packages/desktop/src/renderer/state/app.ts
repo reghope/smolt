@@ -50,6 +50,8 @@ export interface UiDialogRequest {
 	message?: string;
 	options?: string[];
 	placeholder?: string;
+	/** The agent slot that asked, so the answer reaches that process. */
+	slot?: number;
 }
 
 export interface PermissionRequest {
@@ -562,20 +564,27 @@ export function answerUiRequest(response: {
 	confirmed?: boolean;
 	cancelled?: boolean;
 }): void {
+	// The answer names the slot that asked: sent to whichever agent happens to
+	// be active instead, it lands on an unknown id and the asker waits out its
+	// whole timeout for a click that already happened.
+	const slotId = app.uiRequests.find((request) => request.id === response.id)?.slot;
 	app.uiRequests = app.uiRequests.filter((request) => request.id !== response.id);
 	bump();
-	void call("respondExtensionUI", response);
+	void call("respondExtensionUI", { ...response, slotId });
 }
 
-function handleExtensionUiRequest(request: {
-	id: string;
-	method: string;
-	title?: string;
-	message?: string;
-	options?: string[];
-	placeholder?: string;
-	notifyType?: string;
-}): void {
+function handleExtensionUiRequest(
+	request: {
+		id: string;
+		method: string;
+		title?: string;
+		message?: string;
+		options?: string[];
+		placeholder?: string;
+		notifyType?: string;
+	},
+	slot?: number,
+): void {
 	switch (request.method) {
 		case "select":
 		case "confirm":
@@ -587,12 +596,13 @@ function handleExtensionUiRequest(request: {
 				message: request.message,
 				options: request.options,
 				placeholder: request.placeholder,
+				slot,
 			});
 			bump();
 			return;
 		case "editor":
 			// No extension editor surface here; cancel so the extension isn't stuck.
-			void call("respondExtensionUI", { id: request.id, cancelled: true });
+			void call("respondExtensionUI", { id: request.id, cancelled: true, slotId: slot });
 			return;
 		case "notify":
 			// Only failures interrupt; an extension telling us it is fine can stay quiet.
@@ -2007,10 +2017,6 @@ export function boot(): void {
 		eventStats.count++;
 		const kind = String((event as { type?: unknown }).type ?? "?");
 		eventStats.byType[kind] = (eventStats.byType[kind] ?? 0) + 1;
-		// Only the chat on screen. Anything else is a background turn, or the
-		// tail of the one just left, and reducing it here is what used to leak
-		// one conversation's words into another's transcript.
-		if (slotAware && slot !== app.attachedSlot) return;
 		const raw = event as {
 			type?: string;
 			id?: string;
@@ -2021,6 +2027,21 @@ export function boot(): void {
 			message?: string;
 			notifyType?: string;
 		};
+		// A dialog holds its agent's turn open until it is answered, so it shows
+		// whichever chat is on screen; dropping one for coming from another slot
+		// left that agent waiting out its whole timeout in silence.
+		if (
+			raw.type === "extension_ui_request" &&
+			typeof raw.id === "string" &&
+			(raw.method === "select" || raw.method === "confirm" || raw.method === "input" || raw.method === "editor")
+		) {
+			handleExtensionUiRequest(raw as Parameters<typeof handleExtensionUiRequest>[0], slot);
+			return;
+		}
+		// Only the chat on screen. Anything else is a background turn, or the
+		// tail of the one just left, and reducing it here is what used to leak
+		// one conversation's words into another's transcript.
+		if (slotAware && slot !== app.attachedSlot) return;
 		if (raw.type === "extension_ui_request" && typeof raw.id === "string" && typeof raw.method === "string") {
 			// Live extension surfaces, previously dropped on the floor here — which
 			// made a battletest run completely invisible in the desktop.
@@ -2038,7 +2059,7 @@ export function boot(): void {
 				toast(raw.message, raw.notifyType === "error" ? "error" : "default");
 				return;
 			}
-			handleExtensionUiRequest(raw as Parameters<typeof handleExtensionUiRequest>[0]);
+			handleExtensionUiRequest(raw as Parameters<typeof handleExtensionUiRequest>[0], slot);
 			return;
 		}
 		if (raw.type === "session_replaced") {

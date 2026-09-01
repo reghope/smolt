@@ -79,8 +79,35 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	// Pending extension UI requests waiting for response
 	const pendingExtensionRequests = new Map<
 		string,
-		{ resolve: (value: any) => void; reject: (error: Error) => void }
+		{
+			resolve: (value: any) => void;
+			reject: (error: Error) => void;
+			method: string;
+			createdAt: number;
+			warned?: boolean;
+		}
 	>();
+
+	// A dialog the client never answers must not hang the turn forever: the
+	// front end may have dropped the request (renderer crash, chat switch) or
+	// answered into a different agent process. Five minutes matches the
+	// permission channel's own wait-then-refuse.
+	const DEFAULT_DIALOG_TIMEOUT_MS = 5 * 60 * 1000;
+	// Before that resolves, leave evidence: a dialog pending for over a minute
+	// almost always means the request was lost, and "stuck on a tool call"
+	// needs a named culprit on stderr rather than a silent wait.
+	const STALE_DIALOG_WARN_MS = 60 * 1000;
+	const staleDialogSweep = setInterval(() => {
+		const now = Date.now();
+		for (const [id, pending] of pendingExtensionRequests) {
+			if (pending.warned || now - pending.createdAt < STALE_DIALOG_WARN_MS) continue;
+			pending.warned = true;
+			process.stderr.write(
+				`[rpc] extension ${pending.method} dialog ${id} unanswered for ${Math.round((now - pending.createdAt) / 1000)}s; the client may have lost the request\n`,
+			);
+		}
+	}, 30_000);
+	staleDialogSweep.unref?.();
 
 	// Shutdown request flag
 	let shutdownRequested = false;
@@ -112,12 +139,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			};
 			opts?.signal?.addEventListener("abort", onAbort, { once: true });
 
-			if (opts?.timeout) {
-				timeoutId = setTimeout(() => {
-					cleanup();
-					resolve(defaultValue);
-				}, opts.timeout);
-			}
+			timeoutId = setTimeout(() => {
+				cleanup();
+				resolve(defaultValue);
+			}, opts?.timeout ?? DEFAULT_DIALOG_TIMEOUT_MS);
 
 			pendingExtensionRequests.set(id, {
 				resolve: (response: RpcExtensionUIResponse) => {
@@ -125,6 +150,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					resolve(parseResponse(response));
 				},
 				reject,
+				method: String(request.method ?? "dialog"),
+				createdAt: Date.now(),
 			});
 			output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
 		});
@@ -253,22 +280,14 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		},
 
 		async editor(title: string, prefill?: string): Promise<string | undefined> {
-			const id = crypto.randomUUID();
-			return new Promise((resolve, reject) => {
-				pendingExtensionRequests.set(id, {
-					resolve: (response: RpcExtensionUIResponse) => {
-						if ("cancelled" in response && response.cancelled) {
-							resolve(undefined);
-						} else if ("value" in response) {
-							resolve(response.value);
-						} else {
-							resolve(undefined);
-						}
-					},
-					reject,
-				});
-				output({ type: "extension_ui_request", id, method: "editor", title, prefill } as RpcExtensionUIRequest);
-			});
+			// Through the shared dialog path so an unanswered editor also times
+			// out into its default instead of hanging the extension forever.
+			return createDialogPromise<string | undefined>(
+				undefined,
+				undefined,
+				{ method: "editor", title, prefill },
+				(r) => ("cancelled" in r && r.cancelled ? undefined : "value" in r ? r.value : undefined),
+			);
 		},
 
 		addAutocompleteProvider(): void {
@@ -757,6 +776,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			process.exit(exitCode);
 		}
 		shuttingDown = true;
+		clearInterval(staleDialogSweep);
 		for (const cleanup of signalCleanupHandlers) {
 			cleanup();
 		}

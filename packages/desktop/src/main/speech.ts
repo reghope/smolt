@@ -111,6 +111,11 @@ export async function ensureModel(onProgress?: (progress: DownloadProgress) => v
 	}
 }
 
+/** The sample rate the renderer captures at and Whisper expects. */
+const SPEECH_RATE = 16000;
+/** Whisper's native window: audio past this is dropped unless chunked. */
+const WINDOW_SECONDS = 30;
+
 /**
  * Transcribe 16 kHz mono samples.
  *
@@ -118,11 +123,19 @@ export async function ensureModel(onProgress?: (progress: DownloadProgress) => v
  * clip so far rather than decoding a tail in isolation: at this size that
  * costs a few hundred milliseconds and keeps the text coherent instead of
  * fragmenting at chunk boundaries.
+ *
+ * A clip longer than Whisper's thirty-second window is decoded in
+ * overlapping chunks — without that the model reads the first window and
+ * silently discards the rest, which is how the end of a long dictation
+ * used to vanish.
  */
 export async function transcribeSamples(samples: Float32Array): Promise<string> {
 	if (samples.length === 0) return "";
 	const pipe = await ensureModel();
-	const result = await pipe(samples);
+	const result =
+		samples.length > SPEECH_RATE * WINDOW_SECONDS
+			? await pipe(samples, { chunk_length_s: WINDOW_SECONDS, stride_length_s: 5 })
+			: await pipe(samples);
 	const text = typeof result.text === "string" ? result.text : "";
 	return text.trim();
 }

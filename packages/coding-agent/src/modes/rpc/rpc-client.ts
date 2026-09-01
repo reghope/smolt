@@ -46,7 +46,41 @@ export interface RpcClientOptions {
 	 * on a machine that has no Node of its own.
 	 */
 	execPath?: string;
+	/**
+	 * Where slow-request warnings go (default: this process's stderr).
+	 *
+	 * A request pending far longer than a healthy agent takes is the earliest
+	 * visible sign of a wedged agent process; a host that keeps its own log
+	 * (the desktop's crash log) hooks it here so the evidence survives.
+	 */
+	onDiagnostic?: (line: string) => void;
 }
+
+/**
+ * How long each command may take before the client gives up.
+ *
+ * The 30s default fits calls a healthy agent answers immediately. Commands
+ * that legitimately run long get their own ceiling: compaction is an LLM
+ * summarization call, a user bash command runs until it finishes, session
+ * moves replay transcripts from disk. Timing those out at 30s reported
+ * phantom failures while the agent was still working — which read as
+ * "the desktop is stuck" even though nothing was.
+ */
+const RPC_TIMEOUT_MS: Partial<Record<RpcCommand["type"], number>> = {
+	// A prompt's response can be held open by an extension command's dialogs.
+	prompt: 10 * 60 * 1000,
+	compact: 10 * 60 * 1000,
+	bash: 30 * 60 * 1000,
+	switch_session: 5 * 60 * 1000,
+	new_session: 5 * 60 * 1000,
+	fork: 5 * 60 * 1000,
+	clone: 5 * 60 * 1000,
+	export_html: 2 * 60 * 1000,
+};
+const RPC_DEFAULT_TIMEOUT_MS = 30_000;
+
+/** A request pending this long is worth a log line before its timeout fires. */
+const SLOW_REQUEST_WARN_MS = 60_000;
 
 export interface ModelInfo {
 	provider: string;
@@ -66,9 +100,18 @@ export class RpcClient {
 	private stopReadingStdout: (() => void) | null = null;
 	private eventListeners: RpcEventListener[] = [];
 	private exitListeners: ((info: { code: number | null; signal: string | null }) => void)[] = [];
-	private pendingRequests: Map<string, { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }> =
-		new Map();
+	private pendingRequests: Map<
+		string,
+		{
+			resolve: (response: RpcResponse) => void;
+			reject: (error: Error) => void;
+			type: string;
+			createdAt: number;
+			warned?: boolean;
+		}
+	> = new Map();
 	private requestId = 0;
+	private slowRequestSweep: ReturnType<typeof setInterval> | null = null;
 	private stderr = "";
 	private exitError: Error | null = null;
 	private options: RpcClientOptions;
@@ -146,6 +189,20 @@ export class RpcClient {
 			this.handleLine(line);
 		});
 
+		// The stuck-detector: a request pending for over a minute names itself
+		// once, before its own timeout turns it into an anonymous failure.
+		this.slowRequestSweep = setInterval(() => {
+			const now = Date.now();
+			for (const [id, pending] of this.pendingRequests) {
+				if (pending.warned || now - pending.createdAt < SLOW_REQUEST_WARN_MS) continue;
+				pending.warned = true;
+				this.diagnostic(
+					`[rpc-client] still waiting on ${pending.type} (${id}) after ${Math.round((now - pending.createdAt) / 1000)}s (agent pid ${childProcess.pid})`,
+				);
+			}
+		}, 30_000);
+		this.slowRequestSweep.unref?.();
+
 		// Wait a moment for process to initialize
 		await new Promise((resolve) => setTimeout(resolve, 100));
 
@@ -162,6 +219,8 @@ export class RpcClient {
 	async stop(): Promise<void> {
 		if (!this.process) return;
 
+		if (this.slowRequestSweep) clearInterval(this.slowRequestSweep);
+		this.slowRequestSweep = null;
 		this.stopReadingStdout?.();
 		this.stopReadingStdout = null;
 		this.process.kill("SIGTERM");
@@ -587,6 +646,14 @@ export class RpcClient {
 		return new Error(`The agent process ${how}.${stderr !== "" ? ` Last output:\n${stderr}` : ""}`);
 	}
 
+	private diagnostic(line: string): void {
+		if (this.options.onDiagnostic) {
+			this.options.onDiagnostic(line);
+			return;
+		}
+		process.stderr.write(`${line}\n`);
+	}
+
 	private rejectPendingRequests(error: Error): void {
 		for (const pending of this.pendingRequests.values()) {
 			pending.reject(error);
@@ -632,16 +699,11 @@ export class RpcClient {
 		const id = `req_${++this.requestId}`;
 		const fullCommand = { ...command, id } as RpcCommand;
 
-		// A prompt's response can legitimately take minutes: an extension
-		// command inside it (e.g. /pool add) holds the reply open while its
-		// dialogs wait on the user. The short timeout is for calls a healthy
-		// agent answers immediately — timing prompt out at 30s made the
-		// desktop restore the "failed" draft into the composer and log a
-		// phantom failure after every dialog-driven command.
-		const timeoutMs = command.type === "prompt" ? 10 * 60 * 1000 : 30000;
+		const timeoutMs = RPC_TIMEOUT_MS[command.type] ?? RPC_DEFAULT_TIMEOUT_MS;
 		return new Promise((resolve, reject) => {
 			const timeout = setTimeout(() => {
 				this.pendingRequests.delete(id);
+				this.diagnostic(`[rpc-client] gave up on ${command.type} (${id}) after ${Math.round(timeoutMs / 1000)}s`);
 				reject(new Error(`Timeout waiting for response to ${command.type}. Stderr: ${this.stderr}`));
 			}, timeoutMs);
 
@@ -654,6 +716,8 @@ export class RpcClient {
 					clearTimeout(timeout);
 					reject(error);
 				},
+				type: command.type,
+				createdAt: Date.now(),
 			});
 
 			try {

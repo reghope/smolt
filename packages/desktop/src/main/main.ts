@@ -223,6 +223,7 @@ function syncTelegramHost(): void {
 					model: process.env.SMOLT_DESKTOP_MODEL,
 					env: agentEnv({ SMOLT_TELEGRAM_POLL: "on" }),
 					execPath: agentExecPath(),
+					onDiagnostic: crashLog,
 				},
 				__dirname,
 			);
@@ -387,6 +388,11 @@ const requestIsOurs = (id: string): boolean => {
 	const pid = requestPid(id);
 	return pid !== undefined && ownedAgentPids.has(pid);
 };
+
+/** Extension UI methods that hold an agent's turn open until answered. */
+const DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
+const isDialogRequest = (event: unknown): boolean =>
+	DIALOG_METHODS.has(String((event as { method?: unknown }).method ?? ""));
 
 /**
  * The chat a request belongs to, from the asking agent's pid. A request card
@@ -753,6 +759,14 @@ app.whenReady().then(async () => {
 				}
 			}
 			if (win.isDestroyed()) return;
+			// A dialog is an agent waiting on an answer, and an unanswered one
+			// hangs that agent's turn: it must reach the window whichever slot
+			// asked and whatever move is in flight, unlike ordinary events,
+			// which belong to the chat on screen.
+			if (type === "extension_ui_request" && isDialogRequest(event)) {
+				win.webContents.send("agent:event", event, slot.id);
+				return;
+			}
 			if (switching !== null) return;
 			if (slot === active) {
 				win.webContents.send("agent:event", event, slot.id);
@@ -781,6 +795,7 @@ app.whenReady().then(async () => {
 				model: process.env.SMOLT_DESKTOP_MODEL,
 				env: agentEnv(PANE_ENV),
 				execPath: agentExecPath(),
+				onDiagnostic: crashLog,
 			},
 			__dirname,
 		);
@@ -904,6 +919,19 @@ app.whenReady().then(async () => {
 	const debug = process.env.SMOLT_DESKTOP_DEBUG === "1";
 	ipcMain.handle("agent:call", async (_e, method: string, args: unknown[]) => {
 		try {
+			// A dialog answer goes to the agent that asked, which is not always
+			// the active one: the user can switch chats while a card is open,
+			// and an answer sent to the wrong process is silently ignored while
+			// the asking agent waits out its timeout. Routed before the gates
+			// below — the answer must not queue behind the very switch that
+			// made the slot inactive.
+			if (method === "respondExtensionUI") {
+				const { slotId, ...body } = ((Array.isArray(args) ? args[0] : undefined) ?? {}) as {
+					slotId?: number;
+				} & Record<string, unknown>;
+				const target = slots.find((slot) => slot.id === slotId) ?? active;
+				return { ok: true, value: await target.bridge.call("respondExtensionUI", [body]) };
+			}
 			if (restarting) await restarting;
 			// Moving between chats is not instant — the agent takes about a second
 			// — and until it lands the active agent is still the one being left.
@@ -1002,6 +1030,7 @@ app.whenReady().then(async () => {
 						model: process.env.SMOLT_DESKTOP_MODEL,
 						env: agentEnv(PANE_ENV),
 						execPath: agentExecPath(),
+						onDiagnostic: crashLog,
 					},
 					__dirname,
 				);
@@ -1080,6 +1109,7 @@ app.whenReady().then(async () => {
 				args: agentNotes(),
 				env: agentEnv(PANE_ENV),
 				execPath: agentExecPath(),
+				onDiagnostic: crashLog,
 			},
 			__dirname,
 		);
@@ -1581,6 +1611,7 @@ app.whenReady().then(async () => {
 			args: process.env.SMOLT_DESKTOP_CONTINUE === "1" ? ["--continue"] : undefined,
 			env: agentEnv(PANE_ENV),
 			execPath: agentExecPath(),
+			onDiagnostic: crashLog,
 		},
 		__dirname,
 	);

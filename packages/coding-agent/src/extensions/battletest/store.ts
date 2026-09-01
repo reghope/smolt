@@ -36,6 +36,46 @@ export const TICKET_CATEGORIES: readonly TicketCategory[] = [
 ];
 export const TICKET_STATUSES: readonly TicketStatus[] = ["open", "fixed", "wont-fix", "duplicate"];
 
+export type LedgerStatus = "open" | "fixed" | "wont-fix" | "regressed";
+export const LEDGER_STATUSES: readonly LedgerStatus[] = ["open", "fixed", "wont-fix", "regressed"];
+
+/** One sighting of a ledger issue: which run, who, when. */
+export interface LedgerHit {
+	run: string;
+	persona: string;
+	date: string;
+}
+
+/**
+ * One distinct problem, remembered across runs.
+ *
+ * A run's tickets live and die with the run; the ledger entry created from
+ * the first filing outlives it. Later runs that hit the same problem land as
+ * hits instead of fresh tickets, so the hit count IS the severity evidence —
+ * six testers across four runs needs no judgment call. A 'fixed' entry that
+ * gets sighted again flips to 'regressed', the loudest signal the ledger
+ * produces.
+ */
+export interface LedgerEntry {
+	slug: string;
+	title: string;
+	area: string;
+	category: TicketCategory;
+	/** The worst severity any sighting gave it. */
+	severity: TicketSeverity;
+	status: LedgerStatus;
+	/** The run and ticket of the first filing: the canonical write-up. */
+	origin: { run: string; ticket: string };
+	/** Every sighting, the original filing included. */
+	hits: LedgerHit[];
+	/** Where or when it was fixed, once it was. */
+	fixedIn?: string;
+	created: string;
+	updated: string;
+	/** Accumulated one-liners from later sightings. */
+	sightings?: string;
+}
+
 export type BattleTestResult = Record<string, unknown>;
 
 /** One tester's end-of-run record: who they were, what they found, what it cost. */
@@ -75,6 +115,8 @@ export interface BattleTestTicket {
 	steps: string;
 	/** Extra observations from other testers who hit the same problem. */
 	alsoSeen?: string;
+	/** The cross-run ledger entry this ticket belongs to. */
+	ledger?: string;
 }
 
 export interface BattleTestRun {
@@ -105,6 +147,20 @@ interface TicketFrontmatter {
 	status?: string;
 	duplicateOf?: string;
 	created?: string;
+	ledger?: string;
+}
+
+interface LedgerFrontmatter {
+	title?: string;
+	area?: string;
+	category?: string;
+	severity?: string;
+	status?: string;
+	origin?: { run?: string; ticket?: string };
+	hits?: unknown;
+	fixedIn?: string;
+	created?: string;
+	updated?: string;
 }
 
 function err(error: string): BattleTestResult {
@@ -171,6 +227,39 @@ function parsePersonas(value: unknown): Persona[] {
 }
 
 const SEVERITY_ORDER: Record<TicketSeverity, number> = { blocker: 0, major: 1, minor: 2, polish: 3 };
+
+function normText(text: string): string {
+	return text
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, " ")
+		.trim();
+}
+
+function textTokens(text: string): Set<string> {
+	return new Set(
+		normText(text)
+			.split(" ")
+			.filter((word) => word.length > 2),
+	);
+}
+
+/**
+ * Whether two filings read like the same problem: an identical title
+ * anywhere, or the same area with most of the same title words. Deliberately
+ * mechanical and conservative — a false match costs one `force` refile, a
+ * missed match costs one duplicate.
+ */
+function sameProblem(candidate: { area: string; title: string }, existing: { area: string; title: string }): boolean {
+	if (normText(existing.title) === normText(candidate.title)) return true;
+	if (normText(existing.area) !== normText(candidate.area)) return false;
+	const want = textTokens(candidate.title);
+	if (want.size === 0) return false;
+	const theirs = textTokens(existing.title);
+	let overlap = 0;
+	for (const word of want) if (theirs.has(word)) overlap++;
+	const needed = Math.max(2, Math.ceil(Math.min(want.size, theirs.size) * 0.6));
+	return overlap >= needed;
+}
 
 export class BattleTestStore {
 	readonly root: string;
@@ -391,6 +480,7 @@ export class BattleTestStore {
 			steps: sections["Steps to reproduce"] ?? "",
 		};
 		if (fm.duplicateOf) ticket.duplicateOf = fm.duplicateOf;
+		if (fm.ledger) ticket.ledger = fm.ledger;
 		if (sections["Also seen"]) ticket.alsoSeen = sections["Also seen"];
 		return ticket;
 	}
@@ -407,6 +497,7 @@ export class BattleTestStore {
 			created: ticket.created,
 		};
 		if (ticket.duplicateOf) fm.duplicateOf = ticket.duplicateOf;
+		if (ticket.ledger) fm.ledger = ticket.ledger;
 		const body =
 			`## What happened\n\n${ticket.what}\n\n## Expected\n\n${ticket.expected}\n\n` +
 			`## Steps to reproduce\n\n${ticket.steps}\n` +
@@ -466,29 +557,9 @@ export class BattleTestStore {
 	 * original they point at does.
 	 */
 	findSimilarTicket(runSlug: string, area: string, title: string): BattleTestTicket | undefined {
-		const norm = (text: string): string =>
-			text
-				.toLowerCase()
-				.replace(/[^a-z0-9]+/g, " ")
-				.trim();
-		const tokens = (text: string): Set<string> =>
-			new Set(
-				norm(text)
-					.split(" ")
-					.filter((word) => word.length > 2),
-			);
-		const wantArea = norm(area);
-		const wantTitle = norm(title);
-		const wantTokens = tokens(title);
 		for (const ticket of this.listTickets(runSlug)) {
 			if (ticket.status === "duplicate") continue;
-			if (norm(ticket.title) === wantTitle) return ticket;
-			if (norm(ticket.area) !== wantArea || wantTokens.size === 0) continue;
-			const theirs = tokens(ticket.title);
-			let overlap = 0;
-			for (const word of wantTokens) if (theirs.has(word)) overlap++;
-			const needed = Math.max(2, Math.ceil(Math.min(wantTokens.size, theirs.size) * 0.6));
-			if (overlap >= needed) return ticket;
+			if (sameProblem({ area, title }, ticket)) return ticket;
 		}
 		return undefined;
 	}
@@ -573,7 +644,205 @@ export class BattleTestStore {
 		if (params.status !== undefined) ticket.status = params.status;
 		if (params.severity !== undefined) ticket.severity = params.severity;
 		this.writeTicket(run.slug, ticket);
+		// A run ticket resolved by hand carries its verdict to the ledger, so
+		// the next run stops re-discovering (fixed) or re-litigating (wont-fix)
+		// the problem. Duplicates change nothing: the canonical ticket stands.
+		if (ticket.ledger !== undefined && params.status !== undefined && params.status !== "duplicate") {
+			this.setLedgerStatus(ticket.ledger, params.status, params.status === "fixed" ? run.slug : undefined);
+		}
 		return { success: true, run: run.slug, ticket: ticket.slug, status: ticket.status };
+	}
+
+	// ------------------------------------------------------------------
+	// Ledger: the cross-run memory of every distinct problem ever filed.
+	// Testers consult it before investigating, so a known problem costs one
+	// bounced filing instead of a re-discovery, and a fixed problem that
+	// reappears is flagged as a regression instead of drowning as ticket
+	// number 213.
+	// ------------------------------------------------------------------
+
+	ledgerDir(): string {
+		return join(this.root, "ledger");
+	}
+
+	readLedgerEntry(slug: string): LedgerEntry | undefined {
+		const path = join(this.ledgerDir(), `${slug}.md`);
+		if (!existsSync(path)) return undefined;
+		const { yaml, body } = splitFrontmatter(readFileSync(path, "utf-8"));
+		const fm = (yaml ? (parse(yaml) as LedgerFrontmatter) : {}) ?? {};
+		const sections = parseSections(body);
+		const hits: LedgerHit[] = Array.isArray(fm.hits)
+			? (fm.hits as LedgerHit[]).filter(
+					(hit) => typeof hit === "object" && hit !== null && typeof hit.run === "string",
+				)
+			: [];
+		const entry: LedgerEntry = {
+			slug,
+			title: fm.title ?? slug,
+			area: fm.area ?? "",
+			category: TICKET_CATEGORIES.includes(fm.category as TicketCategory)
+				? (fm.category as TicketCategory)
+				: "other",
+			severity: TICKET_SEVERITIES.includes(fm.severity as TicketSeverity)
+				? (fm.severity as TicketSeverity)
+				: "minor",
+			status: LEDGER_STATUSES.includes(fm.status as LedgerStatus) ? (fm.status as LedgerStatus) : "open",
+			origin: { run: fm.origin?.run ?? "", ticket: fm.origin?.ticket ?? "" },
+			hits,
+			created: fm.created ?? "",
+			updated: fm.updated ?? "",
+		};
+		if (fm.fixedIn) entry.fixedIn = fm.fixedIn;
+		if (sections.Sightings) entry.sightings = sections.Sightings;
+		return entry;
+	}
+
+	private writeLedgerEntry(entry: LedgerEntry): void {
+		mkdirSync(this.ledgerDir(), { recursive: true });
+		const fm: Record<string, unknown> = {
+			title: entry.title,
+			area: entry.area,
+			category: entry.category,
+			severity: entry.severity,
+			status: entry.status,
+			origin: entry.origin,
+			created: entry.created,
+			updated: entry.updated,
+			hits: entry.hits,
+		};
+		if (entry.fixedIn) fm.fixedIn = entry.fixedIn;
+		const body = entry.sightings ? `## Sightings\n\n${entry.sightings}\n` : "";
+		atomicWrite(join(this.ledgerDir(), `${entry.slug}.md`), `---\n${stringify(fm)}---\n\n${body}`);
+	}
+
+	/** Most-hit first, then most severe: the reading order of a triage. */
+	listLedger(status?: LedgerStatus): LedgerEntry[] {
+		const dir = this.ledgerDir();
+		if (!existsSync(dir)) return [];
+		return readdirSync(dir)
+			.filter((name) => name.endsWith(".md"))
+			.sort()
+			.map((name) => this.readLedgerEntry(name.slice(0, -3)))
+			.filter(
+				(entry): entry is LedgerEntry => entry !== undefined && (status === undefined || entry.status === status),
+			)
+			.sort(
+				(a, b) =>
+					b.hits.length - a.hits.length ||
+					SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] ||
+					a.slug.localeCompare(b.slug),
+			);
+	}
+
+	/** The ledger entry a fresh filing matches, whatever its status — the caller decides what each status means. */
+	findLedgerMatch(area: string, title: string): LedgerEntry | undefined {
+		for (const entry of this.listLedger()) {
+			if (sameProblem({ area, title }, entry)) return entry;
+		}
+		return undefined;
+	}
+
+	/** Stamp a run ticket with the ledger entry it belongs to. */
+	linkTicket(runSlug: string, ticketSlug: string, ledgerSlug: string): void {
+		const ticket = this.readTicket(runSlug, ticketSlug);
+		if (!ticket) return;
+		ticket.ledger = ledgerSlug;
+		this.writeTicket(runSlug, ticket);
+	}
+
+	/** Enter a run ticket into the ledger as a new issue, and link the ticket back to its entry. */
+	promoteTicket(runSlug: string, ticketSlug: string): LedgerEntry | undefined {
+		const ticket = this.readTicket(runSlug, ticketSlug);
+		if (!ticket || ticket.status === "duplicate") return undefined;
+		let slug = ticket.slug;
+		for (let n = 2; this.readLedgerEntry(slug); n++) slug = `${ticket.slug}-${n}`;
+		const now = new Date().toISOString();
+		const entry: LedgerEntry = {
+			slug,
+			title: ticket.title,
+			area: ticket.area,
+			category: ticket.category,
+			severity: ticket.severity,
+			status: "open",
+			origin: { run: runSlug, ticket: ticket.slug },
+			hits: [{ run: runSlug, persona: ticket.persona, date: ticket.created || now }],
+			created: now,
+			updated: now,
+		};
+		this.writeLedgerEntry(entry);
+		this.linkTicket(runSlug, ticket.slug, slug);
+		return entry;
+	}
+
+	/**
+	 * Record a fresh sighting of a known issue. Severity only ever rises. A
+	 * sighting of a 'fixed' entry flips it to 'regressed' — the loudest
+	 * signal the ledger produces — and the flip is reported to the caller.
+	 */
+	recordLedgerHit(
+		slug: string,
+		hit: LedgerHit,
+		severity?: TicketSeverity,
+		note?: string,
+	): { entry: LedgerEntry; regressed: boolean } | undefined {
+		const entry = this.readLedgerEntry(slug);
+		if (!entry) return undefined;
+		entry.hits.push(hit);
+		if (severity !== undefined && SEVERITY_ORDER[severity] < SEVERITY_ORDER[entry.severity]) {
+			entry.severity = severity;
+		}
+		const regressed = entry.status === "fixed";
+		if (regressed) entry.status = "regressed";
+		if (note !== undefined && note.trim() !== "") {
+			const line = `**${hit.persona} (${hit.run}):** ${firstLine(note.trim())}`;
+			entry.sightings = entry.sightings ? `${entry.sightings}\n\n${line}` : line;
+		}
+		entry.updated = new Date().toISOString();
+		this.writeLedgerEntry(entry);
+		return { entry, regressed };
+	}
+
+	/** Resolve a ledger entry: 'fixed' when the problem was dealt with, 'wont-fix' to stop future runs re-litigating it, 'open' to reopen. */
+	setLedgerStatus(slug: string, status: TicketStatus | LedgerStatus, fixedIn?: string): BattleTestResult {
+		if (status === "duplicate") return err("a ledger entry cannot be a duplicate; mark the run ticket instead");
+		const entry = this.readLedgerEntry(slug);
+		if (!entry) return err(`Unknown ledger entry '${slug}'`);
+		entry.status = status;
+		if (status === "fixed") entry.fixedIn = fixedIn?.trim() || new Date().toISOString().slice(0, 10);
+		entry.updated = new Date().toISOString();
+		this.writeLedgerEntry(entry);
+		return { success: true, ledger: entry.slug, status: entry.status };
+	}
+
+	/**
+	 * Bring the ledger up to date with every run on disk: each non-duplicate
+	 * ticket not yet linked either lands as a hit on the entry it matches or
+	 * becomes a new entry. Runs are walked oldest-first, so the earliest
+	 * filing of a problem is its origin. Safe to re-run: linked tickets are
+	 * skipped.
+	 */
+	syncLedger(): BattleTestResult {
+		let promoted = 0;
+		let hits = 0;
+		for (const runSlug of this.listRunSlugs()) {
+			for (const ticket of this.listTickets(runSlug)) {
+				if (ticket.status === "duplicate" || ticket.ledger !== undefined) continue;
+				const match = this.findLedgerMatch(ticket.area, ticket.title);
+				if (match) {
+					this.recordLedgerHit(
+						match.slug,
+						{ run: runSlug, persona: ticket.persona, date: ticket.created },
+						ticket.severity,
+						ticket.what,
+					);
+					this.linkTicket(runSlug, ticket.slug, match.slug);
+					hits++;
+				} else if (this.promoteTicket(runSlug, ticket.slug)) {
+					promoted++;
+				}
+			}
+		}
+		return { success: true, promoted, hits, entries: this.listLedger().length };
 	}
 
 	// ------------------------------------------------------------------
@@ -738,6 +1007,50 @@ export function battleTestTool(store: BattleTestStore, params: BattleTestToolPar
 				severity: severity as TicketSeverity | undefined,
 			});
 		}
+		case "ledger": {
+			const filter = need("status");
+			if (filter !== undefined && !LEDGER_STATUSES.includes(filter as LedgerStatus)) {
+				return err(`invalid status '${filter}'; one of: ${LEDGER_STATUSES.join(", ")}`);
+			}
+			// Runs that predate the ledger fold in the first time anyone asks —
+			// a chore no caller should have to know exists.
+			let backfilled: { promoted: unknown; hits: unknown } | undefined;
+			if (store.listLedger().length === 0 && store.listRunSlugs().length > 0) {
+				const synced = store.syncLedger();
+				backfilled = { promoted: synced.promoted, hits: synced.hits };
+			}
+			const all = store.listLedger();
+			const counts: Record<LedgerStatus, number> = { open: 0, fixed: 0, "wont-fix": 0, regressed: 0 };
+			for (const entry of all) counts[entry.status]++;
+			const entries = filter === undefined ? all : all.filter((entry) => entry.status === filter);
+			return {
+				success: true,
+				...(backfilled !== undefined ? { backfilled } : {}),
+				counts,
+				entries: entries.map((entry) => ({
+					ledger: entry.slug,
+					title: entry.title,
+					area: entry.area,
+					severity: entry.severity,
+					status: entry.status,
+					hits: entry.hits.length,
+					first_seen: entry.origin.run,
+					last_seen: entry.hits[entry.hits.length - 1]?.run ?? entry.origin.run,
+					...(entry.fixedIn ? { fixed_in: entry.fixedIn } : {}),
+				})),
+			};
+		}
+		case "update_ledger": {
+			const slug = need("ticket");
+			const status = need("status");
+			if (!slug || !status) return err("update_ledger requires 'ticket' (the ledger slug) and 'status'");
+			if (!LEDGER_STATUSES.includes(status as LedgerStatus)) {
+				return err(`invalid status '${status}'; one of: ${LEDGER_STATUSES.join(", ")}`);
+			}
+			return store.setLedgerStatus(slug, status as LedgerStatus, need("run"));
+		}
+		case "sync_ledger":
+			return store.syncLedger();
 		case "write_report": {
 			const content = need("content");
 			if (!content) return err("write_report requires 'content'");
@@ -745,7 +1058,8 @@ export function battleTestTool(store: BattleTestStore, params: BattleTestToolPar
 		}
 		default:
 			return err(
-				`unknown action '${action}'; one of: list, view, view_ticket, add_ticket, update_ticket, write_report, wait`,
+				`unknown action '${action}'; one of: list, view, view_ticket, add_ticket, update_ticket, ` +
+					`ledger, update_ledger, sync_ledger, write_report, wait`,
 			);
 	}
 }

@@ -179,6 +179,135 @@ describe("tickets", () => {
 	});
 });
 
+describe("ledger", () => {
+	const file = (runSlug: string, title: string, extra?: Partial<Parameters<BattleTestStore["addTicket"]>[1]>) =>
+		store.addTicket(runSlug, {
+			title,
+			persona: "tester-a",
+			severity: "minor",
+			category: "bug",
+			area: "settings",
+			what: "It broke",
+			expected: "It works",
+			steps: "1. open settings",
+			...extra,
+		});
+
+	test("promoting a ticket creates a linked ledger entry with the filer as first hit", () => {
+		const run = store.createRun({ personas: fixturePersonas(1) });
+		const filed = file(run.slug, "Save button does nothing");
+		const entry = store.promoteTicket(run.slug, String(filed.ticket));
+		expect(entry?.status).toBe("open");
+		expect(entry?.origin).toEqual({ run: run.slug, ticket: filed.ticket });
+		expect(entry?.hits).toHaveLength(1);
+		expect(entry?.hits[0]?.persona).toBe("tester-a");
+		const roundTrip = store.readLedgerEntry(entry?.slug ?? "");
+		expect(roundTrip?.title).toBe("Save button does nothing");
+		const ticket = store.viewTicket(run.slug, String(filed.ticket));
+		expect(ticket.ledger).toBe(entry?.slug);
+	});
+
+	test("a later run's filing matches the ledger and records a hit", () => {
+		const first = store.createRun({ personas: fixturePersonas(1), now: new Date("2026-01-01T10:00:00Z") });
+		const filed = file(first.slug, "Save button does nothing");
+		store.promoteTicket(first.slug, String(filed.ticket));
+
+		const match = store.findLedgerMatch("settings", "Save button does nothing at all");
+		expect(match).toBeDefined();
+		const hit = store.recordLedgerHit(
+			match?.slug ?? "",
+			{ run: "second-run", persona: "tester-b", date: "2026-02-01T10:00:00Z" },
+			"major",
+			"Still broken for me",
+		);
+		expect(hit?.regressed).toBe(false);
+		expect(hit?.entry.hits).toHaveLength(2);
+		// Severity only rises: minor -> major.
+		expect(hit?.entry.severity).toBe("major");
+		expect(hit?.entry.sightings).toContain("tester-b (second-run)");
+	});
+
+	test("a hit on a fixed entry flips it to regressed", () => {
+		const run = store.createRun({ personas: fixturePersonas(1) });
+		const filed = file(run.slug, "Version numbers disagree");
+		const entry = store.promoteTicket(run.slug, String(filed.ticket));
+		store.setLedgerStatus(entry?.slug ?? "", "fixed", "v0.2.0");
+		const hit = store.recordLedgerHit(entry?.slug ?? "", {
+			run: "later-run",
+			persona: "tester-c",
+			date: "2026-03-01T10:00:00Z",
+		});
+		expect(hit?.regressed).toBe(true);
+		expect(hit?.entry.status).toBe("regressed");
+		expect(store.readLedgerEntry(entry?.slug ?? "")?.fixedIn).toBe("v0.2.0");
+	});
+
+	test("resolving a linked run ticket carries the verdict to the ledger", () => {
+		const run = store.createRun({ personas: fixturePersonas(1) });
+		const filed = file(run.slug, "Footer truncates the model name");
+		const entry = store.promoteTicket(run.slug, String(filed.ticket));
+		store.updateTicket(run.slug, String(filed.ticket), { status: "fixed" });
+		expect(store.readLedgerEntry(entry?.slug ?? "")?.status).toBe("fixed");
+		store.updateTicket(run.slug, String(filed.ticket), { status: "open" });
+		expect(store.readLedgerEntry(entry?.slug ?? "")?.status).toBe("open");
+	});
+
+	test("syncLedger backfills runs, folding cross-run repeats into hits", () => {
+		const first = store.createRun({ personas: fixturePersonas(1), now: new Date("2026-01-01T10:00:00Z") });
+		file(first.slug, "Unknown slash commands go to the model");
+		file(first.slug, "Changelog floods startup", { area: "startup" });
+		const second = store.createRun({ personas: fixturePersonas(1), now: new Date("2026-02-01T10:00:00Z") });
+		file(second.slug, "Unknown slash commands go straight to the model", { persona: "tester-b" });
+
+		const result = store.syncLedger();
+		expect(result.promoted).toBe(2);
+		expect(result.hits).toBe(1);
+		const entries = store.listLedger();
+		expect(entries).toHaveLength(2);
+		// Most-hit first.
+		expect(entries[0]?.hits).toHaveLength(2);
+		// Re-running is a no-op: everything is linked now.
+		const again = store.syncLedger();
+		expect(again.promoted).toBe(0);
+		expect(again.hits).toBe(0);
+	});
+
+	test("the ledger action backfills unsynced runs on first use", () => {
+		const run = store.createRun({ personas: fixturePersonas(1) });
+		file(run.slug, "Save button does nothing");
+		const listed = battleTestTool(store, { action: "ledger" }) as {
+			backfilled?: { promoted: number; hits: number };
+			counts: Record<string, number>;
+		};
+		expect(listed.backfilled?.promoted).toBe(1);
+		expect(listed.counts.open).toBe(1);
+		// A second call has nothing left to fold in.
+		const again = battleTestTool(store, { action: "ledger" }) as { backfilled?: unknown };
+		expect(again.backfilled).toBeUndefined();
+	});
+
+	test("the dispatcher exposes ledger, update_ledger, and sync_ledger", () => {
+		const run = store.createRun({ personas: fixturePersonas(1) });
+		file(run.slug, "Save button does nothing");
+		const synced = battleTestTool(store, { action: "sync_ledger" });
+		expect(synced.entries).toBe(1);
+		const listed = battleTestTool(store, { action: "ledger" }) as {
+			counts: Record<string, number>;
+			entries: Array<{ ledger: string; hits: number }>;
+		};
+		expect(listed.counts.open).toBe(1);
+		expect(listed.entries[0]?.hits).toBe(1);
+		const updated = battleTestTool(store, {
+			action: "update_ledger",
+			ticket: listed.entries[0]?.ledger,
+			status: "fixed",
+		});
+		expect(updated.status).toBe("fixed");
+		const bad = battleTestTool(store, { action: "update_ledger", ticket: "nope", status: "weird" });
+		expect(bad.success).toBe(false);
+	});
+});
+
 describe("report", () => {
 	test("write_report writes the file and completes the run", () => {
 		const run = store.createRun({ personas: fixturePersonas(1) });

@@ -17,6 +17,7 @@ import {
 	BattleTestStore,
 	type BattleTestTicket,
 	battleTestTool,
+	type LedgerEntry,
 	TICKET_CATEGORIES,
 	TICKET_SEVERITIES,
 } from "./store.ts";
@@ -387,12 +388,46 @@ You already spent about ${brief.spent} browse actions before the interruption; t
 }
 
 /** The mission each tester session starts from. It sees nothing else. */
+/**
+ * The section of a tester brief that carries what past runs already know, so
+ * budget goes to fresh territory: the still-open issues (a filing against one
+ * bounces into a hit), and the recently-fixed ones worth a verification pass.
+ */
+function knownIssuesBrief(store: BattleTestStore): string {
+	const entries = store.listLedger();
+	const open = entries.filter((entry) => entry.status === "open" || entry.status === "regressed");
+	const fixed = entries.filter((entry) => entry.status === "fixed");
+	if (open.length === 0 && fixed.length === 0) return "";
+	const line = (entry: LedgerEntry): string =>
+		`- ${entry.title} (${entry.area}${entry.hits.length > 1 ? `, seen ${entry.hits.length}x` : ""})`;
+	const openBlock =
+		open.length === 0
+			? ""
+			: `\nPrevious runs already found ${open.length} problem(s) that are still open — the most-hit:\n${open
+					.slice(0, 12)
+					.map(line)
+					.join(
+						"\n",
+					)}\nIf you hit one of these, filing it costs nothing — the filing bounces and your sighting is recorded as a hit, which is itself useful evidence. But do NOT investigate it: your budget belongs to problems nobody has found.`;
+	const fixedBlock =
+		fixed.length === 0
+			? ""
+			: `\n${fixed.length} problem(s) were recently marked fixed:\n${fixed
+					.slice(0, 6)
+					.map(line)
+					.join(
+						"\n",
+					)}\nIf your path naturally crosses one, verify the fix — a fixed problem that reappears is the most valuable ticket this run can produce.`;
+	return `\n\nKNOWN ISSUES — WHAT PAST RUNS ALREADY FOUND${openBlock}${fixedBlock}`;
+}
+
 function testerPrompt(
 	persona: Persona,
 	run: BattleTestRun,
 	index: number,
 	profileDir: string,
 	resume?: ResumeBrief,
+	knownIssues = "",
 ): string {
 	const traits = persona.traits;
 	const focus =
@@ -407,7 +442,7 @@ function testerPrompt(
 WHO YOU ARE
 ${persona.description}
 You especially notice: ${persona.lens}.
-Your patience is ${traits.patience}; you are ${traits.expertise} with software like this; your feedback style is ${traits.temperament}; and you ${traits.thoroughness === "skims" ? "skim, moving fast and covering breadth over depth" : traits.thoroughness === "exhaustive" ? "are exhaustive, working every corner before moving on" : "balance breadth and depth"}. Stay in character for the whole session — your traits should be visible in what you try, how long you persist, and how you phrase what you find.${focus}${resume === undefined ? "" : resumeSection(resume, profileDir)}
+Your patience is ${traits.patience}; you are ${traits.expertise} with software like this; your feedback style is ${traits.temperament}; and you ${traits.thoroughness === "skims" ? "skim, moving fast and covering breadth over depth" : traits.thoroughness === "exhaustive" ? "are exhaustive, working every corner before moving on" : "balance breadth and depth"}. Stay in character for the whole session — your traits should be visible in what you try, how long you persist, and how you phrase what you find.${focus}${resume === undefined ? "" : resumeSection(resume, profileDir)}${knownIssues}
 
 DRIVE THE APP WITH THE browse TOOL
 You have a browse tool: your own private browser, already locked to your screen size, on your own port and profile so the other ${run.personas.length - 1} testers never collide with you. ${
@@ -478,13 +513,22 @@ function teamPlanPrompt(focus: string, modelRef?: string): string {
 3. Start the run: battletest action 'start' with your specialists array${focus !== "" ? `, focus: '${focus}'` : ""}${modelRef ? `, model: '${modelRef}'` : ""}. ${modelRef ? "" : "Do NOT pass a model — testers run on the session's own model unless the user names one. "}The kickoff brief for supervising the run arrives as a follow-up message.`;
 }
 
+/** How the agent presents the cross-run ledger when the user asks for it. */
+function ledgerPrompt(): string {
+	return `Show me the battletest ledger: the cross-run record of every distinct problem runs have found.
+1. Call the battletest tool, action 'ledger'. (It folds in runs that predate the ledger automatically; if the result says it backfilled, mention that in one line.)
+2. Present it here in chat, readable at a glance: the counts first (open / regressed / fixed / won't-fix); then any REGRESSIONS, each called out loudly; then the open issues worst-first — severity, title, area, and how many times each has been seen. Use a table if it helps.
+3. Close with the one or two issues you would fix first and why — hit counts are evidence.
+Do not fix anything this turn.`;
+}
+
 /** Shared tail of the kickoff and settle prompts: how to synthesize a finished run. */
 function synthesisInstructions(runSlug: string): string {
 	return `Synthesize run '${runSlug}':
 1. Orient: battletest action 'view' for the personas, tickets, notes paths, and metrics summaries. Read every tester's notes file, and view_ticket anything you need in full.
 2. Dedupe: where testers hit the same underlying issue, keep the clearest ticket and mark the rest with update_ticket status 'duplicate' plus duplicate_of. Adjust a severity only when the evidence across testers clearly supports it.
 3. Time the run: read the metrics summaries (per tester: wall clock, action count, time inside tools vs time the model spent thinking, per-tool totals and error counts, the slowest individual actions). Name the bottlenecks — which tool ate the run, whether tools or the model dominated, which testers were pathologically slow and why (the per-action JSONL beside each summary has the raw spans if a summary looks odd). The run folder's performance.json scores every tester (severity-weighted tickets, spend, their full brief); name the strongest tester in the report so future teams can be picked on form.
-4. Write the report with action 'write_report': ## Overview (what was tested and by whom), ## Experience by persona (a short capsule per tester, in their voice), ## Findings by severity (every non-duplicate ticket: title, area, persona, one line), ## Themes (recurring UX/UI/performance/wording patterns across testers), ## Run performance (the bottleneck findings from step 3 — where future runs can be made faster), ## Suggested fix order.
+4. Write the report with action 'write_report': ## Overview (what was tested and by whom), ## Experience by persona (a short capsule per tester, in their voice), ## Findings by severity (every non-duplicate ticket: title, area, persona, one line — REGRESSIONS first and loudest), ## Ratchet (what the cross-run ledger says: fresh problems vs hits on known issues this run, every regression by name, and the most-hit still-open issues — battletest action 'ledger' has the numbers), ## Themes (recurring UX/UI/performance/wording patterns across testers), ## Run performance (the bottleneck findings from step 3 — where future runs can be made faster), ## Suggested fix order.
 5. Then show me the findings here in chat: the headline issues with severities, the themes, what the testers actually said, and where the report and tickets live. I must be able to judge the state of the app from your message alone.
 Do not fix anything this turn — the tickets are for later sessions.`;
 }
@@ -669,6 +713,16 @@ function makeTestlogTool(
 			if (missing.length > 0) {
 				return textResult(JSON.stringify({ success: false, error: `a ticket needs: ${missing.join(", ")}` }));
 			}
+			const filing: Parameters<BattleTestStore["addTicket"]>[1] = {
+				title: params.title ?? "",
+				persona: persona.slug,
+				severity: params.severity ?? "minor",
+				category: params.category ?? "other",
+				area: params.area,
+				what: params.what ?? "",
+				expected: params.expected ?? "",
+				steps: params.steps ?? "",
+			};
 			// One problem, one ticket, however many testers hit it: a filing that
 			// reads like an existing ticket is bounced with a pointer instead of
 			// creating a duplicate, and the bounced tester is told to stand down
@@ -691,18 +745,75 @@ function makeTestlogTool(
 						}),
 					);
 				}
+				// The ledger remembers what past runs already found. A known open
+				// problem costs one bounced filing instead of a re-investigation —
+				// the hit count IS the severity evidence. A fixed problem that
+				// reappears files loudly as a regression.
+				const known = store.findLedgerMatch(params.area, filing.title);
+				if (known !== undefined && known.status !== "fixed") {
+					const hit = store.recordLedgerHit(
+						known.slug,
+						{ run: runSlug, persona: persona.slug, date: new Date().toISOString() },
+						params.severity,
+						filing.what,
+					);
+					return textResult(
+						JSON.stringify({
+							success: false,
+							known_issue: known.slug,
+							known_status: known.status,
+							first_seen: known.origin.run,
+							times_seen: hit?.entry.hits.length ?? known.hits.length + 1,
+							message:
+								known.status === "wont-fix"
+									? `A previous run already found this, and it is deliberately not being fixed ` +
+										`('${known.slug}'). Your sighting is recorded — spend nothing more on it.`
+									: `A previous run already found this: '${known.slug}' (first seen in ` +
+										`'${known.origin.run}', still ${known.status}). Your sighting is recorded as a ` +
+										"hit — that IS the contribution; every hit is evidence of how much it hurts. " +
+										"Do NOT investigate further. Refile with force=true only if yours is truly a " +
+										"different problem.",
+						}),
+					);
+				}
+				if (known !== undefined && known.status === "fixed") {
+					// A fixed issue sighted again: file it in this run, flip the
+					// ledger entry to regressed, and tell the tester what they hold.
+					const refiled = store.addTicket(runSlug, filing);
+					if (refiled.success === true) {
+						store.recordLedgerHit(
+							known.slug,
+							{ run: runSlug, persona: persona.slug, date: new Date().toISOString() },
+							params.severity,
+							filing.what,
+						);
+						store.linkTicket(runSlug, String(refiled.ticket), known.slug);
+						onTicket({
+							title: filing.title,
+							severity: filing.severity,
+							category: filing.category,
+							area: params.area,
+						});
+						return textResult(
+							JSON.stringify({
+								...refiled,
+								regression_of: known.slug,
+								was_fixed_in: known.fixedIn ?? "unrecorded",
+								message:
+									"REGRESSION — this problem was marked fixed and you just hit it again. Your " +
+									"ticket is filed and flagged. Nail the reproduction steps: this is the most " +
+									"valuable ticket a run can produce. Then move on.",
+							}),
+						);
+					}
+					return textResult(JSON.stringify(refiled));
+				}
 			}
-			const result = store.addTicket(runSlug, {
-				title: params.title ?? "",
-				persona: persona.slug,
-				severity: params.severity ?? "minor",
-				category: params.category ?? "other",
-				area: params.area,
-				what: params.what ?? "",
-				expected: params.expected ?? "",
-				steps: params.steps ?? "",
-			});
+			const result = store.addTicket(runSlug, filing);
 			if (result.success === true) {
+				// Every fresh problem enters the cross-run ledger the moment it
+				// is filed, so the next run starts knowing about it.
+				store.promoteTicket(runSlug, String(result.ticket));
 				onTicket({
 					title: params.title ?? "",
 					severity: params.severity ?? "minor",
@@ -1304,7 +1415,11 @@ export function createBattleTestExtension(
 		const run = store.createRun({ focus: focus === "" ? undefined : focus, personas });
 		activeRun = run.slug;
 		await dispatchTesters(run, undefined, ctx, model, thinkingLevel);
-		smolt.sendUserMessage(kickoffPrompt(run, model));
+		// The tool-driven start happens mid-turn: a bare send throws ("agent is
+		// already processing") and the bridge swallows it, so the kickoff brief
+		// silently never arrived. followUp queues it for right after this turn,
+		// and sends immediately when the command path calls this while idle.
+		smolt.sendUserMessage(kickoffPrompt(run, model), { deliverAs: "followUp" });
 		return run;
 	};
 
@@ -1341,7 +1456,7 @@ export function createBattleTestExtension(
 		activeRun = run.slug;
 		store.setRunStatus(run.slug, "testing");
 		await dispatchTesters(run, resumeBriefs(run), ctx);
-		smolt.sendUserMessage(resumeKickoffPrompt(run, drained));
+		smolt.sendUserMessage(resumeKickoffPrompt(run, drained), { deliverAs: "followUp" });
 		return "";
 	};
 
@@ -1362,6 +1477,7 @@ export function createBattleTestExtension(
 		reportedTokens.cost = 0;
 		wrappedUp.clear();
 		testers = run.personas.map((persona) => ({ persona, status: "testing" as const, summary: "", error: "" }));
+		const knownIssues = knownIssuesBrief(store);
 		for (const [index, tester] of testers.entries()) {
 			const task = testerPrompt(
 				tester.persona,
@@ -1369,6 +1485,7 @@ export function createBattleTestExtension(
 				index,
 				store.profileDir(run.slug, tester.persona.slug),
 				resume?.[index],
+				knownIssues,
 			);
 			tester.task = task;
 			const onFinish = (status: "completed" | "errored", detail: string): void => {
@@ -1505,7 +1622,12 @@ export function createBattleTestExtension(
 			"'run' for the latest); 'view_ticket' (ticket, run?) for a ticket's full body; 'add_ticket' " +
 			"(title, what, severity?, category?, area?, expected?, steps?) to file an issue yourself; " +
 			"'update_ticket' (ticket, status?, severity?, duplicate_of?) — status one of open/fixed/" +
-			"wont-fix/duplicate, and 'duplicate' requires duplicate_of; 'write_report' (content, run?) " +
+			"wont-fix/duplicate, and 'duplicate' requires duplicate_of; 'ledger' (status?) lists the " +
+			"cross-run issue ledger — every distinct problem past runs found, with hit counts and " +
+			"regressions; 'update_ledger' (ticket = the ledger slug, status open/fixed/wont-fix/regressed) " +
+			"resolves a ledger entry — mark entries 'fixed' as the user fixes them, so future runs verify " +
+			"instead of re-discovering; 'sync_ledger' backfills the ledger from every run on disk; " +
+			"'write_report' (content, run?) " +
 			"writes the synthesized report and completes the run; 'wait' (seconds?) blocks while testers " +
 			"from this session's active run are still working and reports the roster when it returns — it " +
 			"also returns early whenever a tester requests clearance for a possibly-risky action; 'decide' " +
@@ -1525,6 +1647,9 @@ export function createBattleTestExtension(
 					Type.Literal("view_ticket"),
 					Type.Literal("add_ticket"),
 					Type.Literal("update_ticket"),
+					Type.Literal("ledger"),
+					Type.Literal("update_ledger"),
+					Type.Literal("sync_ledger"),
 					Type.Literal("write_report"),
 					Type.Literal("wait"),
 					Type.Literal("decide"),
@@ -1549,7 +1674,11 @@ export function createBattleTestExtension(
 			what: Type.Optional(Type.String({ description: "What actually happened (add_ticket)" })),
 			expected: Type.Optional(Type.String({ description: "What should have happened (add_ticket)" })),
 			steps: Type.Optional(Type.String({ description: "Steps to reproduce (add_ticket)" })),
-			status: Type.Optional(Type.String({ description: "New ticket status (update_ticket)" })),
+			status: Type.Optional(
+				Type.String({
+					description: "New ticket status (update_ticket) or ledger status (update_ledger, ledger filter)",
+				}),
+			),
 			duplicate_of: Type.Optional(
 				Type.String({ description: "Canonical ticket when marking a duplicate (update_ticket)" }),
 			),
@@ -1813,6 +1942,7 @@ export function createBattleTestExtension(
 				{ value: "stop", label: "stop", description: "Halt every tester in the current run" },
 				{ value: "resume", label: "resume", description: "Continue an interrupted run from its diaries" },
 				{ value: "report", label: "report", description: "Synthesize the latest finished run now" },
+				{ value: "ledger", label: "ledger", description: "The cross-run issue ledger: open, fixed, regressed" },
 			];
 			const prefix = argumentPrefix.trim().toLowerCase();
 			return items.filter((item) => item.value.startsWith(prefix));
@@ -1835,6 +1965,21 @@ export function createBattleTestExtension(
 							.join("\n"),
 					"info",
 				);
+				return;
+			}
+
+			if (verb === "ledger") {
+				// Real content belongs in the chat, not a toast: the agent reads
+				// the ledger and presents it. A truly empty project (no runs at
+				// all) is the one case a quiet notify answers better.
+				if (store.listLedger().length === 0 && store.listRunSlugs().length === 0) {
+					ctx.ui.notify(
+						"Nothing in the ledger yet — it builds itself as battletest runs file tickets. Start a run with /battletest and it fills in on its own.",
+						"info",
+					);
+					return;
+				}
+				smolt.sendUserMessage(ledgerPrompt());
 				return;
 			}
 

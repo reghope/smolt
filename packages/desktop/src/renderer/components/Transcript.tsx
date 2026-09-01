@@ -17,7 +17,7 @@ import {
 } from "../state/app.ts";
 import { useApp } from "../state/useApp.ts";
 import type { ChatMessage, ToolBlock } from "../store.ts";
-import { thinkingSummary } from "../thinking.ts";
+import { briefSummary, thinkingSummary } from "../thinking.ts";
 import { Button } from "./ui/button.tsx";
 import { Icon } from "./ui/icon.tsx";
 import { ImageCard, LinkPreviewCard, standaloneLinks } from "./MediaCards.tsx";
@@ -792,14 +792,6 @@ type Segment =
  * switched into mid-turn is drawn from its file, which cannot hold a
  * message still being written, and the working line belongs to the turn.
  */
-/** A brief opening sentence, for the collapsed line. */
-function briefSummary(prose: string): string {
-	const firstLine = prose.split("
-").find((line) => line.trim() !== "")?.trim() ?? "";
-	const sentence = /^(.{0,120}?[.!?])(s|$)/.exec(firstLine)?.[1] ?? firstLine;
-	return sentence.length > 120 ? `${sentence.slice(0, 117)}...` : sentence;
-}
-
 function buildSegments(messages: ChatMessage[], running: boolean): Segment[] {
 	const segments: Segment[] = [];
 	let run: ToolBlock[] = [];

@@ -68,3 +68,19 @@ export const AUTO_THINKING_ENTRY = "auto";
 export function thinkingLabel(level: string): string {
 	return level === AUTO_THINKING_ENTRY ? "Auto thinking" : level;
 }
+
+/**
+ * The opening sentence of an extension's brief, for the collapsed line that
+ * stands in for it in the transcript. Lives here rather than beside the
+ * component because the renderer is excluded from the repo's typecheck and
+ * lint — pure text logic belongs where tests can reach it.
+ */
+export function briefSummary(prose: string): string {
+	const firstLine =
+		prose
+			.split("\n")
+			.find((line) => line.trim() !== "")
+			?.trim() ?? "";
+	const sentence = /^(.{0,120}?[.!?])(\s|$)/.exec(firstLine)?.[1] ?? firstLine;
+	return sentence.length > 120 ? `${sentence.slice(0, 117)}...` : sentence;
+}

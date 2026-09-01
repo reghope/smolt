@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { thinkingSummary } from "../src/renderer/thinking.ts";
+import { briefSummary, thinkingSummary } from "../src/renderer/thinking.ts";
 
 /**
  * The reasoning→status-line condenser, ported from the imagined web agent
@@ -80,5 +80,31 @@ describe("thinkingSummary", () => {
 			expect(summary).not.toContain("`");
 			expect(/^[^A-Za-z0-9]+$/.test(summary || "x")).toBe(false);
 		}
+	});
+});
+
+describe("briefSummary", () => {
+	test("takes the opening sentence of a brief", () => {
+		expect(briefSummary("Review code changes for real defects. No target was given.\n\nHOW TO REVIEW\n1. ...")).toBe(
+			"Review code changes for real defects.",
+		);
+	});
+
+	test("skips leading blank lines", () => {
+		expect(briefSummary("\n\n  Chart a wayfinder map. Then stop.")).toBe("Chart a wayfinder map.");
+	});
+
+	test("falls back to the first line when it has no sentence end", () => {
+		expect(briefSummary("Synthesize run '20260901-1532'\nnext line")).toBe("Synthesize run '20260901-1532'");
+	});
+
+	test("truncates a very long unpunctuated opening", () => {
+		const summary = briefSummary("x".repeat(300));
+		expect(summary).toHaveLength(120);
+		expect(summary.endsWith("...")).toBe(true);
+	});
+
+	test("an empty brief summarises to nothing", () => {
+		expect(briefSummary("")).toBe("");
 	});
 });

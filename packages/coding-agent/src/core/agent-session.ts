@@ -350,6 +350,10 @@ export class AgentSession {
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
 
+	// Pending extension abortResponse() request, consumed by _handlePostAgentRun.
+	private _abortResponseRequest: { reason: string; retry: boolean; attempt: number; maxAttempts: number } | undefined =
+		undefined;
+
 	// Bash execution state
 	private readonly _bashAbortControllers = new Set<AbortController>();
 	private _pendingBashMessages: BashExecutionMessage[] = [];
@@ -1110,6 +1114,38 @@ export class AgentSession {
 	private async _handlePostAgentRun(): Promise<boolean> {
 		const msg = this._lastAssistantMessage;
 		this._lastAssistantMessage = undefined;
+
+		// An extension asked to abort this response (e.g. a degeneration guard).
+		// Keyed on the request, not on stopReason: a provider that ignores the
+		// abort signal may finish the stream normally and still needs handling.
+		const abortRequest = this._abortResponseRequest;
+		if (abortRequest) {
+			this._abortResponseRequest = undefined;
+			if (msg && abortRequest.retry) {
+				this._emit({
+					type: "auto_retry_start",
+					attempt: abortRequest.attempt,
+					maxAttempts: abortRequest.maxAttempts,
+					delayMs: 0,
+					errorMessage: abortRequest.reason,
+				});
+				// Drop the aborted response from agent state (it stays in session
+				// history) so continue() re-issues the identical request.
+				const messages = this.agent.state.messages;
+				if (messages.length > 0 && messages[messages.length - 1]?.role === "assistant") {
+					this.agent.state.messages = messages.slice(0, -1);
+				}
+				return true;
+			}
+			this._emit({
+				type: "auto_retry_end",
+				success: false,
+				attempt: abortRequest.attempt,
+				finalError: abortRequest.reason,
+			});
+			return false;
+		}
+
 		if (!msg) {
 			return false;
 		}
@@ -1204,9 +1240,9 @@ export class AgentSession {
 					);
 				}
 				if (options.streamingBehavior === "followUp") {
-					await this._queueFollowUp(expandedText, currentImages);
+					await this._queueFollowUp(expandedText, currentImages, options.source);
 				} else {
-					await this._queueSteer(expandedText, currentImages);
+					await this._queueSteer(expandedText, currentImages, options.source);
 				}
 				preflightResult?.(true);
 				return;
@@ -1260,6 +1296,10 @@ export class AgentSession {
 				// than putting a command's instructions in the reader's voice.
 				...(options?.source === "extension" ? { internal: true } : {}),
 			});
+
+			if (options?.source === "extension") {
+				messages.push(this._briefNarrationMessage());
+			}
 
 			// Inject any pending "nextTurn" messages as context alongside the user message
 			for (const msg of this._pendingNextTurnMessages) {
@@ -1412,9 +1452,28 @@ export class AgentSession {
 	}
 
 	/**
+	 * The context-only nudge that rides with every extension brief: surfaces
+	 * hide the brief itself, so the agent opens by saying, in its own words,
+	 * what it is about to do — narration instead of a pasted prompt.
+	 */
+	private _briefNarrationMessage(): CustomMessage {
+		return {
+			role: "custom",
+			customType: "brief-narration",
+			content:
+				"The brief above came from harness machinery and is hidden from the user's view. " +
+				"Open your reply with one short sentence telling the user, in your own words, what " +
+				"you are about to do — then carry out the brief. Do not mention the brief or repeat " +
+				"its instructions.",
+			display: false,
+			timestamp: Date.now(),
+		};
+	}
+
+	/**
 	 * Internal: Queue a steering message (already expanded, no extension command check).
 	 */
-	private async _queueSteer(text: string, images?: ImageContent[]): Promise<void> {
+	private async _queueSteer(text: string, images?: ImageContent[], source?: InputSource): Promise<void> {
 		this._steeringMessages.push(text);
 		this._emitQueueUpdate();
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
@@ -1425,13 +1484,16 @@ export class AgentSession {
 			role: "user",
 			content,
 			timestamp: Date.now(),
+			// An extension's brief, not the reader talking — surfaces hide it.
+			...(source === "extension" ? { internal: true } : {}),
 		});
+		if (source === "extension") this.agent.steer(this._briefNarrationMessage());
 	}
 
 	/**
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
 	 */
-	private async _queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
+	private async _queueFollowUp(text: string, images?: ImageContent[], source?: InputSource): Promise<void> {
 		this._followUpMessages.push(text);
 		this._emitQueueUpdate();
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
@@ -1442,7 +1504,10 @@ export class AgentSession {
 			role: "user",
 			content,
 			timestamp: Date.now(),
+			// An extension's brief, not the reader talking — surfaces hide it.
+			...(source === "extension" ? { internal: true } : {}),
 		});
+		if (source === "extension") this.agent.followUp(this._briefNarrationMessage());
 	}
 
 	/**
@@ -2575,6 +2640,20 @@ export class AgentSession {
 							error: err instanceof Error ? err.message : String(err),
 						});
 					});
+				},
+				abortResponse: (reason, options) => {
+					if (!this._isAgentRunActive) return false;
+					this._abortResponseRequest = {
+						reason,
+						retry: options?.retry !== false,
+						attempt: options?.attempt ?? 1,
+						maxAttempts: options?.maxAttempts ?? 1,
+					};
+					// Direct agent abort: ctx.abort() routes through the host's
+					// abort handler (the TUI restores queued messages, etc.),
+					// which is wrong for a mechanical guard.
+					this.agent.abort();
+					return true;
 				},
 				appendEntry: (customType, data) => {
 					const entryId = this.sessionManager.appendCustomEntry(customType, data);

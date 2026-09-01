@@ -17,7 +17,7 @@ import {
 } from "../state/app.ts";
 import { useApp } from "../state/useApp.ts";
 import type { ChatMessage, ToolBlock } from "../store.ts";
-import { briefSummary, thinkingSummary } from "../thinking.ts";
+import { thinkingSummary } from "../thinking.ts";
 import { Button } from "./ui/button.tsx";
 import { Icon } from "./ui/icon.tsx";
 import { ImageCard, LinkPreviewCard, standaloneLinks } from "./MediaCards.tsx";
@@ -963,30 +963,12 @@ export function Transcript() {
 					{buildSegments(state.chat.messages, state.chat.streaming && !state.chatLoading).map(
 						(segment, position) => {
 						if (segment.kind === "user" && segment.message.internal === true) {
-							// A brief an extension sent, not the reader talking: one
-							// quiet line that opens, and no "edit and resend" — there
-							// is no message of theirs here to rewind to.
-							const prose = messageProse(segment.message);
-							return (
-								<Disclosure
-									key={`u${segment.index}`}
-									dkey={`brief-${segment.index}`}
-									className="group/brief my-4 text-sm text-muted-foreground"
-								>
-									<summary className="flex cursor-pointer list-none select-none items-baseline gap-2 [&::-webkit-details-marker]:hidden">
-										<span className="flex-none text-xs text-faint">Brief</span>
-										<span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap group-open/brief:whitespace-normal">
-											{briefSummary(prose)}
-										</span>
-										<span className="flex flex-none items-center text-faint transition-transform group-open/brief:rotate-90">
-											<Icon name="chevron" />
-										</span>
-									</summary>
-									<div className="mt-2 border-l-2 border-border pl-3">
-										<Markdown text={prose} />
-									</div>
-								</Disclosure>
-							);
+							// A brief an extension sent, not the reader talking. Internal
+							// prompts stay out of the chat entirely — the command that
+							// caused them is already echoed, and the machinery's wording
+							// is not for the reader. (The segment still exists so user
+							// indexing for edit-and-resend stays stable.)
+							return null;
 						}
 						if (segment.kind === "user") {
 							const prose = messageProse(segment.message);

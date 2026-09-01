@@ -1,0 +1,228 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, test } from "vitest";
+import type { ExtensionAPI } from "../src/core/extensions/types.ts";
+import { DegenerationWatcher, detectDegeneration } from "../src/extensions/degeneration/detector.ts";
+import {
+	createDegenerationGuard,
+	DEFAULT_DEGENERATION_CONFIG,
+	readDegenerationConfig,
+} from "../src/extensions/degeneration/index.ts";
+
+/**
+ * Degeneration guard tests: the pure repetition detector, config reading,
+ * and the extension's trip/retry/give-up policy against a fake API.
+ */
+
+const MIN_REPEATS = 10;
+
+/** Distinct filler so length thresholds don't interfere with repeat counts. */
+function filler(chars: number): string {
+	const lines: string[] = [];
+	let length = 0;
+	let i = 0;
+	while (length < chars) {
+		const line = `Setup step ${i} completed with distinct output value ${i * 17}.`;
+		lines.push(line);
+		length += line.length + 1;
+		i += 1;
+	}
+	return `${lines.join("\n")}\n`;
+}
+
+describe("detectDegeneration", () => {
+	const sentence = "I need to make sure the system understands this whole plan.";
+
+	test("trips on the loop shape from the real glm session", () => {
+		const text = `${filler(200)}${`${sentence}\n\n`.repeat(15)}`;
+		const reason = detectDegeneration(text, MIN_REPEATS);
+		expect(reason).toContain("repeated");
+		expect(reason).toContain("I need to make sure the system understands");
+	});
+
+	test("stays quiet below minRepeats", () => {
+		const text = `${filler(700)}${`${sentence}\n\n`.repeat(MIN_REPEATS - 1)}`;
+		expect(detectDegeneration(text, MIN_REPEATS)).toBeUndefined();
+	});
+
+	test("blank lines between repeats do not hide the loop", () => {
+		const text = `${filler(200)}${`${sentence}\n\n\n`.repeat(MIN_REPEATS)}`;
+		expect(detectDegeneration(text, MIN_REPEATS)).toContain("repeated");
+	});
+
+	test("trips on a newline-free periodic tail", () => {
+		const unit = "the system must comply with this ";
+		const text = `${filler(400)}${unit.repeat(MIN_REPEATS + 1)}`;
+		const reason = detectDegeneration(text, MIN_REPEATS);
+		expect(reason).toContain("the fragment");
+	});
+
+	test("ignores repeated units without letters", () => {
+		const text = `${filler(400)}${"----------------------------------------\n".repeat(15)}`;
+		expect(detectDegeneration(text, MIN_REPEATS)).toBeUndefined();
+	});
+
+	test("ignores short repeated lines", () => {
+		const text = `${filler(400)}${"}\n".repeat(30)}`;
+		expect(detectDegeneration(text, MIN_REPEATS)).toBeUndefined();
+	});
+
+	test("ignores legitimately repetitive but distinct code", () => {
+		const lines: string[] = [];
+		for (let i = 0; i < 30; i++) lines.push(`\texpect(rows[${i}]!.value).toBe(${i * 3});`);
+		expect(detectDegeneration(filler(200) + lines.join("\n"), MIN_REPEATS)).toBeUndefined();
+	});
+
+	test("ignores short accumulations entirely", () => {
+		expect(detectDegeneration(`${sentence}\n`.repeat(5), MIN_REPEATS)).toBeUndefined();
+	});
+});
+
+describe("DegenerationWatcher", () => {
+	test("throttles rechecks and remembers nothing across reset", () => {
+		const watcher = new DegenerationWatcher(MIN_REPEATS);
+		const clean = filler(700);
+		expect(watcher.check(clean)).toBeUndefined();
+		// Growth below the recheck threshold: no verdict either way.
+		expect(watcher.check(`${clean}tiny`)).toBeUndefined();
+		watcher.reset();
+		const bad = `${filler(200)}${"I need to make sure the system understands this whole plan.\n\n".repeat(15)}`;
+		expect(watcher.check(bad)).toContain("repeated");
+	});
+});
+
+describe("config", () => {
+	test("missing, malformed, and out-of-range values yield defaults", () => {
+		const dir = mkdtempSync(join(tmpdir(), "degen-"));
+		try {
+			expect(readDegenerationConfig(join(dir, "absent.json"))).toEqual(DEFAULT_DEGENERATION_CONFIG);
+			expect(readDegenerationConfig(undefined)).toEqual(DEFAULT_DEGENERATION_CONFIG);
+			const bad = join(dir, "bad.json");
+			writeFileSync(bad, "{nope", "utf-8");
+			expect(readDegenerationConfig(bad)).toEqual(DEFAULT_DEGENERATION_CONFIG);
+			const custom = join(dir, "custom.json");
+			writeFileSync(custom, JSON.stringify({ maxRetries: 2, minRepeats: 1 }), "utf-8");
+			const config = readDegenerationConfig(custom);
+			expect(config.maxRetries).toBe(2);
+			expect(config.minRepeats).toBe(DEFAULT_DEGENERATION_CONFIG.minRepeats); // < 3 rejected
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+interface AbortCall {
+	reason: string;
+	options?: { retry?: boolean; attempt?: number; maxAttempts?: number };
+}
+
+class FakeSmolt {
+	handlers = new Map<string, ((event: Record<string, unknown>) => Promise<unknown>)[]>();
+	aborts: AbortCall[] = [];
+
+	on(event: string, handler: (event: Record<string, unknown>) => Promise<unknown>): void {
+		const list = this.handlers.get(event) ?? [];
+		list.push(handler);
+		this.handlers.set(event, list);
+	}
+
+	abortResponse(reason: string, options?: AbortCall["options"]): boolean {
+		this.aborts.push({ reason, options });
+		return true;
+	}
+
+	async fire(event: string, payload: Record<string, unknown> = {}): Promise<void> {
+		for (const handler of this.handlers.get(event) ?? []) {
+			await handler({ type: event, ...payload });
+		}
+	}
+}
+
+const LOOP_TEXT = `${filler(200)}${"I need to make sure the system understands this whole plan.\n\n".repeat(15)}`;
+
+async function streamLoop(smolt: FakeSmolt): Promise<void> {
+	await smolt.fire("message_start", { message: { role: "assistant", content: [] } });
+	await smolt.fire("message_update", {
+		message: { role: "assistant", content: [{ type: "text", text: LOOP_TEXT }] },
+		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "." },
+	});
+}
+
+describe("guard policy", () => {
+	function wire(maxRetries = 1): FakeSmolt {
+		const smolt = new FakeSmolt();
+		createDegenerationGuard(smolt as unknown as ExtensionAPI, {
+			enabled: true,
+			maxRetries,
+			minRepeats: MIN_REPEATS,
+		});
+		return smolt;
+	}
+
+	test("first trip asks for a retry, and only once per response", async () => {
+		const smolt = wire();
+		await smolt.fire("before_agent_start", { systemPrompt: "x" });
+		await streamLoop(smolt);
+		// More deltas after the trip stay silent.
+		await smolt.fire("message_update", {
+			message: { role: "assistant", content: [{ type: "text", text: `${LOOP_TEXT}more` }] },
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "." },
+		});
+		expect(smolt.aborts).toHaveLength(1);
+		expect(smolt.aborts[0]!.reason).toContain("Degenerate output detected");
+		expect(smolt.aborts[0]!.options).toMatchObject({ retry: true, attempt: 1, maxAttempts: 1 });
+	});
+
+	test("a second degenerate response in the turn gives up", async () => {
+		const smolt = wire();
+		await smolt.fire("before_agent_start", { systemPrompt: "x" });
+		await streamLoop(smolt);
+		await streamLoop(smolt); // retry degenerates too
+		expect(smolt.aborts).toHaveLength(2);
+		expect(smolt.aborts[1]!.options).toMatchObject({ retry: false });
+		expect(smolt.aborts[1]!.reason).toContain("Retry limit reached");
+	});
+
+	test("a new user turn resets the retry budget", async () => {
+		const smolt = wire();
+		await smolt.fire("before_agent_start", { systemPrompt: "x" });
+		await streamLoop(smolt);
+		await smolt.fire("before_agent_start", { systemPrompt: "x" });
+		await streamLoop(smolt);
+		expect(smolt.aborts).toHaveLength(2);
+		expect(smolt.aborts[1]!.options).toMatchObject({ retry: true, attempt: 1 });
+	});
+
+	test("thinking-block loops trip too", async () => {
+		const smolt = wire();
+		await smolt.fire("before_agent_start", { systemPrompt: "x" });
+		await smolt.fire("message_start", { message: { role: "assistant", content: [] } });
+		await smolt.fire("message_update", {
+			message: { role: "assistant", content: [{ type: "thinking", thinking: LOOP_TEXT }] },
+			assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "." },
+		});
+		expect(smolt.aborts).toHaveLength(1);
+	});
+
+	test("clean output never trips", async () => {
+		const smolt = wire();
+		await smolt.fire("before_agent_start", { systemPrompt: "x" });
+		await smolt.fire("message_start", { message: { role: "assistant", content: [] } });
+		await smolt.fire("message_update", {
+			message: { role: "assistant", content: [{ type: "text", text: filler(3000) }] },
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "." },
+		});
+		expect(smolt.aborts).toHaveLength(0);
+	});
+
+	test("enabled:false registers nothing", () => {
+		const smolt = new FakeSmolt();
+		createDegenerationGuard(smolt as unknown as ExtensionAPI, {
+			enabled: false,
+			maxRetries: 1,
+			minRepeats: MIN_REPEATS,
+		});
+		expect(smolt.handlers.size).toBe(0);
+	});
+});

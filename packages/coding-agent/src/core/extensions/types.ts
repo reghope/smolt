@@ -1406,6 +1406,17 @@ export interface ExtensionAPI {
 		options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean },
 	): void;
 
+	/**
+	 * Abort the in-flight assistant response, deterministically (not routed
+	 * through the host's abort handler like ctx.abort()). By default the same
+	 * request is re-issued without the aborted response — the primitive
+	 * behind guards that stop a degenerate stream and resample. Pass
+	 * `retry: false` to abort and end the run instead (budget exhausted).
+	 * Emits auto_retry_start (retry) or auto_retry_end (no retry) with the
+	 * reason. Returns false when no response is in flight.
+	 */
+	abortResponse(reason: string, options?: AbortResponseOptions): boolean;
+
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
 
@@ -1663,6 +1674,18 @@ export type SendUserMessageHandler = (
 	options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean },
 ) => void;
 
+/** Options for ExtensionAPI.abortResponse(). */
+export interface AbortResponseOptions {
+	/** Re-issue the same request without the aborted response (default: true). */
+	retry?: boolean;
+	/** Attempt number reported in auto_retry events (default: 1). */
+	attempt?: number;
+	/** Attempt budget reported in auto_retry events (default: 1). */
+	maxAttempts?: number;
+}
+
+export type AbortResponseHandler = (reason: string, options?: AbortResponseOptions) => boolean;
+
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
 
 export type SetSessionNameHandler = (name: string) => void;
@@ -1726,6 +1749,7 @@ export interface ExtensionRuntimeState {
 export interface ExtensionActions {
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
+	abortResponse: AbortResponseHandler;
 	appendEntry: AppendEntryHandler;
 	setSessionName: SetSessionNameHandler;
 	getSessionName: GetSessionNameHandler;

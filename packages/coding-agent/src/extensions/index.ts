@@ -1,6 +1,7 @@
 import type { InlineExtension } from "../core/extensions/types.ts";
 import autoThinkingExtension from "./auto-thinking/index.ts";
 import battleTestExtension from "./battletest/index.ts";
+import degenerationExtension from "./degeneration/index.ts";
 import goalExtension from "./goal/index.ts";
 import learningExtension from "./learning/index.ts";
 import llamaExtension from "./llama/index.ts";
@@ -15,6 +16,7 @@ import wayfinderExtension from "./wayfinder/index.ts";
 
 export const builtInExtensions: InlineExtension[] = [
 	{ name: "llama.cpp", factory: llamaExtension, hidden: true },
+	{ name: "degeneration", factory: degenerationExtension, hidden: true },
 	{ name: "learning", factory: learningExtension, hidden: true },
 	{ name: "screenshot", factory: screenshotExtension, hidden: true },
 	{ name: "permissions", factory: permissionsExtension, hidden: true },

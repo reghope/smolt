@@ -14,6 +14,7 @@ import {
 	type DiffBaseline,
 	toGitPath,
 } from "./diff.ts";
+import { transformersEntry } from "./embeddings-module.ts";
 import { refreshIconCacheAfterUpdate } from "./icon-cache.ts";
 import { fetchLinkPreview } from "./link-preview.ts";
 import { listSessions, searchSessions } from "./sessions.ts";
@@ -182,9 +183,12 @@ const STRIPPED_AGENT_VARS = [
  * An `undefined` value deletes an inherited variable instead of setting it,
  * which is what lets the spawn filter below drop the shell's leftovers.
  */
+const embeddingsModule = transformersEntry();
 const agentEnv = (extra: Record<string, string>): Record<string, string | undefined> => ({
 	...Object.fromEntries(STRIPPED_AGENT_VARS.map((name) => [name, undefined])),
 	...(app.isPackaged ? { ELECTRON_RUN_AS_NODE: "1", SMOLT_PACKAGE_DIR: join(process.resourcesPath, "agent") } : {}),
+	// The agents embed past sessions with the app's own copy of transformers.js.
+	...(embeddingsModule ? { SMOLT_EMBEDDINGS_MODULE: embeddingsModule } : {}),
 	...extra,
 });
 
@@ -207,6 +211,25 @@ function telegramConfigured(): boolean {
 		return raw.enabled !== false && typeof raw.chatId === "number" && raw.chatId !== 0;
 	} catch {
 		return false;
+	}
+}
+
+/**
+ * The session the dedicated Telegram host is writing into.
+ *
+ * The host is a hidden agent with no pane of its own, so without asking it
+ * there is nothing to tell its chat apart from any other file in the sessions
+ * directory. Answered from the bridge rather than remembered, because `/new`
+ * in the Telegram chat rotates the session underneath us.
+ */
+async function telegramSessionPath(): Promise<string> {
+	if (!telegramBridge) return "";
+	try {
+		const state = (await telegramBridge.call("getState", [])) as { sessionFile?: string } | undefined;
+		return typeof state?.sessionFile === "string" ? state.sessionFile : "";
+	} catch {
+		// A host that cannot answer simply has no chat to lift out.
+		return "";
 	}
 }
 
@@ -1004,7 +1027,12 @@ app.whenReady().then(async () => {
 		const needle = typeof query === "string" ? query.trim() : "";
 		const rows = needle === "" ? await listSessions(undefined, 50) : await searchSessions(needle, undefined, 50);
 		const busyPaths = new Set(slots.filter((slot) => slot.busy).map((slot) => slot.sessionPath));
-		return rows.map((row) => ({ ...row, busy: busyPaths.has(row.path) }));
+		const telegramPath = await telegramSessionPath();
+		return rows.map((row) => ({
+			...row,
+			busy: busyPaths.has(row.path),
+			telegram: telegramPath !== "" && row.path === telegramPath,
+		}));
 	});
 	ipcMain.handle("app:info", () => ({
 		cwd: activeCwd,
@@ -1216,6 +1244,32 @@ app.whenReady().then(async () => {
 			// up. Holding the reply here would freeze the switch on nothing.
 			void restartAgentIn(target);
 			return { ok: true, value: target };
+		} catch (err) {
+			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+		}
+	});
+
+	/**
+	 * Delete everything the agent has accumulated on this machine.
+	 *
+	 * The agents are stopped first and restarted after: on Windows the running
+	 * process holds state.db open, and an open handle turns the delete into a
+	 * failure rather than the database disappearing. Restarting also means the
+	 * app comes back on an empty history instead of holding a chat that no
+	 * longer has a file behind it.
+	 */
+	ipcMain.handle("app:wipe-local-data", async () => {
+		try {
+			const { wipeLocalData } = await import("./wipe.ts");
+			for (const slot of slots) {
+				stoppingBridges.add(slot.bridge);
+				await slot.bridge.stop();
+			}
+			slots.length = 0;
+			warming = null;
+			const report = wipeLocalData();
+			await restartAgentIn(activeCwd);
+			return { ok: report.failed.length === 0, value: report, error: report.failed[0]?.error };
 		} catch (err) {
 			return { ok: false, error: err instanceof Error ? err.message : String(err) };
 		}

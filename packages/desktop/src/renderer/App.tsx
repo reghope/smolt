@@ -9,6 +9,7 @@ import {
 	deleteSelectedSessions,
 	cycleSession,
 	newSession,
+	selectAllSessions,
 	toggleDiffPane,
 	toggleSessionSearch,
 	toggleSidebar,
@@ -30,8 +31,26 @@ import { Toaster } from "./components/Toaster.tsx";
 import { toggleAllToolOutput, Transcript } from "./components/Transcript.tsx";
 import { TooltipProvider } from "./components/ui/tooltip.tsx";
 
+/**
+ * Whether the reader's last click landed in the sidebar.
+ *
+ * Focus cannot answer this: clicking blank sidebar space hands focus to the
+ * composer (typing anywhere goes there, terminal-style), so a focus test would
+ * report "not the sidebar" for the very gesture that means it.
+ */
+let sidebarActive = false;
+
 export function App() {
 	useApp();
+
+	useEffect(() => {
+		const onPointerDown = (event: PointerEvent): void => {
+			const target = event.target as HTMLElement | null;
+			sidebarActive = target?.closest("[data-sidebar]") != null;
+		};
+		document.addEventListener("pointerdown", onPointerDown, true);
+		return () => document.removeEventListener("pointerdown", onPointerDown, true);
+	}, []);
 
 	// Global keyboard shortcuts, as in the reference app.
 	useEffect(() => {
@@ -77,6 +96,18 @@ export function App() {
 				return;
 			}
 			const key = e.key.toLowerCase();
+			// Ctrl+A belongs to whatever the reader is working in. If their last
+			// click was in the sidebar, that is the chat list; anywhere else it
+			// stays the browser's own select-all over the text on screen.
+			if (key === "a" && !e.shiftKey) {
+				const active = document.activeElement;
+				const inField = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement;
+				if (sidebarActive && !inField) {
+					e.preventDefault();
+					selectAllSessions();
+				}
+				return;
+			}
 			if (e.key === ";") {
 				e.preventDefault();
 				toggleSidePane();

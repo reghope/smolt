@@ -1,6 +1,7 @@
 import { api, type SessionRow, type UpdateState } from "../lib/api.ts";
-import { storedPreference, storePreference } from "../lib/prefs.ts";
+import { forgetPreference, storedPreference, storePreference } from "../lib/prefs.ts";
 import { attachToolResult, fromAgentMessage, initialState, reduce, type UiState } from "../store.ts";
+import { AUTO_THINKING_ENTRY } from "../thinking.ts";
 
 /**
  * The renderer's domain state and actions, kept outside React.
@@ -171,6 +172,7 @@ interface AppState {
 	selectedSessions: Set<string>;
 	/** How often each slash command has been run, for palette ordering. */
 	commandUse: Record<string, number>;
+	modelUse: Record<string, number>;
 	repoBranch: string;
 	contextUsage: ContextUsage | null;
 	diffFiles: DiffFile[];
@@ -262,7 +264,7 @@ export const app: AppState = {
 	side: initialState(),
 	model: "",
 	thinking: "",
-	defaultThinking: storedPreference("smolt.defaultEffort", ""),
+	defaultThinking: storedPreference("smolt.defaultEffort", AUTO_THINKING_ENTRY),
 	sidebarShowAll: storedPreference("smolt.sidebarShowAll", "0") === "1",
 	sessionRows: [],
 	currentSessionPath: "",
@@ -283,6 +285,7 @@ export const app: AppState = {
 	providerDialogOpen: false,
 	selectedSessions: new Set<string>(),
 	commandUse: readCommandUse(),
+	modelUse: readTally("smolt.modelUse"),
 	repoBranch: "",
 	contextUsage: null,
 	diffFiles: [],
@@ -632,9 +635,9 @@ function handleExtensionUiRequest(
  * Cosmetic and per-machine, which is why it lives beside the other
  * localStorage preferences rather than in the agent's own state.
  */
-function readCommandUse(): Record<string, number> {
+function readTally(key: string): Record<string, number> {
 	try {
-		const parsed: unknown = JSON.parse(storedPreference("smolt.commandUse", "{}"));
+		const parsed: unknown = JSON.parse(storedPreference(key, "{}"));
 		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
 		const out: Record<string, number> = {};
 		for (const [name, count] of Object.entries(parsed as Record<string, unknown>)) {
@@ -646,11 +649,23 @@ function readCommandUse(): Record<string, number> {
 	}
 }
 
+function readCommandUse(): Record<string, number> {
+	return readTally("smolt.commandUse");
+}
+
 /** Count one run of a command, so the palette can lead with the popular ones. */
 export function noteCommandUse(name: string): void {
 	if (name === "") return;
 	app.commandUse = { ...app.commandUse, [name]: (app.commandUse[name] ?? 0) + 1 };
 	storePreference("smolt.commandUse", JSON.stringify(app.commandUse));
+}
+
+/** Count one pick of a model, so settings can lead with the ones in use. */
+export function noteModelUse(provider: string, id: string): void {
+	if (provider === "" || id === "") return;
+	const key = `${provider}/${id}`;
+	app.modelUse = { ...app.modelUse, [key]: (app.modelUse[key] ?? 0) + 1 };
+	storePreference("smolt.modelUse", JSON.stringify(app.modelUse));
 }
 
 export async function openProject(path: string): Promise<void> {
@@ -1063,8 +1078,26 @@ export async function installUpdate(): Promise<void> {
 	await api.updateInstall();
 }
 
-/** Prompts already sent, newest last; Up/Down walk this like a shell history. */
-export const promptHistory: string[] = [];
+const HISTORY_LIMIT = 200;
+
+/**
+ * Prompts already sent, newest last; Up/Down walk this like a shell history.
+ *
+ * Kept in localStorage rather than in the session, because it belongs to the
+ * person and not to one chat: what you typed an hour ago in another chat is
+ * exactly what Up is for, and closing the app should not forget it.
+ */
+function readPromptHistory(): string[] {
+	try {
+		const parsed: unknown = JSON.parse(storedPreference("smolt.promptHistory", "[]"));
+		if (!Array.isArray(parsed)) return [];
+		return parsed.filter((entry): entry is string => typeof entry === "string").slice(-HISTORY_LIMIT);
+	} catch {
+		return [];
+	}
+}
+
+export const promptHistory: string[] = readPromptHistory();
 
 export async function send(): Promise<void> {
 	const text = app.draft.trim();
@@ -1077,8 +1110,10 @@ export async function send(): Promise<void> {
 	// that goes through is proof the app is whole again.
 	app.agentLost = false;
 	if (text !== "") {
-		promptHistory.push(text);
-		if (promptHistory.length > 200) promptHistory.shift();
+		// A repeat of the last entry would only pad the history it walks.
+		if (promptHistory[promptHistory.length - 1] !== text) promptHistory.push(text);
+		if (promptHistory.length > HISTORY_LIMIT) promptHistory.shift();
+		storePreference("smolt.promptHistory", JSON.stringify(promptHistory));
 	}
 	app.attachments = [];
 	bump();
@@ -1094,11 +1129,16 @@ export async function send(): Promise<void> {
 		app.slashCommands.some((command) => command.source === "extension" && command.name === commandName);
 	if (isExtensionCommand) {
 		app.chat.messages.push({ role: "user", blocks: [{ kind: "text", text }] });
+		// A command whose work happens inside the agent can sit on "Working…" for
+		// a long time before it says anything, and the echo above is only the
+		// reader's own words handed back. Say the command was taken, now.
+		app.chat.messages.push({ role: "system", blocks: [{ kind: "text", text: `Running /${commandName}…` }] });
 		bump();
 		const sent = await call("prompt", text, images, "steer");
 		if (sent === null) {
-			// The agent never received it: take the echo back out and put the
-			// words back where the user can see them.
+			// The agent never received it: take the acknowledgement and the echo
+			// back out, and put the words back where the user can see them.
+			if (app.chat.messages.at(-1)?.role === "system") app.chat.messages.pop();
 			const echoed = app.chat.messages.at(-1);
 			if (echoed?.role === "user" && echoed.blocks[0]?.kind === "text" && echoed.blocks[0].text === text) {
 				app.chat.messages.pop();
@@ -1528,6 +1568,63 @@ export async function deleteSession(row: SessionRow): Promise<void> {
 }
 
 /**
+ * The chats the sidebar is showing, in the order it shows them.
+ *
+ * Range selection needs an order, and the sidebar's is not `sessionRows`:
+ * pinned chats are lifted to the top and a search filters the rest. So the
+ * list that draws the rows is the list that defines "everything between".
+ */
+let sessionOrder: string[] = [];
+
+/** Anchor for shift-click: the last row the reader touched directly. */
+let selectionAnchor: string | null = null;
+
+export function setSessionOrder(paths: string[]): void {
+	sessionOrder = paths;
+}
+
+/** A plain click opens a chat; remember it as where a later range starts. */
+export function setSelectionAnchor(path: string): void {
+	selectionAnchor = path;
+}
+
+/** Ctrl+A in the sidebar: everything it is currently showing. */
+export function selectAllSessions(): void {
+	if (sessionOrder.length === 0) return;
+	app.selectedSessions = new Set(sessionOrder);
+	bump();
+}
+
+/** Ctrl-click: add or remove this one, and leave the rest alone. */
+export function toggleSessionSelected(path: string): void {
+	const next = new Set(app.selectedSessions);
+	if (next.has(path)) next.delete(path);
+	else next.add(path);
+	app.selectedSessions = next;
+	selectionAnchor = path;
+	bump();
+}
+
+/**
+ * Shift-click: take everything between the anchor and this row.
+ *
+ * With no anchor yet (shift-click as the very first gesture) this row becomes
+ * the anchor, which is what every list does — there is no range without two
+ * ends.
+ */
+export function selectSessionRange(path: string): void {
+	const end = sessionOrder.indexOf(path);
+	const start = selectionAnchor === null ? -1 : sessionOrder.indexOf(selectionAnchor);
+	if (end === -1 || start === -1) {
+		toggleSessionSelected(path);
+		return;
+	}
+	const [from, to] = start <= end ? [start, end] : [end, start];
+	app.selectedSessions = new Set(sessionOrder.slice(from, to + 1));
+	bump();
+}
+
+/**
  * Pick out every chat in a group, so one gesture can act on the lot.
  *
  * Selecting replaces rather than adds: a right-click on a second heading is
@@ -1535,6 +1632,7 @@ export async function deleteSession(row: SessionRow): Promise<void> {
  */
 export function selectSessions(paths: string[]): void {
 	app.selectedSessions = new Set(paths);
+	selectionAnchor = paths[paths.length - 1] ?? null;
 	bump();
 }
 
@@ -1570,6 +1668,36 @@ export async function deleteSelectedSessions(): Promise<void> {
 	app.selectedSessions = new Set();
 	if (deletedCurrent) await call("newSession");
 	await refreshState();
+}
+
+/**
+ * The app's own accumulated data: what you did, not what you chose.
+ *
+ * Preferences — theme, effort, serif face, sidebar density — are deliberately
+ * absent. A wipe clears history; it does not reset how the app looks.
+ */
+const LOCAL_DATA_KEYS = [
+	"smolt.archived",
+	"smolt.collapsed",
+	"smolt.commandUse",
+	"smolt.lastSession",
+	"smolt.modelUse",
+	"smolt.pinned",
+	"smolt.promptHistory",
+	"smolt.recentModels",
+];
+
+/** Forget everything this window remembers about what you have done. */
+export function clearLocalAppData(): void {
+	for (const key of LOCAL_DATA_KEYS) forgetPreference(key);
+	promptHistory.length = 0;
+	app.commandUse = {};
+	app.modelUse = {};
+	app.pinned = new Set();
+	app.archived = new Set();
+	app.collapsedGroups = new Set();
+	app.selectedSessions = new Set();
+	bump();
 }
 
 export function setSidebarShowAll(on: boolean): void {
@@ -1609,6 +1737,7 @@ export async function chooseModel(provider: string, id: string, remember = true)
 		return;
 	}
 	await call("setModel", provider, id, remember);
+	noteModelUse(provider, id);
 	app.model = `${provider}/${id}`;
 	if (remember) rememberRecentModel(app.model);
 	app.availableThinking = (await call<string[]>("getAvailableThinkingLevels")) ?? [];

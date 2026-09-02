@@ -13,7 +13,7 @@ import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
 import type { JsonAgentSessionEvent } from "../json-event.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
-import type { RpcCommand, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.ts";
+import type { RpcCommand, RpcExtensionInfo, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.ts";
 
 // ============================================================================
 // Types
@@ -429,6 +429,21 @@ export class RpcClient {
 	 */
 	async setAutoRetry(enabled: boolean): Promise<void> {
 		await this.send({ type: "set_auto_retry", enabled });
+	}
+
+	/**
+	 * Every extension this install knows about, switched on or off.
+	 */
+	async listExtensions(): Promise<{ extensions: RpcExtensionInfo[] }> {
+		const response = await this.send({ type: "list_extensions" });
+		return this.getData(response);
+	}
+
+	/**
+	 * Switch one extension on or off. Takes effect on the next session start.
+	 */
+	async setExtensionEnabled(extensionId: string, enabled: boolean): Promise<void> {
+		await this.send({ type: "set_extension_enabled", extensionId, enabled });
 	}
 
 	/**

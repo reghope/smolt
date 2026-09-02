@@ -21,6 +21,8 @@ const ALLOWED_METHODS = new Set([
 	"setModel",
 	"cycleModel",
 	"getAvailableModels",
+	"listExtensions",
+	"setExtensionEnabled",
 	"setThinkingLevel",
 	"cycleThinkingLevel",
 	"getAvailableThinkingLevels",

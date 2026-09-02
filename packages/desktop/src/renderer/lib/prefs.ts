@@ -16,3 +16,11 @@ export function storePreference(key: string, value: string): void {
 		// Losing a cosmetic preference is not worth breaking the render over.
 	}
 }
+
+export function forgetPreference(key: string): void {
+	try {
+		localStorage.removeItem(key);
+	} catch {
+		// Same throwing cases as the two above; nothing to recover.
+	}
+}

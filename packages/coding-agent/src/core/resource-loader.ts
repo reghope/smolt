@@ -13,6 +13,7 @@ import { createEventBus, type EventBus } from "./event-bus.ts";
 import {
 	clearExtensionCache,
 	createExtensionRuntime,
+	extensionId,
 	loadExtensionFromFactory,
 	loadExtensionsCached,
 } from "./extensions/loader.ts";
@@ -449,9 +450,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const cliEnabledPrompts = getEnabledPaths(cliExtensionPaths.prompts);
 		const cliEnabledThemes = getEnabledPaths(cliExtensionPaths.themes);
 
-		const extensionPaths = this.noExtensions
-			? cliEnabledExtensions
-			: this.mergePaths(cliEnabledExtensions, enabledExtensions);
+		const extensionPaths = this.filterDisabledExtensions(
+			this.noExtensions ? cliEnabledExtensions : this.mergePaths(cliEnabledExtensions, enabledExtensions),
+		);
 
 		const extensionsResult = await this.loadFinalExtensionSet(extensionPaths, preTrustExtensions);
 		for (const p of this.additionalExtensionPaths) {
@@ -553,9 +554,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 		});
 		const enabledExtensions = resolvedPaths.extensions.filter((r) => r.enabled).map((r) => r.path);
 		const cliEnabledExtensions = cliExtensionPaths.extensions.filter((r) => r.enabled).map((r) => r.path);
-		const extensionPaths = this.noExtensions
-			? cliEnabledExtensions
-			: this.mergePaths(cliEnabledExtensions, enabledExtensions);
+		const extensionPaths = this.filterDisabledExtensions(
+			this.noExtensions ? cliEnabledExtensions : this.mergePaths(cliEnabledExtensions, enabledExtensions),
+		);
 		const extensionsResult = await loadExtensionsCached(extensionPaths, this.cwd, this.eventBus);
 		if (!options.includeInlineFactories) {
 			return extensionsResult;
@@ -565,6 +566,18 @@ export class DefaultResourceLoader implements ResourceLoader {
 		extensionsResult.extensions.push(...inlineExtensions.extensions);
 		extensionsResult.errors.push(...inlineExtensions.errors);
 		return extensionsResult;
+	}
+
+	/** Extension ids the user has switched off, lowercased for comparison. */
+	private disabledExtensionIds(): Set<string> {
+		return new Set(this.settingsManager.getDisabledExtensions().map((id) => id.toLowerCase()));
+	}
+
+	/** Drop switched-off extensions before they are loaded, not after. */
+	private filterDisabledExtensions(paths: string[]): string[] {
+		const disabled = this.disabledExtensionIds();
+		if (disabled.size === 0) return paths;
+		return paths.filter((p) => !disabled.has(extensionId(p).toLowerCase()));
 	}
 
 	private resolveExtensionLoadPath(path: string): string {
@@ -950,10 +963,13 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const extensions: Extension[] = [];
 		const errors: Array<{ path: string; error: string }> = [];
 
+		const disabled = this.disabledExtensionIds();
+
 		for (const [index, input] of this.extensionFactories.entries()) {
 			const isNamed = typeof input !== "function";
 			const factory = isNamed ? input.factory : input;
 			const extensionPath = `<inline:${isNamed ? input.name : index + 1}>`;
+			if (disabled.has(extensionId(extensionPath).toLowerCase())) continue;
 			try {
 				const extension = await loadExtensionFromFactory(factory, this.cwd, this.eventBus, runtime, extensionPath);
 				extension.hidden = isNamed && input.hidden;

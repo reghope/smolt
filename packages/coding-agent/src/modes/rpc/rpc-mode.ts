@@ -19,18 +19,21 @@ import type {
 	ExtensionWidgetOptions,
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
+import { extensionId } from "../../core/extensions/loader.ts";
 import {
 	flushRawStdout,
 	takeOverStdout,
 	waitForRawStdoutBackpressure,
 	writeRawStdout,
 } from "../../core/output-guard.ts";
+import { builtInExtensions } from "../../extensions/index.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
 import { toJsonEvent } from "../json-event.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import type {
 	RpcCommand,
+	RpcExtensionInfo,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcResponse,
@@ -41,6 +44,7 @@ import type {
 // Re-export types for consumers
 export type {
 	RpcCommand,
+	RpcExtensionInfo,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcResponse,
@@ -594,6 +598,51 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			case "set_auto_retry": {
 				session.setAutoRetryEnabled(command.enabled);
 				return success(id, "set_auto_retry");
+			}
+
+			// =================================================================
+			// Extensions
+			// =================================================================
+
+			case "list_extensions": {
+				const disabledIds = session.settingsManager.getDisabledExtensions();
+				const disabled = new Set(disabledIds.map((value) => value.toLowerCase()));
+				const infos = new Map<string, RpcExtensionInfo>();
+				// Built-ins are known whether or not they loaded, so a switched-off
+				// one still has a row to switch back on.
+				for (const inline of builtInExtensions) {
+					if (typeof inline === "function") continue;
+					infos.set(inline.name, {
+						id: inline.name,
+						source: "built-in",
+						description: inline.description ?? "",
+						builtIn: true,
+						enabled: !disabled.has(inline.name.toLowerCase()),
+					});
+				}
+				for (const loadedPath of session.extensionRunner.getExtensionPaths()) {
+					const loadedId = extensionId(loadedPath);
+					if (infos.has(loadedId)) continue;
+					infos.set(loadedId, {
+						id: loadedId,
+						source: loadedPath,
+						description: "",
+						builtIn: false,
+						enabled: true,
+					});
+				}
+				// A switched-off file extension never loaded, so its id is all we know.
+				for (const disabledId of disabledIds) {
+					if (infos.has(disabledId)) continue;
+					infos.set(disabledId, { id: disabledId, source: "", description: "", builtIn: false, enabled: false });
+				}
+				const extensions = [...infos.values()].sort((a, b) => a.id.localeCompare(b.id));
+				return success(id, "list_extensions", { extensions });
+			}
+
+			case "set_extension_enabled": {
+				session.settingsManager.setExtensionEnabled(command.extensionId, command.enabled);
+				return success(id, "set_extension_enabled");
 			}
 
 			case "abort_retry": {

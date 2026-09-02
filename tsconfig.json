@@ -39,6 +39,7 @@
 	"exclude": [
 		"**/dist/**",
 		"packages/coding-agent/examples/extensions/gondolin/**",
-		"packages/desktop/src/renderer/**"
+		"packages/desktop/src/renderer/**",
+		"packages/desktop/test/session-selection.test.ts"
 	]
 }

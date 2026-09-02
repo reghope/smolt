@@ -118,6 +118,7 @@ export interface Settings {
 	trackingId?: string; // analytics tracking identifier, generated when analytics is enabled
 	packages?: PackageSource[]; // Array of npm/git package sources (string or object with filtering)
 	extensions?: string[]; // Array of local extension file paths or directories
+	disabledExtensions?: string[]; // Extension ids (built-in name or file name) switched off by the user
 	skills?: string[]; // Array of local skill file paths or directories
 	prompts?: string[]; // Array of local prompt template paths or directories
 	themes?: string[]; // Array of local theme file paths or directories
@@ -1273,6 +1274,25 @@ export class SettingsManager {
 	getDefaultTools(): string[] | undefined {
 		const tools = this.settings.defaultTools;
 		return tools ? [...tools] : undefined;
+	}
+
+	/** Extension ids the user has switched off, merged across global and project. */
+	getDisabledExtensions(): string[] {
+		return this.settings.disabledExtensions ?? [];
+	}
+
+	/**
+	 * Switch one extension on or off. Written globally: an extension is a
+	 * property of this machine's install, not of whichever project happens to
+	 * be open when the switch is flipped.
+	 */
+	setExtensionEnabled(id: string, enabled: boolean): void {
+		const disabled = new Set(this.globalSettings.disabledExtensions ?? []);
+		if (enabled) disabled.delete(id);
+		else disabled.add(id);
+		this.globalSettings.disabledExtensions = disabled.size > 0 ? [...disabled].sort() : undefined;
+		this.markModified("disabledExtensions");
+		this.save();
 	}
 
 	setEnabledModels(patterns: string[] | undefined): void {

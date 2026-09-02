@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld("smolt", {
 	): Promise<{ messages: Record<string, unknown>[]; start: number; userStart: number }> =>
 		ipcRenderer.invoke("app:session-messages", path, options),
 	sessionDelete: (path: string): Promise<AgentCallResult> => ipcRenderer.invoke("app:session-delete", path),
+	wipeLocalData: (): Promise<AgentCallResult> => ipcRenderer.invoke("app:wipe-local-data"),
 	titlebar: (theme: string): Promise<void> => ipcRenderer.invoke("app:titlebar", theme),
 	linkPreview: (url: string): Promise<unknown> => ipcRenderer.invoke("app:link-preview", url),
 	openProject: (path: string): Promise<AgentCallResult> => ipcRenderer.invoke("app:open-project", path),

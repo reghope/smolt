@@ -44,6 +44,20 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 		expect(state.messageCount).toBe(0);
 	}, 30000);
 
+	test("should list extensions and switch one off", async () => {
+		await client.start();
+		const { extensions } = await client.listExtensions();
+		expect(extensions.find((extension) => extension.id === "learning")).toMatchObject({
+			builtIn: true,
+			enabled: true,
+		});
+
+		await client.setExtensionEnabled("learning", false);
+		const after = await client.listExtensions();
+		// Still listed, so it can be switched back on; just no longer enabled.
+		expect(after.extensions.find((extension) => extension.id === "learning")?.enabled).toBe(false);
+	}, 30000);
+
 	test("should save messages to session file", async () => {
 		await client.start();
 

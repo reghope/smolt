@@ -1636,6 +1636,8 @@ export type InlineExtension =
 			factory: ExtensionFactory;
 			/** Omit this extension from the startup Extensions list. */
 			hidden?: boolean;
+			/** One line saying what it does, shown beside the name in settings. */
+			description?: string;
 	  };
 
 // ============================================================================

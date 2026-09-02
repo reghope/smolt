@@ -626,3 +626,44 @@ describe("SettingsManager", () => {
 		});
 	});
 });
+
+describe("SettingsManager disabled extensions", () => {
+	const testDir = join(process.cwd(), "test-settings-ext-tmp");
+	const agentDir = join(testDir, "agent");
+	const projectDir = join(testDir, "project");
+
+	beforeEach(() => {
+		if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+		mkdirSync(agentDir, { recursive: true });
+		mkdirSync(join(projectDir, ".smolt"), { recursive: true });
+	});
+
+	afterEach(() => {
+		if (existsSync(testDir)) rmSync(testDir, { recursive: true });
+	});
+
+	it("writes a switched-off extension to global settings and takes it back off the list", async () => {
+		const manager = SettingsManager.create(projectDir, agentDir);
+		expect(manager.getDisabledExtensions()).toEqual([]);
+
+		manager.setExtensionEnabled("telegram", false);
+		await manager.flush();
+		expect(manager.getDisabledExtensions()).toEqual(["telegram"]);
+		const written = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")) as Settings;
+		expect(written.disabledExtensions).toEqual(["telegram"]);
+
+		manager.setExtensionEnabled("telegram", true);
+		await manager.flush();
+		expect(manager.getDisabledExtensions()).toEqual([]);
+		const cleared = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")) as Settings;
+		expect(cleared.disabledExtensions).toBeUndefined();
+	});
+
+	it("keeps the list sorted and free of duplicates", () => {
+		const manager = SettingsManager.create(projectDir, agentDir);
+		manager.setExtensionEnabled("telegram", false);
+		manager.setExtensionEnabled("battletest", false);
+		manager.setExtensionEnabled("telegram", false);
+		expect(manager.getDisabledExtensions()).toEqual(["battletest", "telegram"]);
+	});
+});

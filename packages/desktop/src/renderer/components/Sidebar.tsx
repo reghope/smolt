@@ -6,15 +6,21 @@ import {
 	app,
 	archiveSession,
 	bump,
+	clearSessionSelection,
+	deleteSelectedSessions,
 	deleteSession,
 	forkSession,
 	newSession,
 	renameSession,
+	selectSessionRange,
+	setSelectionAnchor,
+	setSessionOrder,
 	switchToSession,
 	toggleGroupCollapsed,
 	selectSessions,
 	togglePinned,
 	toggleSessionSearch,
+	toggleSessionSelected,
 	toggleSidebar,
 } from "../state/app.ts";
 import { PANE_COLLAPSE_ZONE, ResizeHandle } from "./ResizeHandle.tsx";
@@ -68,6 +74,7 @@ const SessionEntry = memo(function SessionEntry({
 	ambiguous,
 	pinned,
 	selected,
+	selectedCount,
 	busy,
 	waiting,
 }: {
@@ -76,6 +83,8 @@ const SessionEntry = memo(function SessionEntry({
 	ambiguous?: boolean;
 	pinned: boolean;
 	selected: boolean;
+	/** How many chats are selected in total, so the menu can act on the lot. */
+	selectedCount: number;
 	busy: boolean;
 	/** This chat's agent is waiting on an approval; the dot turns amber. */
 	waiting: boolean;
@@ -91,6 +100,10 @@ const SessionEntry = memo(function SessionEntry({
 				onContextMenu={(event) => {
 					// Radix opens on the trigger; route a right-click to the same menu.
 					event.preventDefault();
+					// Right-clicking outside the selection is a fresh start on this row,
+					// the way every file list behaves — the menu must never act on chats
+					// the reader has stopped pointing at.
+					if (!selected) clearSessionSelection();
 					(event.currentTarget.querySelector("[data-session-menu]") as HTMLButtonElement | null)?.click();
 				}}
 			>
@@ -98,7 +111,21 @@ const SessionEntry = memo(function SessionEntry({
 					type="button"
 					className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-lg px-3 text-left text-sm text-muted-foreground"
 					title={row.preview || row.title}
-					onClick={() => void switchToSession(row.path)}
+					onClick={(event) => {
+						// Standard list selection: shift extends, ctrl/cmd picks one out,
+						// a plain click drops the selection and opens the chat.
+						if (event.shiftKey) {
+							selectSessionRange(row.path);
+							return;
+						}
+						if (event.ctrlKey || event.metaKey) {
+							toggleSessionSelected(row.path);
+							return;
+						}
+						clearSessionSelection();
+						setSelectionAnchor(row.path);
+						void switchToSession(row.path);
+					}}
 				>
 					{/* The dot sits in an icon-sized slot so chat titles start on the
 					    same column as the New button's label above them. */}
@@ -160,8 +187,11 @@ const SessionEntry = memo(function SessionEntry({
 					<DropdownMenuShortcut>A</DropdownMenuShortcut>
 				</DropdownMenuItem>
 				<DropdownMenuSeparator />
-				<DropdownMenuItem variant="destructive" onSelect={() => void deleteSession(row)}>
-					Delete
+				<DropdownMenuItem
+					variant="destructive"
+					onSelect={() => (selected && selectedCount > 1 ? void deleteSelectedSessions() : void deleteSession(row))}
+				>
+					{selected && selectedCount > 1 ? `Delete ${selectedCount} chats` : "Delete"}
 					<DropdownMenuShortcut>D</DropdownMenuShortcut>
 				</DropdownMenuItem>
 			</DropdownMenuContent>
@@ -218,6 +248,7 @@ function Group({ label, rows, ambiguous }: { label: string; rows: SessionRow[]; 
 						ambiguous={ambiguous.has(row.title)}
 						pinned={app.pinned.has(row.path)}
 						selected={app.selectedSessions.has(row.path)}
+						selectedCount={app.selectedSessions.size}
 						busy={app.busySessions.has(row.path)}
 						waiting={app.pendingApprovals.some((request) => request.session === row.path)}
 					/>
@@ -305,7 +336,11 @@ export function Sidebar() {
 	const shown = visible.filter((row) => !state.archived.has(row.path));
 	const pinned = shown.filter((row) => state.pinned.has(row.path));
 	const ambiguous = ambiguousTitles(shown);
-	const rest = shown.filter((row) => !state.pinned.has(row.path));
+	// The Telegram chat is where messages from the phone land. It is one
+	// standing conversation rather than one of today's, so it gets its own
+	// heading above the days instead of sinking down them as they pass.
+	const telegram = shown.filter((row) => row.telegram === true && !state.pinned.has(row.path));
+	const rest = shown.filter((row) => !state.pinned.has(row.path) && row.telegram !== true);
 
 	const groups: { label: string; rows: SessionRow[] }[] = [];
 	let bucket = "";
@@ -321,8 +356,19 @@ export function Sidebar() {
 	}
 	if (batch.length > 0) groups.push({ label: bucket, rows: batch });
 
+	// Shift-click ranges run over what the sidebar shows, in the order it shows
+	// it: pinned first, then each day. Published here because only this render
+	// knows that order.
+	const orderedPaths = [...pinned, ...telegram, ...groups.flatMap((group) => group.rows)].map((row) => row.path);
+	const orderKey = orderedPaths.join("|");
+	// biome-ignore lint/correctness/useExhaustiveDependencies: the joined key is the list
+	useEffect(() => {
+		setSessionOrder(orderedPaths);
+	}, [orderKey]);
+
 	return (
 		<aside
+			data-sidebar
 			ref={asideRef}
 			style={{ width: live ?? (hidden ? 0 : width) }}
 			className="relative max-w-[40vw] flex-none select-none border-r bg-background-deep [background:var(--background-deep)]"
@@ -399,6 +445,7 @@ export function Sidebar() {
 				) : (
 					<>
 						{pinned.length > 0 && <Group label="Pinned" rows={pinned} ambiguous={ambiguous} />}
+						{telegram.length > 0 && <Group label="Telegram" rows={telegram} ambiguous={ambiguous} />}
 						{groups.map((group) => (
 							<Group key={group.label} label={group.label} rows={group.rows} ambiguous={ambiguous} />
 						))}

@@ -802,6 +802,18 @@ export function Composer() {
 	const [paletteHidden, setPaletteHidden] = useState(false);
 	const historyIndexRef = useRef(-1);
 	const historyDraftRef = useRef("");
+	/** 1-based position shown in the badge; null when not recalling. */
+	const [historyPos, setHistoryPos] = useState<number | null>(null);
+
+	/**
+	 * Move the history cursor. The ref is what the key handler reads (two fast
+	 * presses must not both see the same stale value); the state is what the
+	 * badge renders. Both move here so they cannot disagree.
+	 */
+	const setHistoryIndex = (index: number): void => {
+		historyIndexRef.current = index;
+		setHistoryPos(index === -1 ? null : index + 1);
+	};
 
 	// Keep the textarea sized to its content.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: height tracks the draft
@@ -1039,6 +1051,11 @@ export function Composer() {
 						))}
 					</div>
 				)}
+				{historyPos !== null && (
+					<div className="px-0.5 text-[11px] leading-none text-faint">
+						History {historyPos}/{promptHistory.length}
+					</div>
+				)}
 				<CommandPalette
 					items={paletteItems}
 					selected={Math.min(paletteIndex, Math.max(0, paletteItems.length - 1))}
@@ -1050,12 +1067,15 @@ export function Composer() {
 						value={state.draft}
 						placeholder={state.chat.streaming ? "Queue a message for when it finishes…" : "Type / for commands"}
 						className="max-h-60 min-h-[26px] w-full resize-none bg-transparent px-0.5 pb-1 text-sm leading-relaxed outline-none placeholder:text-faint"
-						// Returning to the composer with the "/" still in it brings the
-						// palette back up after a dismissal.
-						onFocus={() => setPaletteHidden(false)}
+						// Clicking back into the composer with the "/" still in it brings
+						// the palette back up after a dismissal. This listens for the click
+						// rather than for focus, because clicking empty space to dismiss the
+						// palette also refocuses the composer (App focuses it terminal-style)
+						// — on focus, every dismissal would undo itself a tick later.
+						onPointerDown={() => setPaletteHidden(false)}
 						onChange={(event) => {
 							app.draft = event.target.value;
-							historyIndexRef.current = -1;
+							setHistoryIndex(-1);
 							// Editing the draft is what the palette listens to; a change
 							// also revokes a dismissal, since the query moved on.
 							setPaletteHidden(false);
@@ -1107,6 +1127,7 @@ export function Composer() {
 										return;
 									}
 								}
+								setHistoryIndex(-1);
 								sendClosingVoice();
 								return;
 							}
@@ -1125,10 +1146,11 @@ export function Composer() {
 							// the text so multi-line editing still works normally.
 							if (event.key === "ArrowUp" && input.selectionStart === 0 && promptHistory.length > 0) {
 								if (historyIndexRef.current === -1) historyDraftRef.current = state.draft;
-								historyIndexRef.current =
+								setHistoryIndex(
 									historyIndexRef.current === -1
 										? promptHistory.length - 1
-										: Math.max(0, historyIndexRef.current - 1);
+										: Math.max(0, historyIndexRef.current - 1),
+								);
 								event.preventDefault();
 								app.draft = promptHistory[historyIndexRef.current] ?? "";
 								bump();
@@ -1142,10 +1164,10 @@ export function Composer() {
 							) {
 								event.preventDefault();
 								if (historyIndexRef.current >= promptHistory.length - 1) {
-									historyIndexRef.current = -1;
+									setHistoryIndex(-1);
 									app.draft = historyDraftRef.current;
 								} else {
-									historyIndexRef.current += 1;
+									setHistoryIndex(historyIndexRef.current + 1);
 									app.draft = promptHistory[historyIndexRef.current] ?? "";
 								}
 								bump();
@@ -1232,7 +1254,14 @@ export function Composer() {
 											? "bg-destructive text-destructive-foreground hover:bg-destructive/90 disabled:bg-destructive/40"
 											: "disabled:bg-input disabled:text-faint",
 									)}
-									onClick={() => (showStop ? void abortTurn() : sendClosingVoice())}
+									onClick={() => {
+										if (showStop) {
+											void abortTurn();
+											return;
+										}
+										setHistoryIndex(-1);
+										sendClosingVoice();
+									}}
 								>
 									<Icon name={stopping ? "spinner" : showStop ? "stop" : "send"} className={cn(stopping && "animate-spin")} />
 								</Button>

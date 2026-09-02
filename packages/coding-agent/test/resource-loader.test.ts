@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import { extensionId } from "../src/core/extensions/loader.ts";
 import { ExtensionRunner } from "../src/core/extensions/runner.ts";
 import { DefaultResourceLoader, loadProjectContextFiles } from "../src/core/resource-loader.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -1117,5 +1118,65 @@ export default function(smolt: ExtensionAPI) {
 
 			expect(files.map((f) => f.content)).toEqual(["repo instructions", "src instructions"]);
 		});
+	});
+});
+
+describe("extensionId", () => {
+	it("names a built-in by its inline name and a file by its own file", () => {
+		expect(extensionId("<inline:learning>")).toBe("learning");
+		expect(extensionId("/a/b/my-ext.ts")).toBe("my-ext");
+		expect(extensionId("/a/b/my-ext.mjs")).toBe("my-ext");
+		// An `index` entry is named after the folder that holds it.
+		expect(extensionId("/a/b/my-ext/index.ts")).toBe("my-ext");
+	});
+});
+
+describe("switching extensions off", () => {
+	let tempDir: string;
+	let agentDir: string;
+	let cwd: string;
+
+	beforeEach(() => {
+		tempDir = join(tmpdir(), `rl-ext-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		agentDir = join(tempDir, "agent");
+		cwd = join(tempDir, "project");
+		mkdirSync(agentDir, { recursive: true });
+		mkdirSync(cwd, { recursive: true });
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	function loader(disabledExtensions?: string[]): DefaultResourceLoader {
+		if (disabledExtensions) {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ disabledExtensions }));
+		}
+		return new DefaultResourceLoader({
+			cwd,
+			agentDir,
+			extensionFactories: [
+				{ name: "kept", factory: () => {} },
+				{ name: "dropped", factory: () => {} },
+			],
+		});
+	}
+
+	async function loadedPaths(instance: DefaultResourceLoader): Promise<string[]> {
+		await instance.reload();
+		return instance.getExtensions().extensions.map((extension) => extension.path);
+	}
+
+	it("loads every extension when none are switched off", async () => {
+		expect(await loadedPaths(loader())).toEqual(["<inline:kept>", "<inline:dropped>"]);
+	});
+
+	it("skips one listed in disabledExtensions", async () => {
+		const paths = await loadedPaths(loader(["dropped"]));
+		expect(paths).toEqual(["<inline:kept>"]);
+	});
+
+	it("matches the id regardless of case", async () => {
+		expect(await loadedPaths(loader(["DROPPED"]))).toEqual(["<inline:kept>"]);
 	});
 });

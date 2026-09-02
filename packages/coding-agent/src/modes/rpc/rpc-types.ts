@@ -51,6 +51,10 @@ export type RpcCommand =
 	| { id?: string; type: "set_auto_retry"; enabled: boolean }
 	| { id?: string; type: "abort_retry" }
 
+	// Extensions
+	| { id?: string; type: "list_extensions" }
+	| { id?: string; type: "set_extension_enabled"; extensionId: string; enabled: boolean }
+
 	// Bash
 	| { id?: string; type: "bash"; command: string; excludeFromContext?: boolean }
 	| { id?: string; type: "abort_bash" }
@@ -94,6 +98,18 @@ export interface RpcSlashCommand {
 // ============================================================================
 // RPC State
 // ============================================================================
+
+/** One extension as the settings UI sees it: built-in or on disk, on or off. */
+export interface RpcExtensionInfo {
+	/** Stable id used to switch it on and off. */
+	id: string;
+	/** "built-in", or the path it was loaded from. Empty when it never loaded. */
+	source: string;
+	/** One line saying what it does; empty when the extension supplies none. */
+	description: string;
+	builtIn: boolean;
+	enabled: boolean;
+}
 
 export interface RpcSessionState {
 	model?: Model<any>;
@@ -186,6 +202,16 @@ export type RpcResponse =
 	// Retry
 	| { id?: string; type: "response"; command: "set_auto_retry"; success: true }
 	| { id?: string; type: "response"; command: "abort_retry"; success: true }
+
+	// Extensions
+	| {
+			id?: string;
+			type: "response";
+			command: "list_extensions";
+			success: true;
+			data: { extensions: RpcExtensionInfo[] };
+	  }
+	| { id?: string; type: "response"; command: "set_extension_enabled"; success: true }
 
 	// Bash
 	| { id?: string; type: "response"; command: "bash"; success: true; data: BashResult }

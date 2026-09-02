@@ -72,6 +72,8 @@ export interface SmoltApi {
 	worktreeCreate(label: string): Promise<AgentCallResult>;
 	worktreeEnter(path: string): Promise<AgentCallResult>;
 	worktreeRemove(path: string, force?: boolean): Promise<AgentCallResult>;
+	/** Delete every chat, memory, skill, cue and index this machine holds. */
+	wipeLocalData(): Promise<AgentCallResult>;
 	sideCall(method: string, ...args: unknown[]): Promise<AgentCallResult>;
 	sideStop(): Promise<{ ok: boolean; error?: string }>;
 	onSideEvent(cb: (event: unknown) => void): void;
@@ -104,6 +106,8 @@ export interface SessionRow {
 	cwd: string;
 	/** True while this session's agent is still working in the background. */
 	busy?: boolean;
+	/** This is the chat the dedicated Telegram host writes into. */
+	telegram?: boolean;
 }
 
 declare global {

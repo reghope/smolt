@@ -332,8 +332,10 @@ export function createAutoThinkingExtension(smolt: ExtensionAPI): AutoThinkingHa
 			state.autoMode = true;
 			state.taskLevel = null;
 			state.expectedLevel = null;
+			// No notification: selecting the entry already shows the mode where
+			// the reader is looking, and every new session applies the default
+			// through this same path — a toast here would greet every chat.
 			paint(ctx);
-			ctx.ui.notify("Auto thinking on: each task's level is classified before its first request.");
 		},
 		onSelectAsDefault: (ctx) => {
 			writePref(true);

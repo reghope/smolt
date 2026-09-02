@@ -202,6 +202,15 @@ describe("arg keys", () => {
 		expect(deriveArgKey("edit", { file_path: "C:\\repo\\thing.md" }).argKey).toBe("thing.md");
 	});
 
+	test("skills keep their directory name, since every skill file is SKILL.md", () => {
+		expect(deriveArgKey("read", { path: "/agent/skills/battletest/SKILL.md" }).argKey).toBe("battletest/SKILL.md");
+		expect(deriveArgKey("read", { path: "C:\\agent\\skills\\verification\\SKILL.md" }).argKey).toBe(
+			"verification/SKILL.md",
+		);
+		// A file that merely resembles one does not get the treatment.
+		expect(deriveArgKey("read", { path: "/notes/skill.md" }).argKey).toBe("skill.md");
+	});
+
 	test("detail keeps the raw arg, truncated", () => {
 		const long = "x".repeat(300);
 		const { argKey, argDetail } = deriveArgKey("bash", { command: long });
@@ -230,6 +239,42 @@ describe("config", () => {
 		expect(config.enabled).toBe(false);
 		expect(config.minSamples).toBe(2);
 		expect(config.notesBudgetChars).toBe(DEFAULT_HINDSIGHT_CONFIG.notesBudgetChars);
+	});
+});
+
+describe("skill attribution", () => {
+	function skillRead(id: string, skill: string, over: Partial<ToolCallRow> = {}): ToolCallRow {
+		return mkRow(id, { tool: "read", argKey: `${skill}/SKILL.md`, argDetail: `/skills/${skill}/SKILL.md`, ...over });
+	}
+
+	test("counts loads per skill, most-loaded first", async () => {
+		const store = track(new HindsightStore(dbPath));
+		await store.flush([
+			skillRead("a", "battletest"),
+			skillRead("b", "battletest"),
+			skillRead("c", "verification"),
+			mkRow("d", { tool: "read", argKey: "notes.md" }),
+		]);
+		const usage = await store.skillUsage();
+		expect(usage.map((entry) => entry.skill)).toEqual(["battletest", "verification"]);
+		expect(usage[0]!.loads).toBe(2);
+		expect(usage[0]!.lastAt).toBeGreaterThan(0);
+	});
+
+	test("a failed read is not a load", async () => {
+		const store = track(new HindsightStore(dbPath));
+		await store.flush([
+			skillRead("a", "battletest"),
+			skillRead("b", "ghost", { isError: true, errorClass: "enoent" }),
+		]);
+		expect((await store.skillUsage()).map((entry) => entry.skill)).toEqual(["battletest"]);
+	});
+
+	test("skill loads reach the /hindsight breakdown", async () => {
+		const store = track(new HindsightStore(dbPath));
+		await store.flush([skillRead("a", "battletest")]);
+		const summary = await store.summary();
+		expect(summary?.topSkills).toEqual([expect.objectContaining({ skill: "battletest", loads: 1 })]);
 	});
 });
 

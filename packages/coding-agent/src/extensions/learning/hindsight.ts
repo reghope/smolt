@@ -251,6 +251,23 @@ function looksLikePath(value: string): boolean {
 }
 
 /**
+ * Basename is the right grouping key for ordinary files and exactly the
+ * wrong one for skills: every skill on the machine is a file called
+ * SKILL.md, so a bare basename collapses "which skill was loaded" into one
+ * bucket. Loading a skill is a `read` call, which means skill usage is
+ * already being recorded — keyed usefully, it is the only measured signal
+ * of whether an authored skill is worth its place.
+ */
+export function pathArgKey(path: string): string {
+	const base = basename(path);
+	if (base !== SKILL_FILE) return base;
+	const skill = basename(dirname(path));
+	return skill === "" ? base : `${skill}/${base}`;
+}
+
+const SKILL_FILE = "SKILL.md";
+
+/**
  * Derive a short grouping key and a truncated raw detail from a tool call's
  * arguments. The key gates retry linkage; the detail only decorates notes.
  */
@@ -274,7 +291,7 @@ export function deriveArgKey(
 		}
 	} else if (PATH_ARG_TOOLS.has(toolName)) {
 		primary = firstStringArg(args, ["path", "file_path"]);
-		key = primary === "" ? "" : basename(primary);
+		key = primary === "" ? "" : pathArgKey(primary);
 	} else {
 		primary = firstStringArg(args, ["path", "file_path", "command", "pattern", "query", "url", "name"]);
 		key = looksLikePath(primary) ? basename(primary) : primary;
@@ -628,6 +645,36 @@ export class HindsightStore {
 		return block;
 	}
 
+	/**
+	 * How often each skill was actually loaded, newest-heavy first.
+	 *
+	 * The counterpart to memory and skills being self-reported: the model
+	 * decides a skill is worth writing, and this is the only evidence about
+	 * whether it was ever worth reading. A successful `read` of a SKILL.md is
+	 * the load; failed reads do not count as use.
+	 */
+	async skillUsage(limit = 20): Promise<SkillLoad[]> {
+		const db = await this.openDb();
+		if (!db) return [];
+		try {
+			const rows = db
+				.prepare(
+					"SELECT arg_key AS key, COUNT(*) AS loads, MAX(started_at) AS last_at " +
+						"FROM hindsight_tool_calls " +
+						"WHERE tool = 'read' AND is_error = 0 AND arg_key LIKE ? " +
+						"GROUP BY arg_key ORDER BY loads DESC, last_at DESC LIMIT ?",
+				)
+				.all(`%/${SKILL_FILE}`, limit) as { key: string; loads: number; last_at: number }[];
+			return rows.map((row) => ({
+				skill: row.key.slice(0, row.key.lastIndexOf("/")),
+				loads: row.loads,
+				lastAt: row.last_at,
+			}));
+		} catch {
+			return [];
+		}
+	}
+
 	/** Aggregate totals plus top failure patterns and busiest tools. */
 	async summary(): Promise<HindsightSummary | undefined> {
 		const db = await this.openDb();
@@ -681,6 +728,7 @@ export class HindsightStore {
 				avgMs: totals.avg_ms,
 				topFailures: failures,
 				topTools: tools,
+				topSkills: await this.skillUsage(6),
 			};
 		} catch {
 			return undefined;
@@ -723,6 +771,14 @@ export interface HindsightSummary {
 	avgMs: number | null;
 	topFailures: { tool: string; error_class: string; count: number; attempts: number; successes: number }[];
 	topTools: { tool: string; calls: number; errors: number }[];
+	topSkills: SkillLoad[];
+}
+
+export interface SkillLoad {
+	skill: string;
+	loads: number;
+	/** Epoch ms of the most recent load. */
+	lastAt: number;
 }
 
 export interface HindsightCallMatch {
@@ -763,6 +819,13 @@ export function renderBreakdown(summary: HindsightSummary): string {
 			"",
 			"**Busiest tools**",
 			...summary.topTools.map((t) => `- ${t.tool} — ${t.calls} calls, ${t.errors} errors`),
+		);
+	}
+	if (summary.topSkills.length > 0) {
+		lines.push(
+			"",
+			"**Most-loaded skills**",
+			...summary.topSkills.map((s) => `- ${s.skill} — ${s.loads} loads, last ${day(s.lastAt)}`),
 		);
 	}
 	return lines.join("\n");
@@ -1158,7 +1221,11 @@ export function wireHindsight(smolt: ExtensionAPI, options: HindsightOptions): H
 				return;
 			}
 			if (query === "") {
-				smolt.sendMessage({ customType: "hindsight-report", content: renderBreakdown(summary), display: true });
+				// For the reader only: never steered into the model mid-turn.
+				smolt.sendMessage(
+					{ customType: "hindsight-report", content: renderBreakdown(summary), display: true },
+					{ triggerTurn: false },
+				);
 				return;
 			}
 			const matches = await store.searchCalls(query, 20);

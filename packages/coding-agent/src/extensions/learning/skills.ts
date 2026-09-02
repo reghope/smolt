@@ -219,6 +219,29 @@ export class SkillManager {
 		this.root = root;
 	}
 
+	/**
+	 * Every skill under the root, with the last time its SKILL.md was
+	 * written. Used to pair authored skills against measured loads — a skill
+	 * with no loads is invisible in telemetry, which is exactly the case
+	 * worth seeing.
+	 */
+	listSkills(): { name: string; path: string; writtenAt: number }[] {
+		if (!existsSync(this.root)) return [];
+		const out: { name: string; path: string; writtenAt: number }[] = [];
+		for (const dir of findSkillMdDirs(this.root)) {
+			const name = dir.split(sep).pop();
+			if (name === undefined || name === "") continue;
+			let writtenAt = 0;
+			try {
+				writtenAt = statSync(join(dir, "SKILL.md")).mtimeMs;
+			} catch {
+				// An unreadable skill still counts as present.
+			}
+			out.push({ name, path: dir, writtenAt });
+		}
+		return out.sort((a, b) => a.name.localeCompare(b.name));
+	}
+
 	/** Find a skill by directory name anywhere under the skills root. */
 	findSkill(name: string): string | undefined {
 		if (!existsSync(this.root)) return undefined;

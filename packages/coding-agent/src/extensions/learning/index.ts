@@ -1,17 +1,20 @@
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
 // Type-only import: a standalone install of this module outside the smolt
 // tree switches this single line to `from "smolt"`.
 import type { ExtensionAPI } from "../../core/extensions/types.ts";
-import { type HindsightStore, wireHindsight } from "./hindsight.ts";
+import { LocalEmbedder } from "./embeddings.ts";
+import { type HindsightStore, type SkillLoad, wireHindsight } from "./hindsight.ts";
 import { MemoryStore, memoryTool } from "./memory.ts";
-import { SessionStore } from "./sessions.ts";
+import { agentDir, configDir } from "./paths.ts";
+import { type SemanticRecall, takeSemanticRecall } from "./semantic.ts";
+import { type BackfillResult, SessionStore } from "./sessions.ts";
 import { SkillManager, skillManageTool } from "./skills.ts";
+import type { VectorStore } from "./vectors.ts";
 
 /**
  * Self-learning: agent-curated memory, autonomous skill creation, and
- * full-text search over past sessions.
+ * search over past sessions.
  *
  * - Two memory files (MEMORY.md, USER.md) are injected into the system
  *   prompt, frozen at session start so the prompt prefix stays byte-stable
@@ -22,7 +25,12 @@ import { SkillManager, skillManageTool } from "./skills.ts";
  *   them up with progressive disclosure.
  * - The `session_search` tool searches every prior session (SQLite FTS5
  *   when available, plain scan otherwise) with four calling shapes:
- *   discovery, scroll, read, and browse.
+ *   discovery, scroll, read, and browse. With the semantic-recall
+ *   extension on (see semantic.ts), discovery also searches by meaning and
+ *   fuses both rankings; `/embeddings` reports its state.
+ * - `/skills` pairs authored skills against how often each was actually
+ *   loaded, which is the only measured evidence that a self-reported skill
+ *   was worth writing.
  * - Hindsight (observed learning): every tool call is measured, failures
  *   are classified, and recurring patterns feed back as "Tool field notes"
  *   in the frozen prompt block plus reactive remedy hints on known
@@ -32,36 +40,24 @@ import { SkillManager, skillManageTool } from "./skills.ts";
 
 const NUDGE_EVERY_TURNS = 8;
 
-// Self-contained path resolution (no runtime imports from the host tree) so
-// the module stays drop-in portable as a regular extension.
-const CONFIG_DIR_NAME = ".smolt";
-
-function getAgentDir(): string {
-	const envDir = process.env.SMOLT_CODING_AGENT_DIR;
-	if (envDir) {
-		return envDir.startsWith("~") ? join(homedir(), envDir.slice(1)) : envDir;
-	}
-	return join(homedir(), CONFIG_DIR_NAME, "agent");
-}
-
 function memoriesDir(): string {
-	return join(homedir(), CONFIG_DIR_NAME, "memories");
+	return join(configDir(), "memories");
 }
 
 function skillsRoot(): string {
-	return join(getAgentDir(), "skills");
+	return join(agentDir(), "skills");
 }
 
 function sessionsRoot(): string {
-	return join(getAgentDir(), "sessions");
+	return join(agentDir(), "sessions");
 }
 
 function stateDbPath(): string {
-	return join(getAgentDir(), "state.db");
+	return join(agentDir(), "state.db");
 }
 
 function hindsightConfigPath(): string {
-	return join(getAgentDir(), "hindsight.json");
+	return join(agentDir(), "hindsight.json");
 }
 
 const LEARNING_INSTRUCTIONS = `## Self-learning
@@ -80,7 +76,100 @@ Skills (procedural memory you create and reuse):
 - New and changed skills are indexed at the next session start and load on demand.
 
 Past sessions:
-- session_search performs full-text search over all prior conversations. Pass query to discover, session_id + around_message_id to scroll, session_id alone to read a whole session, or nothing to browse recent sessions.`;
+- session_search searches all prior conversations (full-text, and by meaning when embeddings are configured). Pass query to discover, session_id + around_message_id to scroll, session_id alone to read a whole session, or nothing to browse recent sessions.`;
+
+/**
+ * How a status report reaches the transcript. A message sent with default
+ * options while the agent is streaming is steered into the model's
+ * conversation: it lands between two assistant messages, the model reads it
+ * as input, and the reply splits in two. A report is for the reader only, so
+ * it is shown at once when the agent is idle and held to the end of the turn
+ * when it is not.
+ */
+const REPORT_DELIVERY = { triggerTurn: false } as const;
+
+const NEVER_LOADED_NOTE =
+	"Never loaded does not mean useless — a skill for a rare task can be right and idle. " +
+	"It means nothing has yet shown it earns its place.";
+
+/**
+ * Pair authored skills against measured loads.
+ *
+ * Skills are written on self-report (the model decides it learned a
+ * procedure) and read on demand, so the only evidence a skill was worth
+ * writing is whether anything ever loaded it. Hindsight records that as a
+ * `read` of SKILL.md; this is the report that puts the two halves together.
+ *
+ * Deliberately a human-facing command rather than something injected into
+ * the prompt: retiring a skill is destructive, and "idle for a while" is not
+ * enough evidence to hand an agent a reason to delete its own work.
+ */
+export function renderSkillUsage(skills: { name: string; writtenAt: number }[], loads: SkillLoad[]): string {
+	if (skills.length === 0) return "No skills have been recorded yet.";
+	const byName = new Map(loads.map((entry) => [entry.skill, entry]));
+	const used = skills.filter((skill) => byName.has(skill.name));
+	const idle = skills.filter((skill) => !byName.has(skill.name));
+	const asDay = (ms: number): string => (ms > 0 ? new Date(ms).toISOString().slice(0, 10) : "unknown");
+
+	const lines = [
+		"## Skills — authored vs loaded",
+		`- ${skills.length} skills · ${used.length} ever loaded · ${idle.length} never loaded`,
+	];
+	if (used.length > 0) {
+		lines.push("", "**Loaded**");
+		for (const skill of used
+			.map((skill) => ({ skill, load: byName.get(skill.name)! }))
+			.sort((a, b) => b.load.loads - a.load.loads)) {
+			lines.push(`- ${skill.skill.name} — ${skill.load.loads} loads, last ${asDay(skill.load.lastAt)}`);
+		}
+	}
+	if (idle.length > 0) {
+		lines.push("", "**Never loaded**");
+		for (const skill of idle.sort((a, b) => a.writtenAt - b.writtenAt)) {
+			lines.push(`- ${skill.name} — written ${asDay(skill.writtenAt)}`);
+		}
+		lines.push("", NEVER_LOADED_NOTE);
+	}
+	return lines.join("\n");
+}
+
+const SEMANTIC_OFF_REPORT =
+	"## Semantic recall — off\n" +
+	"Session search is lexical only. Switch on the semantic-recall extension (desktop: Settings → " +
+	"Extensions) to also search past sessions by meaning, or point `~/.smolt/agent/embeddings.json` " +
+	"at an embedding server.";
+
+/** The `/embeddings` report: what runs, where the weights are, and how far the index has got. */
+export function renderSemanticStatus(
+	semantic: SemanticRecall,
+	stored: number,
+	lastBackfill: BackfillResult | undefined,
+	started: boolean,
+): string {
+	const { config, embedder } = semantic;
+	const lines = ["## Semantic recall — on"];
+	if (embedder instanceof LocalEmbedder) {
+		const weights = embedder.modelCached ? "weights on disk" : "weights download on first use";
+		lines.push(`- Model: ${embedder.modelId}, running on this machine (${weights}, ${embedder.modelsDir})`);
+	} else {
+		lines.push(`- Model: ${embedder.modelId} via ${config.baseUrl}`);
+	}
+	const width = embedder.dim > 0 ? embedder.dim : semantic.vectors.dim;
+	lines.push(`- Vectors stored: ${stored}${width > 0 ? ` (${width}-wide)` : ""}`);
+	if (lastBackfill) {
+		const tail = lastBackfill.incomplete ? "; the next session continues" : "";
+		const pruned = lastBackfill.pathsPruned > 0 ? `, ${lastBackfill.pathsPruned} deleted sessions pruned` : "";
+		const work =
+			lastBackfill.embedded === 0
+				? "nothing new to embed"
+				: `${lastBackfill.embedded} chunks across ${lastBackfill.filesTouched} sessions`;
+		lines.push(`- Last index run: ${work}${pruned}${tail}`);
+	} else {
+		lines.push(started ? "- Index run: in progress" : "- Index run: not yet started");
+	}
+	lines.push(`- Match floor: ${config.minScore} cosine similarity`);
+	return lines.join("\n");
+}
 
 function textResult(text: string) {
 	return { content: [{ type: "text" as const, text }], details: {} };
@@ -114,12 +203,32 @@ export interface LearningStores {
 	skills: SkillManager;
 	sessions: SessionStore;
 	hindsight: HindsightStore;
+	/** Present only when semantic recall is on. */
+	vectors: VectorStore | undefined;
 }
 
-export function createLearningExtension(smolt: ExtensionAPI, paths: LearningPaths): LearningStores {
+export interface LearningOptions {
+	/**
+	 * Semantic recall to wire in. Defaults to whatever the semantic-recall
+	 * extension handed over at load; absent, session search stays lexical.
+	 */
+	semantic?: SemanticRecall;
+}
+
+export function createLearningExtension(
+	smolt: ExtensionAPI,
+	paths: LearningPaths,
+	options: LearningOptions = {},
+): LearningStores {
 	const memory = new MemoryStore(paths.memoriesDir);
 	const skills = new SkillManager(paths.skillsRoot);
-	const sessions = new SessionStore(paths.sessionsRoot, paths.stateDbPath);
+	const semantic = options.semantic ?? takeSemanticRecall();
+	const vectors = semantic?.vectors;
+	const sessions = new SessionStore(paths.sessionsRoot, paths.stateDbPath, {
+		embedder: semantic?.embedder,
+		vectors,
+		minScore: semantic?.config.minScore,
+	});
 	// Hindsight (observed learning) shares state.db but versions its own
 	// tables; its notes are folded into the frozen block built below.
 	const hindsight = wireHindsight(smolt, {
@@ -131,12 +240,31 @@ export function createLearningExtension(smolt: ExtensionAPI, paths: LearningPath
 	let frozen: string | undefined;
 	let turnCount = 0;
 	let nudgePending = false;
+	// Backfill runs detached: a session start must never wait on a model
+	// load or an embedding server, and shutdown must not wait on the backfill.
+	let backfill: Promise<unknown> | undefined;
+	let lastBackfill: BackfillResult | undefined;
+	const backfillAbort = new AbortController();
 
 	smolt.on("session_start", async () => {
 		frozen = undefined;
 		turnCount = 0;
 		nudgePending = false;
 		memory.resetConsolidationFailures();
+		if (semantic && backfill === undefined) {
+			backfill = sessions
+				.backfill({ maxChunks: semantic.config.backfillPerSession, signal: backfillAbort.signal })
+				.then((result) => {
+					lastBackfill = result;
+				})
+				.catch(() => undefined);
+		}
+	});
+
+	smolt.on("session_shutdown", async () => {
+		backfillAbort.abort();
+		await backfill;
+		vectors?.close();
 	});
 
 	smolt.on("turn_start", async () => {
@@ -298,6 +426,37 @@ export function createLearningExtension(smolt: ExtensionAPI, paths: LearningPath
 		},
 	});
 
+	smolt.registerCommand("skills", {
+		description: "Authored skills and how often each was actually loaded",
+		handler: async (_args, ctx) => {
+			const report = renderSkillUsage(skills.listSkills(), await hindsight.store.skillUsage(50));
+			smolt.sendMessage({ customType: "skill-usage-report", content: report, display: true }, REPORT_DELIVERY);
+			if (hindsight.store.unavailable) {
+				ctx.ui.notify("Load counts are unavailable — hindsight telemetry could not be opened.", "warning");
+			}
+		},
+	});
+
+	smolt.registerCommand("embeddings", {
+		description: "Whether past sessions are searched by meaning, and how far the index has got",
+		handler: async () => {
+			const report = semantic
+				? renderSemanticStatus(semantic, await semantic.vectors.count(), lastBackfill, backfill !== undefined)
+				: SEMANTIC_OFF_REPORT;
+			smolt.sendMessage({ customType: "embeddings-report", content: report, display: true }, REPORT_DELIVERY);
+		},
+	});
+
+	// Only claim semantic recall when it is actually running: a tool
+	// description promising meaning-based search that silently isn't there
+	// would teach the model to phrase queries that cannot match.
+	const semanticNote = sessions.semanticEnabled
+		? "SEMANTIC RECALL: this machine also searches by meaning, so a query that shares no " +
+			"words with the original conversation can still find it. Prefer describing what the " +
+			"session was about over guessing its exact wording. Each result carries matched_by: " +
+			'"fts" (wording), "vector" (meaning), or "both".\n\n'
+		: "";
+
 	smolt.registerTool({
 		name: "session_search",
 		label: "Search past sessions",
@@ -323,6 +482,7 @@ export function createLearningExtension(smolt: ExtensionAPI, paths: LearningPath
 			"FTS5 SYNTAX: AND is the default — multi-word queries require all terms. Use OR " +
 			'explicitly for broader recall (alpha OR beta), quoted phrases for exact match ("docker ' +
 			'networking"), boolean (python NOT java), or prefix wildcards (deploy*).\n\n' +
+			semanticNote +
 			'WHEN TO USE: questions about past conversations — "what did we do about X", "where ' +
 			'did we leave Y", "find the session where Z". Session history shows what was said when; ' +
 			"it is not evidence about the current state of external sources — inspect those directly.",
@@ -385,5 +545,5 @@ export function createLearningExtension(smolt: ExtensionAPI, paths: LearningPath
 		},
 	});
 
-	return { memory, skills, sessions, hindsight: hindsight.store };
+	return { memory, skills, sessions, hindsight: hindsight.store, vectors };
 }

@@ -348,9 +348,14 @@ function WidgetLine({
 						</span>
 					);
 				}
-				const kind = /^\d+ tickets?$/.test(segment) ? "tickets" : /^\d+ actions?$/.test(segment) ? "actions" : null;
+				// Battletest counts tickets; research counts findings — same slot, same expansion.
+				const kind = /^\d+ (tickets?|findings?)$/.test(segment)
+					? "tickets"
+					: /^\d+ actions?$/.test(segment)
+						? "actions"
+						: null;
 				const items = kind === null ? [] : kind === "tickets" ? (detail?.tickets ?? []) : (detail?.actions ?? []);
-				const klass = /^[1-9]\d* tickets?$/.test(segment) ? "text-warn" : "text-faint";
+				const klass = /^[1-9]\d* (tickets?|findings?)$/.test(segment) ? "text-warn" : "text-faint";
 				if (kind !== null && items.length > 0 && onToggle !== undefined) {
 					return (
 						<span key={i}>

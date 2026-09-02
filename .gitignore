@@ -47,3 +47,4 @@ dist-npm/
 
 # Installers built by electron-builder; published by hand, never committed.
 packages/desktop/release/
+.smolt/research/.scratch/

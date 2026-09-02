@@ -12,6 +12,7 @@
 
 import type { ThinkingLevel } from "@smolt/agent-core";
 import type { Api, KnownProvider, Model } from "@smolt/ai";
+import type { ExtensionContext } from "../../core/extensions/types.ts";
 import { defaultModelPerProvider, parseModelPattern } from "../../core/model-resolver.ts";
 
 export type ModelPhraseResolution =
@@ -182,6 +183,13 @@ const COUNT_NOUNS = new Set([
 	"monkey",
 	"monkeys",
 	"simulated",
+	// Research teams are counted the same way: "/research 3 researchers into ...".
+	"researcher",
+	"researchers",
+	"investigator",
+	"investigators",
+	"analyst",
+	"analysts",
 ]);
 
 /** Words that can introduce a model phrase ("using opencode minimax-m3"). */
@@ -300,4 +308,69 @@ export function parseBattletestInvocation(args: string, models: readonly Model<A
 	// "…using minimax-m3 to test a feature" — the "to" belonged to the phrasing.
 	focus = focus.replace(/^to\s+/i, "");
 	return { count, model, thinkingLevel, focus, error, ambiguous };
+}
+
+// ------------------------------------------------------------------
+// Model overrides for a team run: shared by /battletest and /research.
+// ------------------------------------------------------------------
+
+/** A model override for a run's team members, resolved from a name or phrase. */
+export interface ModelOverride {
+	model: Model<Api>;
+	thinkingLevel?: ThinkingLevel;
+}
+
+/** Providers that resell other people's models; the failsafe, never the first pick. */
+const AGGREGATOR_PROVIDERS = /^openrouter/i;
+
+/**
+ * Pick one provider for a model that several carry, without bothering the
+ * user: the session's own provider first (the one they demonstrably use),
+ * then subscription (OAuth) providers, then plain API keys, with aggregators
+ * like openrouter last as the failsafe. Unauthed providers never win over an
+ * authed one. Returns undefined only when none of the options exist.
+ */
+export function pickAmbiguousModel(options: string[], ctx: ExtensionContext): Model<Api> | undefined {
+	const models = options
+		.map((ref) => {
+			const [provider, ...rest] = ref.split("/");
+			return ctx.modelRegistry.find(provider ?? "", rest.join("/"));
+		})
+		.filter((model): model is Model<Api> => model !== undefined);
+	if (models.length === 0) return undefined;
+	const authed = models.filter((model) => ctx.modelRegistry.hasConfiguredAuth(model));
+	const pool = authed.length > 0 ? authed : models;
+	const current = pool.find((model) => model.provider === ctx.model?.provider);
+	if (current) return current;
+	const rank = (model: Model<Api>): number =>
+		ctx.modelRegistry.isUsingOAuth(model) ? 0 : AGGREGATOR_PROVIDERS.test(model.provider) ? 2 : 1;
+	return [...pool].sort((a, b) => rank(a) - rank(b) || a.provider.localeCompare(b.provider))[0];
+}
+
+/**
+ * Resolve a team model override: a canonical ref ("opencode/minimax-m3"), a
+ * plain phrase ("opencode minimax-m3"), or a phrase with a thinking level
+ * ("opencode/kimi-k2.6:high"). Returns undefined when nothing was named, an
+ * error string when the model cannot be used, the override otherwise.
+ * `member` names who would run on it, for the error messages.
+ */
+export function resolveModelOverride(
+	phrase: string,
+	ctx: ExtensionContext,
+	member = "tester",
+): ModelOverride | string | undefined {
+	if (phrase === "") return undefined;
+	const resolution = resolveModelPhrase(phrase, ctx.modelRegistry.getAll());
+	if (resolution.status === "ambiguous") {
+		const picked = pickAmbiguousModel(resolution.options, ctx);
+		if (picked) return { model: picked };
+		return `Model "${phrase}" is available on several providers: ${resolution.options.join(", ")}. Name one.`;
+	}
+	if (resolution.status === "unresolved") {
+		return `No model matches "${phrase}". Check available models with smolt --list-models.`;
+	}
+	if (!ctx.modelRegistry.hasConfiguredAuth(resolution.model)) {
+		return `No API key configured for provider "${resolution.model.provider}" — every ${member} would fail. Configure it first.`;
+	}
+	return { model: resolution.model, thinkingLevel: resolution.thinkingLevel };
 }

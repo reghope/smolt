@@ -1,13 +1,19 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { type Embedder, normalizeVector } from "../src/extensions/learning/embeddings.ts";
 import {
 	anchoredView,
+	CHUNK_CHARS,
+	chunkText,
 	formatTimestamp,
+	fuseRankings,
+	MAX_CHUNKS_PER_MESSAGE,
 	type SessionMessage,
 	SessionStore,
 } from "../src/extensions/learning/sessions.ts";
+import { VectorStore } from "../src/extensions/learning/vectors.ts";
 
 let dir: string;
 let sessionsDir: string;
@@ -431,6 +437,303 @@ describe("index incrementality (sqlite)", () => {
 
 		rmSync(join(sessionsDir, "b.jsonl"));
 		expect((await store.search({ query: "zebraphrase" })).count).toBe(1);
+	});
+});
+
+/**
+ * Hybrid discovery. The fake embedder maps text to a concept vector by
+ * keyword, with unrelated words sharing a concept — which is the property
+ * real embeddings have and FTS5 does not, and the whole reason for the
+ * semantic path.
+ */
+const CONCEPTS: string[][] = [
+	["econnreset", "reconnect", "socket"],
+	["auth", "login", "credential"],
+	["css", "layout", "style"],
+	["gardening", "compost"],
+];
+
+class FakeEmbedder implements Embedder {
+	readonly modelId = "fake-concepts-v1";
+	readonly dim = CONCEPTS.length;
+	calls: string[][] = [];
+	failNext = false;
+
+	async embed(texts: string[]): Promise<Float32Array[]> {
+		if (this.failNext) {
+			this.failNext = false;
+			throw new Error("embedding server unavailable");
+		}
+		this.calls.push(texts);
+		return texts.map((text) => {
+			const lower = text.toLowerCase();
+			const vec = new Float32Array(CONCEPTS.length);
+			CONCEPTS.forEach((words, dim) => {
+				for (const word of words) if (lower.includes(word)) vec[dim] = vec[dim]! + 1;
+			});
+			return normalizeVector(vec);
+		});
+	}
+}
+
+describe("hybrid discovery", () => {
+	let embedder: FakeEmbedder;
+	let vectors: VectorStore;
+
+	function hybridStore(): SessionStore {
+		return track(new SessionStore(sessionsDir, join(dir, "state.db"), { embedder, vectors, minScore: 0.25 }));
+	}
+
+	beforeEach(() => {
+		embedder = new FakeEmbedder();
+		vectors = new VectorStore(join(dir, "state.db"));
+	});
+
+	afterEach(() => {
+		vectors.close();
+	});
+
+	test("finds a session that shares no words with the query", async () => {
+		writeSession("a.jsonl", {
+			id: "sess-a",
+			messages: [
+				{ role: "user", text: "the rpc client keeps dying" },
+				{ role: "assistant", text: "ECONNRESET on the rpc client; added backoff and it settled" },
+			],
+		});
+		const store = hybridStore();
+		await store.backfill({ maxChunks: 100 });
+
+		// Lexical search alone finds nothing: FTS5 ANDs the quoted terms and
+		// neither word appears in the session.
+		const lexicalOnly = track(new SessionStore(sessionsDir, join(dir, "lexical.db")));
+		expect((await lexicalOnly.search({ query: "reconnect socket" })).count).toBe(0);
+
+		const result = await store.search({ query: "reconnect socket" });
+		expect(result.count).toBe(1);
+		const top = (result.results as Record<string, unknown>[])[0]!;
+		expect(top.session_id).toBe("sess-a");
+		expect(top.matched_by).toBe("vector");
+		expect(String(top.snippet)).toContain("ECONNRESET");
+	});
+
+	test("a chunk both retrievers find outranks one found by either alone", async () => {
+		writeSession("both.jsonl", {
+			id: "sess-both",
+			messages: [{ role: "assistant", text: "added backoff after the socket dropped" }],
+		});
+		writeSession("vector.jsonl", {
+			id: "sess-vector",
+			messages: [{ role: "assistant", text: "ECONNRESET from the rpc client" }],
+		});
+		writeSession("lexical.jsonl", {
+			id: "sess-lexical",
+			messages: [{ role: "assistant", text: "backoff on the css layout job" }],
+		});
+		const store = hybridStore();
+		await store.backfill({ maxChunks: 100 });
+
+		const result = await store.search({ query: "backoff OR socket", limit: 5 });
+		const results = result.results as Record<string, unknown>[];
+		expect(results[0]!.session_id).toBe("sess-both");
+		expect(results[0]!.matched_by).toBe("both");
+		const found = results.map((r) => r.session_id);
+		expect(found).toContain("sess-vector");
+		expect(found).toContain("sess-lexical");
+	});
+
+	test("an unrelated query returns nothing rather than the nearest neighbour", async () => {
+		writeSession("a.jsonl", {
+			id: "sess-a",
+			messages: [{ role: "assistant", text: "ECONNRESET from the rpc client" }],
+		});
+		const store = hybridStore();
+		await store.backfill({ maxChunks: 100 });
+		const result = await store.search({ query: "compost gardening" });
+		expect(result.count).toBe(0);
+	});
+
+	test("a failing embedder degrades to lexical results", async () => {
+		writeSession("a.jsonl", { id: "sess-a", messages: chat("alpha") });
+		const store = hybridStore();
+		await store.backfill({ maxChunks: 100 });
+		embedder.failNext = true;
+		const result = await store.search({ query: "zebraphrase" });
+		expect(result.count).toBe(1);
+		expect((result.results as Record<string, unknown>[])[0]!.matched_by).toBe("fts");
+	});
+});
+
+describe("backfill", () => {
+	let embedder: FakeEmbedder;
+	let vectors: VectorStore;
+
+	function hybridStore(): SessionStore {
+		return track(new SessionStore(sessionsDir, join(dir, "state.db"), { embedder, vectors }));
+	}
+
+	beforeEach(() => {
+		embedder = new FakeEmbedder();
+		vectors = new VectorStore(join(dir, "state.db"));
+	});
+
+	afterEach(() => {
+		vectors.close();
+	});
+
+	test("embeds user and assistant messages but not tool output", async () => {
+		writeSession("a.jsonl", {
+			id: "sess-a",
+			messages: [
+				{ role: "user", text: "run the socket test" },
+				{ role: "toolResult", text: "econnreset in the log" },
+				{ role: "assistant", text: "the socket test passed" },
+			],
+		});
+		const store = hybridStore();
+		const result = await store.backfill({ maxChunks: 100 });
+		expect(result.embedded).toBe(2);
+		expect(await vectors.count()).toBe(2);
+	});
+
+	test("is incremental across runs and re-embeds only what changed", async () => {
+		writeSession("a.jsonl", { id: "sess-a", messages: chat("alpha") });
+		const store = hybridStore();
+		expect((await store.backfill({ maxChunks: 100 })).embedded).toBe(6);
+
+		expect((await store.backfill({ maxChunks: 100 })).embedded).toBe(0);
+
+		writeSession("b.jsonl", { id: "sess-b", messages: chat("beta") });
+		const third = await store.backfill({ maxChunks: 100 });
+		expect(third.embedded).toBe(6);
+		expect(third.filesTouched).toBe(1);
+	});
+
+	test("stops at the chunk cap and reports itself incomplete", async () => {
+		writeSession("a.jsonl", { id: "sess-a", messages: chat("alpha") });
+		const store = hybridStore();
+		const first = await store.backfill({ maxChunks: 2 });
+		expect(first.embedded).toBe(2);
+		expect(first.incomplete).toBe(true);
+		const second = await store.backfill({ maxChunks: 100 });
+		expect(second.embedded).toBe(4);
+		expect(second.incomplete).toBe(false);
+	});
+
+	test("prunes vectors for session files that no longer exist", async () => {
+		writeSession("a.jsonl", { id: "sess-a", messages: chat("alpha") });
+		writeSession("b.jsonl", { id: "sess-b", messages: chat("beta") });
+		const store = hybridStore();
+		await store.backfill({ maxChunks: 100 });
+		expect(await vectors.count()).toBe(12);
+
+		rmSync(join(sessionsDir, "b.jsonl"));
+		const result = await store.backfill({ maxChunks: 100 });
+		expect(result.pathsPruned).toBe(1);
+		expect(await vectors.count()).toBe(6);
+	});
+
+	test("splits a long message into chunks, stores them as a set, and skips the file next time", async () => {
+		const paragraphs = Array.from({ length: 12 }, (_, i) => `Paragraph ${i} about auth and login. `.repeat(12));
+		writeSession("a.jsonl", {
+			id: "sess-a",
+			messages: [
+				{ role: "user", text: "tell me about auth" },
+				{ role: "assistant", text: paragraphs.join("\n\n") },
+			],
+		});
+		const store = hybridStore();
+		const expectedChunks = 1 + chunkText(paragraphs.join("\n\n")).length;
+		expect(expectedChunks).toBeGreaterThan(2);
+		const first = await store.backfill({ maxChunks: 100 });
+		expect(first.embedded).toBe(expectedChunks);
+		expect(await vectors.count()).toBe(expectedChunks);
+
+		// Nothing changed: the file is not even read.
+		const parse = vi.spyOn(store, "parseSessionFile");
+		const second = await store.backfill({ maxChunks: 100 });
+		expect(second).toMatchObject({ embedded: 0, filesTouched: 0 });
+		expect(parse).not.toHaveBeenCalled();
+
+		// It grew: read again, embed only the new message.
+		writeSession("a.jsonl", {
+			id: "sess-a",
+			messages: [
+				{ role: "user", text: "tell me about auth" },
+				{ role: "assistant", text: paragraphs.join("\n\n") },
+				{ role: "user", text: "thanks" },
+			],
+		});
+		const third = await store.backfill({ maxChunks: 100 });
+		expect(parse).toHaveBeenCalledTimes(1);
+		expect(third.embedded).toBe(1);
+	});
+
+	test("a run cut by the cap does not mark the file complete", async () => {
+		writeSession("a.jsonl", { id: "sess-a", messages: chat("alpha") });
+		const store = hybridStore();
+		await store.backfill({ maxChunks: 2 });
+		expect((await vectors.fileState(join(sessionsDir, "a.jsonl")))?.complete ?? false).toBe(false);
+		await store.backfill({ maxChunks: 100 });
+		expect((await vectors.fileState(join(sessionsDir, "a.jsonl")))?.complete).toBe(true);
+	});
+
+	test("does nothing when no embedder is configured", async () => {
+		writeSession("a.jsonl", { id: "sess-a", messages: chat("alpha") });
+		const store = track(new SessionStore(sessionsDir, join(dir, "state.db")));
+		expect(store.semanticEnabled).toBe(false);
+		expect(await store.backfill({ maxChunks: 100 })).toMatchObject({ embedded: 0 });
+	});
+});
+
+describe("chunkText", () => {
+	test("a short message is one chunk, trimmed", () => {
+		expect(chunkText("  hello world  ")).toEqual(["hello world"]);
+	});
+
+	test("cuts at a paragraph break in the back half of the window", () => {
+		const a = "a".repeat(1200);
+		const b = "b".repeat(1200);
+		expect(chunkText(`${a}\n\n${b}`)).toEqual([a, b]);
+	});
+
+	test("falls back to a line break, then a sentence end, then a hard cut", () => {
+		const line = `${"x".repeat(1000)}\n${"y".repeat(1000)}`;
+		expect(chunkText(line).map((c) => c.length)).toEqual([1000, 1000]);
+		const sentence = `${"s".repeat(1000)}. ${"t".repeat(1000)}`;
+		expect(chunkText(sentence).map((c) => c.length)).toEqual([1001, 1000]);
+		const solid = "z".repeat(CHUNK_CHARS * 2 + 10);
+		expect(chunkText(solid).map((c) => c.length)).toEqual([CHUNK_CHARS, CHUNK_CHARS, 10]);
+	});
+
+	test("caps the number of chunks per message", () => {
+		const huge = "q".repeat(CHUNK_CHARS * (MAX_CHUNKS_PER_MESSAGE + 5));
+		expect(chunkText(huge)).toHaveLength(MAX_CHUNKS_PER_MESSAGE);
+	});
+});
+
+describe("fuseRankings", () => {
+	function hit(path: string, idx: number, matchedBy: "fts" | "vector"): Parameters<typeof fuseRankings>[0][number] {
+		return { path, idx, sessionId: `s-${idx}`, role: "user", ts: "", snippet: "", matchedBy };
+	}
+
+	test("a chunk in both lists beats a chunk ranked first in one", () => {
+		const lexical = [hit("a", 1, "fts"), hit("a", 2, "fts")];
+		const semantic = [hit("a", 3, "vector"), hit("a", 2, "vector")];
+		const fused = fuseRankings(lexical, semantic);
+		expect(fused[0]!.idx).toBe(2);
+		expect(fused[0]!.matchedBy).toBe("both");
+	});
+
+	test("keeps the marked-up lexical snippet over a synthesized one", () => {
+		const lexical = [{ ...hit("a", 1, "fts"), snippet: ">>>match<<<" }];
+		const semantic = [hit("a", 1, "vector")];
+		expect(fuseRankings(lexical, semantic)[0]!.snippet).toBe(">>>match<<<");
+	});
+
+	test("returns one list unchanged when the other is empty", () => {
+		const lexical = [hit("a", 1, "fts"), hit("a", 2, "fts")];
+		expect(fuseRankings(lexical, []).map((h) => h.idx)).toEqual([1, 2]);
 	});
 });
 

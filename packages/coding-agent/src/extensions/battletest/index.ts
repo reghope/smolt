@@ -1,17 +1,17 @@
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { ThinkingLevel } from "@smolt/agent-core";
 import type { Api, Model } from "@smolt/ai";
 import { Type } from "typebox";
-import { getAgentDir } from "../../config.ts";
-import { ActionMetrics, type ActionSummary, describeSummary } from "../../core/action-metrics.ts";
+import { describeSummary } from "../../core/action-metrics.ts";
 // Type-only import: a standalone install of this module outside the smolt
 // tree switches this single line to `from "smolt"`.
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "../../core/extensions/types.ts";
 import { defineTool } from "../../core/extensions/types.ts";
 import { type BrowseDriver, type BrowseDriverFactory, defaultBrowseDriverFactory, VIEWPORT_PRESETS } from "./cdp.ts";
-import { parseBattletestInvocation, resolveModelPhrase } from "./parse.ts";
+import { parseBattletestInvocation, pickAmbiguousModel, resolveModelOverride } from "./parse.ts";
 import { describePersona, generatePersonas, generateTeam, type Persona } from "./personas.ts";
+import { CHILD_SHELL_TIMEOUT_SECONDS, type ChildDriver, spawnChildSession } from "./spawn.ts";
 import {
 	type BattleTestRun,
 	BattleTestStore,
@@ -77,22 +77,7 @@ function textResult(text: string) {
 export type TesterStatus = "testing" | "completed" | "errored" | "stopped";
 
 /** What a running tester can be driven with, once it exists. */
-export interface TesterDriver {
-	abort(): Promise<void>;
-	dispose(): void;
-	/** How many actions (tool executions) the tester has performed so far. */
-	actions?(): number;
-	/** Cut into the tester's turn with a supervisor message (e.g. wrap up). */
-	send?(text: string): Promise<void>;
-	/** Timing totals for everything the tester has done, for bottleneck hunting. */
-	metricsSummary?(): ActionSummary;
-	/** What the tester is doing right now — the in-flight action, if any. */
-	currentAction?(): string | undefined;
-	/** The tester's last actions, oldest first, for the expandable roster. */
-	recentActions?(): string[];
-	/** The tester's own LLM spend so far, summed over its requests. */
-	tokens?(): { input: number; output: number; cost: number };
-}
+export type TesterDriver = ChildDriver;
 
 export interface Tester {
 	persona: Persona;
@@ -145,142 +130,29 @@ export type TesterSpawner = (
 	onFinish: (status: "completed" | "errored", detail: string) => void,
 ) => Promise<TesterDriver>;
 
-/**
- * Testers run in temporary sessions by default: in-memory, never written to
- * disk, so a 10-tester run leaves the session list — and session search, and
- * the desktop sidebar — exactly as it found it. Their durable output is the
- * run's diaries, tickets, and report, not their transcripts. Set
- * `agents.persistChildSessions: true` in settings.json to keep the old
- * behavior (real session files, recoverable transcripts).
- */
-function persistChildSessions(ctx: ExtensionContext): boolean {
-	const settings = (ctx as unknown as { settings?: { agents?: { persistChildSessions?: boolean } } }).settings;
-	return settings?.agents?.persistChildSessions === true;
-}
+/** Testers never wait on a shell call longer than this; the brief says so. */
+const TESTER_SHELL_TIMEOUT_SECONDS = CHILD_SHELL_TIMEOUT_SECONDS;
 
 /**
- * Hard ceiling on one uncapped tester shell call.
- *
- * A run once lost over an hour to a single bash call that sat waiting on
- * something that never came — the tester looked frozen and the run's report
- * could only shrug. Testers never need an unbounded command: anything longer
- * than this is a wait loop, and a wait loop belongs in short polls the
- * supervisor can watch.
+ * The real spawner: one background AgentSession per tester, measured action
+ * by action, with `edit` excluded — a tester never patches the app it is
+ * judging. Write stays available for scratch driver scripts.
  */
-const TESTER_SHELL_TIMEOUT_SECONDS = 180;
-
-const defaultSpawner: TesterSpawner = async (
-	{ task, customTools, ctx, model, thinkingLevel, metricsPath },
-	onFinish,
-) => {
-	const { createAgentSession } = await import("../../core/sdk.ts");
-	const { DefaultResourceLoader } = await import("../../core/resource-loader.ts");
-	const { SettingsManager } = await import("../../core/settings-manager.ts");
-	const { getDefaultSessionDir, SessionManager } = await import("../../core/session-manager.ts");
-
-	const agentDir = getAgentDir();
-	const settingsManager = SettingsManager.create(ctx.cwd, agentDir);
-	// noExtensions keeps the tester a user, not an orchestrator: no subagent
-	// tool, no battletest command, nothing below this level spawns anything.
-	const resourceLoader = new DefaultResourceLoader({
-		cwd: ctx.cwd,
-		agentDir,
-		settingsManager,
-		noExtensions: true,
-	});
-	await resourceLoader.reload();
-
-	const { session } = await createAgentSession({
-		cwd: ctx.cwd,
-		agentDir,
-		model: model ?? ctx.model,
-		thinkingLevel: thinkingLevel ?? TESTER_THINKING,
-		// A tester never patches the app it is judging. Write stays available
-		// for scratch driver scripts; edit is how source gets "helpfully" fixed.
-		excludeTools: ["edit"],
-		// A hung shell call must cost minutes, not the rest of the run.
-		toolsOptions: {
-			bash: { defaultTimeoutSeconds: TESTER_SHELL_TIMEOUT_SECONDS },
-			powershell: { defaultTimeoutSeconds: TESTER_SHELL_TIMEOUT_SECONDS },
+const defaultSpawner: TesterSpawner = (options, onFinish) =>
+	spawnChildSession(
+		{
+			task: options.task,
+			customTools: options.customTools,
+			ctx: options.ctx,
+			model: options.model,
+			thinkingLevel: options.thinkingLevel,
+			defaultThinkingLevel: TESTER_THINKING,
+			metricsPath: options.metricsPath,
+			excludeTools: ["edit"],
+			shellTimeoutSeconds: TESTER_SHELL_TIMEOUT_SECONDS,
 		},
-		customTools,
-		resourceLoader,
-		settingsManager,
-		sessionManager: persistChildSessions(ctx)
-			? SessionManager.create(ctx.cwd, getDefaultSessionDir(ctx.cwd, agentDir))
-			: SessionManager.inMemory(ctx.cwd),
-	});
-
-	// Every action is timed: tool spans and the model's thinking between them,
-	// streamed to the run's metrics JSONL so even a killed run keeps its data.
-	const metrics = new ActionMetrics(
-		metricsPath
-			? (row) => {
-					try {
-						mkdirSync(dirname(metricsPath), { recursive: true });
-						appendFileSync(metricsPath, `${JSON.stringify(row)}\n`, "utf-8");
-					} catch {
-						// Metrics must never take down a tester.
-					}
-				}
-			: undefined,
+		onFinish,
 	);
-	const detachMetrics = metrics.attach(session);
-
-	const finalText = (): string => {
-		const messages = session.messages;
-		for (let index = messages.length - 1; index >= 0; index--) {
-			const message = messages[index] as { role?: unknown; content?: unknown };
-			if (message?.role !== "assistant") continue;
-			const text = Array.isArray(message.content)
-				? (message.content as { type?: string; text?: string }[])
-						.filter((block) => block.type === "text")
-						.map((block) => block.text ?? "")
-						.join("")
-				: String(message.content ?? "");
-			if (text.trim() !== "") return text.trim();
-		}
-		return "";
-	};
-
-	// Detached on purpose: the whole point is that the parent does not wait.
-	void session
-		.prompt(task)
-		.then(() => onFinish("completed", finalText()))
-		.catch((error: unknown) => onFinish("errored", error instanceof Error ? error.message : String(error)));
-
-	return {
-		abort: async () => {
-			await session.abort();
-		},
-		dispose: () => {
-			detachMetrics();
-			session.dispose();
-		},
-		actions: () => metrics.actions,
-		send: async (text) => {
-			await session.steer(text);
-		},
-		metricsSummary: () => metrics.summary(),
-		currentAction: () => metrics.recent,
-		recentActions: () => metrics.recentActions,
-		tokens: () => {
-			let input = 0;
-			let output = 0;
-			let cost = 0;
-			for (const message of session.messages) {
-				const usage = (
-					message as { role?: unknown; usage?: { input?: number; output?: number; cost?: { total?: number } } }
-				).usage;
-				if ((message as { role?: unknown }).role !== "assistant" || !usage) continue;
-				input += usage.input ?? 0;
-				output += usage.output ?? 0;
-				cost += usage.cost?.total ?? 0;
-			}
-			return { input, output, cost };
-		},
-	};
-};
 
 // ------------------------------------------------------------------
 // Prompts
@@ -1015,62 +887,6 @@ export interface BattleTestPaths {
 	clearanceTimeoutMs?: number;
 }
 
-/** A model override for a new run's testers, resolved from a name or phrase. */
-interface TesterModelOverride {
-	model: Model<Api>;
-	thinkingLevel?: ThinkingLevel;
-}
-
-/**
- * Resolve a tester model override: a canonical ref ("opencode/minimax-m3"),
- * a plain phrase ("opencode minimax-m3"), or a phrase with a thinking level
- * ("opencode/kimi-k2.6:high"). Returns undefined when nothing was named, an
- * error string when the model cannot be used, the override otherwise.
- */
-/** Providers that resell other people's models; the failsafe, never the first pick. */
-const AGGREGATOR_PROVIDERS = /^openrouter/i;
-
-/**
- * Pick one provider for a model that several carry, without bothering the
- * user: the session's own provider first (the one they demonstrably use),
- * then subscription (OAuth) providers, then plain API keys, with aggregators
- * like openrouter last as the failsafe. Unauthed providers never win over an
- * authed one. Returns undefined only when none of the options exist.
- */
-function pickAmbiguousModel(options: string[], ctx: ExtensionContext): Model<Api> | undefined {
-	const models = options
-		.map((ref) => {
-			const [provider, ...rest] = ref.split("/");
-			return ctx.modelRegistry.find(provider ?? "", rest.join("/"));
-		})
-		.filter((model): model is Model<Api> => model !== undefined);
-	if (models.length === 0) return undefined;
-	const authed = models.filter((model) => ctx.modelRegistry.hasConfiguredAuth(model));
-	const pool = authed.length > 0 ? authed : models;
-	const current = pool.find((model) => model.provider === ctx.model?.provider);
-	if (current) return current;
-	const rank = (model: Model<Api>): number =>
-		ctx.modelRegistry.isUsingOAuth(model) ? 0 : AGGREGATOR_PROVIDERS.test(model.provider) ? 2 : 1;
-	return [...pool].sort((a, b) => rank(a) - rank(b) || a.provider.localeCompare(b.provider))[0];
-}
-
-function resolveTesterModel(phrase: string, ctx: ExtensionContext): TesterModelOverride | string | undefined {
-	if (phrase === "") return undefined;
-	const resolution = resolveModelPhrase(phrase, ctx.modelRegistry.getAll());
-	if (resolution.status === "ambiguous") {
-		const picked = pickAmbiguousModel(resolution.options, ctx);
-		if (picked) return { model: picked };
-		return `Model "${phrase}" is available on several providers: ${resolution.options.join(", ")}. Name one.`;
-	}
-	if (resolution.status === "unresolved") {
-		return `No model matches "${phrase}". Check available models with smolt --list-models.`;
-	}
-	if (!ctx.modelRegistry.hasConfiguredAuth(resolution.model)) {
-		return `No API key configured for provider "${resolution.model.provider}" — every tester would fail. Configure it first.`;
-	}
-	return { model: resolution.model, thinkingLevel: resolution.thinkingLevel };
-}
-
 export default function battleTestExtension(smolt: ExtensionAPI): void {
 	createBattleTestExtension(smolt, { root: join(process.cwd(), ".smolt", "battletest") });
 }
@@ -1781,7 +1597,7 @@ export function createBattleTestExtension(
 				if (count < 1 || count > MAX_TESTERS) {
 					return textResult(`Tester count must be between 1 and ${MAX_TESTERS}.`);
 				}
-				const override = resolveTesterModel((params.model ?? "").trim(), ctx);
+				const override = resolveModelOverride((params.model ?? "").trim(), ctx);
 				if (typeof override === "string") return textResult(override);
 				const run = await startRun(
 					count,

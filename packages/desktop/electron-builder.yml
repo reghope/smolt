@@ -58,6 +58,10 @@ asar: true
 # Native bindings cannot be read from inside an asar archive.
 asarUnpack:
   - node_modules/onnxruntime-node/**
+  # The agents the app spawns import transformers.js by path for semantic
+  # recall, and a child process cannot read inside the archive.
+  - node_modules/@huggingface/**
+  - node_modules/onnxruntime-common/**
   - node_modules/sharp/**
   - node_modules/@img/**
 

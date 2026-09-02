@@ -35,6 +35,16 @@ export interface PageState {
 	console: string[];
 }
 
+/** One request the page made, as the network capture saw it. */
+export interface CapturedRequest {
+	method: string;
+	url: string;
+	/** Document, XHR, Fetch, Script, Image... as Chrome classifies it. */
+	type: string;
+	status?: number;
+	mimeType?: string;
+}
+
 /** What the browse tool drives. Injectable so tests never need a browser. */
 export interface BrowseDriver {
 	goto(url: string): Promise<void>;
@@ -48,6 +58,8 @@ export interface BrowseDriver {
 	/** Base64 JPEG of the current viewport — sized by the viewport, not the page. */
 	screenshot(): Promise<string>;
 	state(): Promise<PageState>;
+	/** Requests seen since the last drain; only when launched with `captureNetwork`. */
+	requests?(): Promise<CapturedRequest[]>;
 	dispose(): void;
 }
 
@@ -55,6 +67,20 @@ export interface BrowseLaunchOptions {
 	port: number;
 	userDataDir: string;
 	viewport: BrowseViewport;
+	/**
+	 * Show a real window instead of running headless. A site that refuses
+	 * headless browsers (bot checks keyed on the headless build) usually
+	 * serves a visible one; research uses this as its fallback.
+	 */
+	headed?: boolean;
+	/**
+	 * Present this user agent instead of the browser's own. The default for a
+	 * headless launch drops the "HeadlessChrome" token, which is what most
+	 * naive bot checks key on; pass a full string to override entirely.
+	 */
+	userAgent?: string | "default";
+	/** Record every request the page makes, for `requests()`. */
+	captureNetwork?: boolean;
 }
 
 export type BrowseDriverFactory = (options: BrowseLaunchOptions) => Promise<BrowseDriver>;
@@ -117,6 +143,9 @@ class CdpDriver implements BrowseDriver {
 	private consoleBuffer: string[] = [];
 	private loadFired = false;
 	private viewport: BrowseViewport;
+	/** Requests in flight or finished since the last drain, keyed by CDP request id. */
+	private requestBuffer = new Map<string, CapturedRequest>();
+	private requestOrder: string[] = [];
 
 	private constructor(ws: WebSocket, proc: ChildProcess, viewport: BrowseViewport) {
 		this.ws = ws;
@@ -134,11 +163,9 @@ class CdpDriver implements BrowseDriver {
 		const proc = spawn(
 			binary,
 			[
-				"--headless=new",
-				"--disable-gpu",
+				...(options.headed ? [] : ["--headless=new", "--disable-gpu", "--hide-scrollbars"]),
 				"--no-first-run",
 				"--no-default-browser-check",
-				"--hide-scrollbars",
 				`--remote-debugging-port=${options.port}`,
 				`--user-data-dir=${options.userDataDir}`,
 				`--window-size=${options.viewport.width},${options.viewport.height}`,
@@ -180,8 +207,28 @@ class CdpDriver implements BrowseDriver {
 		await driver.send("Page.enable", {});
 		await driver.send("Runtime.enable", {});
 		await driver.send("Log.enable", {});
+		if (options.captureNetwork) await driver.send("Network.enable", {});
+		if (options.userAgent !== "default") {
+			// The stock headless UA announces itself as HeadlessChrome, which is
+			// what the simplest bot checks refuse. Presenting the browser as
+			// what it is — this same Chrome, minus the token — is not evasion
+			// of anything but that one string; a real bot check still applies.
+			const own = await driver.eval("navigator.userAgent");
+			const userAgent = options.userAgent ?? own.replace(/HeadlessChrome/g, "Chrome");
+			if (userAgent !== own) await driver.send("Emulation.setUserAgentOverride", { userAgent });
+		}
 		await driver.setViewport(options.viewport);
 		return driver;
+	}
+
+	/** Every request seen since the last call, oldest first; the buffer is drained. */
+	async requests(): Promise<CapturedRequest[]> {
+		const drained = this.requestOrder
+			.map((id) => this.requestBuffer.get(id))
+			.filter((request): request is CapturedRequest => request !== undefined);
+		this.requestBuffer = new Map();
+		this.requestOrder = [];
+		return drained;
 	}
 
 	private onMessage(raw: string): void {
@@ -206,6 +253,38 @@ class CdpDriver implements BrowseDriver {
 			return;
 		}
 		if (message.method === "Page.loadEventFired") this.loadFired = true;
+		if (message.method === "Network.requestWillBeSent") {
+			const params = message.params as {
+				requestId?: string;
+				type?: string;
+				request?: { method?: string; url?: string };
+			};
+			if (params.requestId && params.request?.url) {
+				if (!this.requestBuffer.has(params.requestId)) this.requestOrder.push(params.requestId);
+				this.requestBuffer.set(params.requestId, {
+					method: params.request.method ?? "GET",
+					url: params.request.url,
+					type: params.type ?? "Other",
+				});
+				// Bound the buffer: a busy page can fire hundreds of requests
+				// between drains, and the oldest are the least interesting.
+				while (this.requestOrder.length > 400) {
+					const oldest = this.requestOrder.shift();
+					if (oldest !== undefined) this.requestBuffer.delete(oldest);
+				}
+			}
+		}
+		if (message.method === "Network.responseReceived") {
+			const params = message.params as {
+				requestId?: string;
+				response?: { status?: number; mimeType?: string };
+			};
+			const entry = params.requestId ? this.requestBuffer.get(params.requestId) : undefined;
+			if (entry) {
+				entry.status = params.response?.status;
+				entry.mimeType = params.response?.mimeType;
+			}
+		}
 		if (message.method === "Runtime.consoleAPICalled") {
 			const params = message.params as { type?: string; args?: { value?: unknown; description?: string }[] };
 			if (params.type === "error" || params.type === "warning") {

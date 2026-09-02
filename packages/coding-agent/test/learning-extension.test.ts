@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { ExtensionAPI } from "../src/core/extensions/types.ts";
-import { createLearningExtension, type LearningStores } from "../src/extensions/learning/index.ts";
+import { DEFAULT_EMBEDDING_CONFIG, type Embedder } from "../src/extensions/learning/embeddings.ts";
+import type { ToolCallRow } from "../src/extensions/learning/hindsight.ts";
+import { createLearningExtension, type LearningStores, renderSkillUsage } from "../src/extensions/learning/index.ts";
+import { provideSemanticRecall, type SemanticRecall, takeSemanticRecall } from "../src/extensions/learning/semantic.ts";
+import { VectorStore } from "../src/extensions/learning/vectors.ts";
 
 /**
  * Wiring tests for the learning extension: system-prompt injection with a
@@ -23,9 +27,18 @@ interface RegisteredTool {
 	): Promise<{ content: { type: string; text: string }[] }>;
 }
 
+interface RegisteredCommand {
+	description?: string;
+	handler(args: string, ctx: { ui: { notify(text: string, level?: string): void } }): Promise<void>;
+}
+
 class FakeSmolt {
 	handlers = new Map<string, ((event: Record<string, unknown>) => Promise<unknown>)[]>();
 	tools = new Map<string, RegisteredTool>();
+	commands = new Map<string, RegisteredCommand>();
+	sentMessages: Record<string, unknown>[] = [];
+	sentOptions: (Record<string, unknown> | undefined)[] = [];
+	notifications: string[] = [];
 
 	on(event: string, handler: (event: Record<string, unknown>) => Promise<unknown>): void {
 		const list = this.handlers.get(event) ?? [];
@@ -37,11 +50,22 @@ class FakeSmolt {
 		this.tools.set(tool.name, tool);
 	}
 
-	registerCommand(): void {}
+	registerCommand(name: string, command: RegisteredCommand): void {
+		this.commands.set(name, command);
+	}
 
-	sendMessage(): void {}
+	sendMessage(message: Record<string, unknown>, options?: Record<string, unknown>): void {
+		this.sentMessages.push(message);
+		this.sentOptions.push(options);
+	}
 
 	sendUserMessage(): void {}
+
+	async runCommand(name: string, args = ""): Promise<void> {
+		const command = this.commands.get(name);
+		if (!command) throw new Error(`command not registered: ${name}`);
+		await command.handler(args, { ui: { notify: (text: string) => this.notifications.push(text) } });
+	}
 
 	async fire(event: string, payload: Record<string, unknown> = {}): Promise<unknown> {
 		let result: unknown;
@@ -198,5 +222,163 @@ describe("registered tools", () => {
 
 		const browse = await smolt.runTool("session_search", {});
 		expect(browse).toMatchObject({ mode: "browse", count: 1 });
+	});
+});
+
+describe("skill attribution", () => {
+	function skillRead(id: string, skill: string): ToolCallRow {
+		return {
+			toolCallId: id,
+			sessionId: "s1",
+			turnIndex: 0,
+			tool: "read",
+			argKey: `${skill}/SKILL.md`,
+			argDetail: `/skills/${skill}/SKILL.md`,
+			cwd: "",
+			startedAt: 1_700_000_000_000,
+			durationMs: 3,
+			isError: false,
+			errorClass: undefined,
+			retryOf: undefined,
+			exitCode: undefined,
+		};
+	}
+
+	test("renderSkillUsage separates loaded skills from never-loaded ones", () => {
+		const report = renderSkillUsage(
+			[
+				{ name: "battletest", writtenAt: 1_700_000_000_000 },
+				{ name: "idle-one", writtenAt: 1_700_000_000_000 },
+			],
+			[{ skill: "battletest", loads: 4, lastAt: 1_700_000_000_000 }],
+		);
+		expect(report).toContain("2 skills · 1 ever loaded · 1 never loaded");
+		expect(report).toContain("battletest — 4 loads");
+		expect(report).toContain("idle-one — written");
+		expect(report).toContain("Never loaded does not mean useless");
+	});
+
+	test("renderSkillUsage says so when there are no skills at all", () => {
+		expect(renderSkillUsage([], [])).toBe("No skills have been recorded yet.");
+	});
+
+	test("/skills pairs authored skills against measured loads", async () => {
+		await smolt.runTool("skill_manage", {
+			action: "create",
+			name: "used-skill",
+			content:
+				"---\nname: used-skill\ndescription: A skill that gets loaded\n---\n\n" +
+				"## When to Use\nAlways\n\n## Procedure\nDo it\n\n## Pitfalls\nNone\n\n## Verification\nCheck\n",
+		});
+		await smolt.runTool("skill_manage", {
+			action: "create",
+			name: "idle-skill",
+			content:
+				"---\nname: idle-skill\ndescription: A skill nothing ever loads\n---\n\n" +
+				"## When to Use\nNever\n\n## Procedure\nDo it\n\n## Pitfalls\nNone\n\n## Verification\nCheck\n",
+		});
+		await stores.hindsight.flush([skillRead("call-a", "used-skill")]);
+
+		await smolt.runCommand("skills");
+		const report = String(smolt.sentMessages.at(-1)?.content ?? "");
+		expect(report).toContain("2 skills · 1 ever loaded · 1 never loaded");
+		expect(report).toContain("used-skill — 1 loads");
+		expect(report).toContain("idle-skill — written");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Semantic recall wiring
+// ---------------------------------------------------------------------------
+
+class ConstantEmbedder implements Embedder {
+	readonly modelId = "fake-v1";
+	readonly dim = 3;
+	async embed(texts: string[]): Promise<Float32Array[]> {
+		return texts.map(() => new Float32Array([1, 0, 0]));
+	}
+}
+
+function semanticIn(root: string): SemanticRecall {
+	return {
+		config: { ...DEFAULT_EMBEDDING_CONFIG, engine: "server", model: "fake-v1", minScore: 0.25 },
+		embedder: new ConstantEmbedder(),
+		vectors: new VectorStore(join(root, "state.db")),
+	};
+}
+
+function lastReport(fake: FakeSmolt): string {
+	const message = fake.sentMessages.at(-1) as { content?: unknown } | undefined;
+	return typeof message?.content === "string" ? message.content : "";
+}
+
+describe("semantic recall wiring", () => {
+	test("stays lexical, and says so, when nothing was handed over", async () => {
+		expect(stores.sessions.semanticEnabled).toBe(false);
+		expect(stores.vectors).toBeUndefined();
+		expect(smolt.tools.get("session_search")?.description).not.toContain("SEMANTIC RECALL");
+		await smolt.runCommand("embeddings");
+		expect(lastReport(smolt)).toContain("off");
+		expect(lastReport(smolt)).toContain("semantic-recall");
+	});
+
+	test("reports are for the reader, never steered into a running turn", async () => {
+		await smolt.runCommand("embeddings");
+		await smolt.runCommand("skills");
+		expect(smolt.sentOptions).toHaveLength(2);
+		for (const options of smolt.sentOptions) expect(options).toEqual({ triggerTurn: false });
+	});
+
+	test("wires a handed-over embedder into search and reports it", async () => {
+		const other = new FakeSmolt();
+		const semantic = semanticIn(dir);
+		const wired = createLearningExtension(
+			other as unknown as ExtensionAPI,
+			{
+				memoriesDir: join(dir, "memories"),
+				skillsRoot: join(dir, "skills"),
+				sessionsRoot: join(dir, "sessions"),
+				stateDbPath: join(dir, "state.db"),
+			},
+			{ semantic },
+		);
+		try {
+			expect(wired.sessions.semanticEnabled).toBe(true);
+			expect(wired.vectors).toBe(semantic.vectors);
+			expect(other.tools.get("session_search")?.description).toContain("SEMANTIC RECALL");
+			await other.runCommand("embeddings");
+			expect(lastReport(other)).toContain("on");
+			expect(lastReport(other)).toContain("fake-v1");
+			expect(lastReport(other)).toContain("not yet started");
+			await other.fire("session_start");
+			await other.fire("session_shutdown");
+			await other.runCommand("embeddings");
+			expect(lastReport(other)).toContain("Last index run");
+		} finally {
+			wired.sessions.close();
+			wired.hindsight.close();
+			// The report after shutdown reopened the store to count rows.
+			semantic.vectors.close();
+		}
+	});
+
+	test("takes the extension's handoff when no option is given, once", () => {
+		const other = new FakeSmolt();
+		const semantic = semanticIn(dir);
+		provideSemanticRecall(semantic);
+		const wired = createLearningExtension(other as unknown as ExtensionAPI, {
+			memoriesDir: join(dir, "memories"),
+			skillsRoot: join(dir, "skills"),
+			sessionsRoot: join(dir, "sessions"),
+			stateDbPath: join(dir, "state.db"),
+		});
+		try {
+			expect(wired.sessions.semanticEnabled).toBe(true);
+			expect(takeSemanticRecall()).toBeUndefined();
+		} finally {
+			wired.sessions.close();
+			wired.hindsight.close();
+			semantic.vectors.close();
+		}
 	});
 });

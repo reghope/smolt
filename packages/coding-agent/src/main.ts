@@ -6,6 +6,7 @@
  */
 
 import { createInterface } from "node:readline";
+import type { Readable } from "node:stream";
 import { type ImageContent, modelsAreEqual } from "@smolt/ai";
 import { setCapabilityOverrides } from "@smolt/tui";
 import chalk from "chalk";
@@ -74,23 +75,55 @@ const EXTENSION_LOAD_FAILURE_HINT = `Hint: Start without extensions using "${APP
 /**
  * Read all content from piped stdin.
  * Returns undefined if stdin is a TTY (interactive terminal).
+ *
+ * With a prompt on the command line, stdin is optional: a wrapper that
+ * spawns `smolt -p "..."` with a pipe it never writes to or closes would
+ * otherwise wait here forever with nothing printed. So when a prompt was
+ * given, the pipe gets a short window to deliver its first byte, and
+ * silence means there is nothing to merge. Without a prompt, stdin is the
+ * prompt and is read to the end.
  */
-async function readPipedStdin(): Promise<string | undefined> {
+export async function readPipedStdin(options: {
+	hasPrompt: boolean;
+	stdin?: Readable & { isTTY?: boolean };
+	firstByteMs?: number;
+}): Promise<string | undefined> {
+	const stdin = options.stdin ?? process.stdin;
 	// If stdin is a TTY, we're running interactively - don't read stdin
-	if (process.stdin.isTTY) {
+	if (stdin.isTTY) {
 		return undefined;
 	}
 
 	return new Promise((resolve) => {
 		let data = "";
-		process.stdin.setEncoding("utf8");
-		process.stdin.on("data", (chunk) => {
+		let timer: NodeJS.Timeout | undefined;
+		const finish = (value: string | undefined) => {
+			if (timer) clearTimeout(timer);
+			stdin.off("data", onData);
+			stdin.off("end", onEnd);
+			stdin.off("error", onError);
+			resolve(value);
+		};
+		const onData = (chunk: string | Buffer) => {
+			if (timer) {
+				clearTimeout(timer);
+				timer = undefined;
+			}
 			data += chunk;
-		});
-		process.stdin.on("end", () => {
-			resolve(data.trim() || undefined);
-		});
-		process.stdin.resume();
+		};
+		const onEnd = () => finish(data.trim() || undefined);
+		const onError = () => finish(data.trim() || undefined);
+		stdin.setEncoding("utf8");
+		stdin.on("data", onData);
+		stdin.on("end", onEnd);
+		stdin.on("error", onError);
+		if (options.hasPrompt) {
+			timer = setTimeout(() => {
+				stdin.pause();
+				finish(undefined);
+			}, options.firstByteMs ?? 500);
+		}
+		stdin.resume();
 	});
 }
 
@@ -874,7 +907,7 @@ export async function main(args: string[], options?: MainOptions) {
 	// Read piped stdin content (if any) - skip for RPC mode which uses stdin for JSON-RPC
 	let stdinContent: string | undefined;
 	if (appMode !== "rpc") {
-		stdinContent = await readPipedStdin();
+		stdinContent = await readPipedStdin({ hasPrompt: parsed.messages.length > 0 });
 		if (stdinContent !== undefined && appMode === "interactive") {
 			appMode = "print";
 		}

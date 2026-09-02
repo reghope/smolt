@@ -15,6 +15,7 @@ import screenshotExtension from "./screenshot/index.ts";
 import subagentsExtension from "./subagents/index.ts";
 import tasteExtension from "./taste/index.ts";
 import telegramExtension from "./telegram/index.ts";
+import toolsExtension from "./tools/index.ts";
 import wayfinderExtension from "./wayfinder/index.ts";
 
 export const builtInExtensions: InlineExtension[] = [
@@ -29,6 +30,12 @@ export const builtInExtensions: InlineExtension[] = [
 		factory: degenerationExtension,
 		hidden: true,
 		description: "Catches a looping response mid-stream and resamples it once",
+	},
+	{
+		name: "tools",
+		factory: toolsExtension,
+		hidden: true,
+		description: "Built-in tools with narrower habits: read only the part of a file needed, search with rg first",
 	},
 	// Semantic recall is listed before learning deliberately: it hands the
 	// learning extension an embedder at load, and the handoff only works in

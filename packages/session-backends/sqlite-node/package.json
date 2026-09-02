@@ -1,6 +1,6 @@
 {
 	"name": "@smolt/session-backend-sqlite-node",
-	"version": "0.2.2",
+	"version": "0.3.0",
 	"description": "Node sqlite session backend for @smolt/agent-core sessions",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -34,8 +34,8 @@
 		"node": ">=22.19.0"
 	},
 	"dependencies": {
-		"@smolt/ai": "^0.2.2",
-		"@smolt/agent-core": "^0.2.2"
+		"@smolt/ai": "^0.3.0",
+		"@smolt/agent-core": "^0.3.0"
 	},
 	"devDependencies": {
 		"@vitest/coverage-v8": "4.1.9",

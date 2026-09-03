@@ -9,7 +9,7 @@ import { isModelCached, modelCacheDir, speechStatus, transcribeSamples } from ".
  *
  * The weights are not shipped, so the first use downloads them. These cover
  * the cheap, deterministic half — the cache location and the status the
- * window reads to decide whether to say "fetching" — without pulling 40 MB
+ * window reads to decide whether to say "fetching" — without pulling the weights
  * over the network in a unit test.
  */
 
@@ -45,7 +45,7 @@ describe("isModelCached", () => {
 	});
 
 	test("is true once the model's folder exists", () => {
-		mkdirSync(join(modelCacheDir(), "onnx-community", "whisper-tiny.en"), { recursive: true });
+		mkdirSync(join(modelCacheDir(), "onnx-community", "moonshine-base-ONNX"), { recursive: true });
 		expect(isModelCached()).toBe(true);
 	});
 });
@@ -55,12 +55,12 @@ describe("speechStatus", () => {
 		const status = speechStatus();
 		expect(status.ready).toBe(false);
 		expect(status.downloading).toBe(false);
-		expect(status.modelId).toContain("whisper");
+		expect(status.modelId).toContain("moonshine");
 		expect(status.cacheDir).toBe(modelCacheDir());
 	});
 
 	test("reports ready once the weights are on disk", () => {
-		mkdirSync(join(modelCacheDir(), "onnx-community", "whisper-tiny.en"), { recursive: true });
+		mkdirSync(join(modelCacheDir(), "onnx-community", "moonshine-base-ONNX"), { recursive: true });
 		expect(speechStatus().ready).toBe(true);
 	});
 });
@@ -68,7 +68,7 @@ describe("speechStatus", () => {
 describe("transcribeSamples", () => {
 	test("returns nothing for silence of no length, without loading a model", async () => {
 		// Guards the common case of stopping before saying anything: it must
-		// not download 40 MB to tell you that you said nothing.
+		// not download the weights to tell you that you said nothing.
 		await expect(transcribeSamples(new Float32Array(0))).resolves.toBe("");
 	});
 });

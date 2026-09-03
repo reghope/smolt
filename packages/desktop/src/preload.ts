@@ -12,8 +12,6 @@ contextBridge.exposeInMainWorld("smolt", {
 	status: (): Promise<{ running: boolean; error: string | null }> => ipcRenderer.invoke("agent:status"),
 	sessions: (query?: string): Promise<unknown[]> => ipcRenderer.invoke("app:sessions", query),
 	info: (): Promise<{ cwd: string; version: string }> => ipcRenderer.invoke("app:info"),
-	transcribe: (audio: ArrayBuffer, mimeType: string): Promise<AgentCallResult> =>
-		ipcRenderer.invoke("app:transcribe", audio, mimeType),
 	pendingApprovals: (): Promise<unknown[]> => ipcRenderer.invoke("app:pending-approvals"),
 	permissionReply: (id: string, answer: string): Promise<AgentCallResult> =>
 		ipcRenderer.invoke("app:permission-reply", id, answer),

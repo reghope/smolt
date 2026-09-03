@@ -18,9 +18,8 @@ import { transformersEntry } from "./embeddings-module.ts";
 import { refreshIconCacheAfterUpdate } from "./icon-cache.ts";
 import { fetchLinkPreview } from "./link-preview.ts";
 import { listSessions, searchSessions } from "./sessions.ts";
-import { ensureModel, speechStatus, transcribeSamples } from "./speech.ts";
+import { ensureModel, isModelCached, speechStatus, stopSpeech, transcribeSamples } from "./speech.ts";
 import { collectStats } from "./stats.ts";
-import { findTranscriptionProvider, transcribeAudio } from "./transcribe.ts";
 import { checkNow, installUpdate, startUpdates, updateState } from "./updates.ts";
 import { createWorktree, listWorktrees, removeWorktree, repoRoot } from "./worktrees.ts";
 
@@ -629,6 +628,15 @@ function createWindow(): BrowserWindow {
 		// Looking for an update is background work; it must never delay the window.
 		// A hotfix applies itself, but never through a turn in progress.
 		void startUpdates(win, () => !slots.some((slot) => slot.busy));
+		// Warm the speech model while nobody is waiting on it. Loading takes
+		// well over a second, and it used to happen on the first clip of
+		// audio — so the first thing anyone said went unheard until it
+		// finished, every time the app was opened. Only warmed when the
+		// weights are already on disk, which means only for someone who has
+		// dictated before: it must never pull a download for someone who
+		// never will. Failure is silent, since nothing was asked for yet and
+		// the next real attempt will report it properly.
+		if (isModelCached()) setTimeout(() => void ensureModel().catch(() => {}), 2000);
 	});
 
 	// Links in a response belong in the user's browser. Without this a click
@@ -1040,7 +1048,6 @@ app.whenReady().then(async () => {
 		folders: projectFolders,
 		version: appVersion(),
 		continueLatest: process.env.SMOLT_DESKTOP_CONTINUE === "1",
-		canTranscribe: findTranscriptionProvider() !== undefined,
 		// Only an installed build has an installer the updater can replace.
 		packaged: app.isPackaged,
 	}));
@@ -1604,16 +1611,6 @@ app.whenReady().then(async () => {
 		}
 	});
 
-	ipcMain.handle("app:transcribe", async (_e, audio: ArrayBuffer, mimeType: string) => {
-		try {
-			const text = await transcribeAudio(new Uint8Array(audio), mimeType);
-			return { ok: true, value: text };
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			return { ok: false, error: message };
-		}
-	});
-
 	// Screenshot mode: capture the window to the given path once the
 	// renderer settles, then exit. Used to document the UI.
 	const shotPath = process.env.SMOLT_DESKTOP_SHOT;
@@ -1681,6 +1678,9 @@ app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", () => {
+	// The speech model runs in a process of its own; nothing will be asked
+	// of it again, and it must not outlive the windows.
+	stopSpeech();
 	void Promise.all([...slots.map((slot) => slot.bridge.stop()), sideBridge?.stop(), telegramBridge?.stop()]).finally(
 		() => app.quit(),
 	);

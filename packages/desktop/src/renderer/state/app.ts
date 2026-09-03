@@ -158,7 +158,6 @@ interface AppState {
 	autoCompaction: boolean;
 	autoRetry: boolean;
 	deliverAllQueued: boolean;
-	canTranscribe: boolean;
 	permissionMode: string;
 	runStartedAt: number;
 	appInfo: { cwd: string; version: string; hasProject: boolean; packaged: boolean };
@@ -242,6 +241,17 @@ interface AppState {
 	voiceLevel: number;
 	/** The device that recorded nothing, so the mic button can say which. */
 	voiceSilent: string;
+	/**
+	 * Exactly what dictation has written into the draft this sitting.
+	 *
+	 * The composer shows this much of its text as grey italics while the
+	 * microphone is open — the same voice the transcript gives a thought —
+	 * so spoken words are visibly still being heard rather than typed. It is
+	 * matched as a suffix of the draft, so an edit simply ends the styling
+	 * rather than colouring the wrong words, and stopping dictation clears it
+	 * and the words become ordinary text.
+	 */
+	voiceSpoken: string;
 	/** A stop has been asked for and not yet taken effect. */
 	aborting: boolean;
 	/** What the updater is doing, shared by the footer notice and settings. */
@@ -276,7 +286,6 @@ export const app: AppState = {
 	autoCompaction: true,
 	autoRetry: true,
 	deliverAllQueued: false,
-	canTranscribe: false,
 	permissionMode: "auto",
 	runStartedAt: 0,
 	appInfo: { cwd: "", version: "", hasProject: false, packaged: false },
@@ -334,6 +343,7 @@ export const app: AppState = {
 	micDeviceId: "",
 	voiceLevel: 0,
 	voiceSilent: "",
+	voiceSpoken: "",
 	aborting: false,
 	update: { status: "idle" },
 	updateChecking: false,
@@ -2317,7 +2327,6 @@ export function boot(): void {
 		// The agent starts on its own defaults; put back what was chosen last.
 		await applyRememberedSettings();
 		const info = await api.info();
-		app.canTranscribe = info.canTranscribe === true;
 		app.appInfo = {
 			cwd: info.cwd ?? "",
 			version: info.version ?? "",

@@ -18,7 +18,7 @@ import { transformersEntry } from "./embeddings-module.ts";
 import { refreshIconCacheAfterUpdate } from "./icon-cache.ts";
 import { fetchLinkPreview } from "./link-preview.ts";
 import { listSessions, searchSessions } from "./sessions.ts";
-import { ensureModel, speechStatus, stopSpeech, transcribeSamples } from "./speech.ts";
+import { ensureModel, isModelCached, speechStatus, stopSpeech, transcribeSamples } from "./speech.ts";
 import { collectStats } from "./stats.ts";
 import { checkNow, installUpdate, startUpdates, updateState } from "./updates.ts";
 import { createWorktree, listWorktrees, removeWorktree, repoRoot } from "./worktrees.ts";
@@ -628,6 +628,15 @@ function createWindow(): BrowserWindow {
 		// Looking for an update is background work; it must never delay the window.
 		// A hotfix applies itself, but never through a turn in progress.
 		void startUpdates(win, () => !slots.some((slot) => slot.busy));
+		// Warm the speech model while nobody is waiting on it. Loading takes
+		// well over a second, and it used to happen on the first clip of
+		// audio — so the first thing anyone said went unheard until it
+		// finished, every time the app was opened. Only warmed when the
+		// weights are already on disk, which means only for someone who has
+		// dictated before: it must never pull a download for someone who
+		// never will. Failure is silent, since nothing was asked for yet and
+		// the next real attempt will report it properly.
+		if (isModelCached()) setTimeout(() => void ensureModel().catch(() => {}), 2000);
 	});
 
 	// Links in a response belong in the user's browser. Without this a click

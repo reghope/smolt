@@ -46,11 +46,19 @@ interface VoiceSession {
 	 */
 	noiseFloor: number;
 	/**
-	 * The room's sustained level, learned the same way as `noiseFloor`.
+	 * The room's sustained level, or -1 until a chunk of room has been heard.
 	 *
-	 * Kept separately because it is measured on a different scale: that one
-	 * follows the peak of a chunk and answers "did something happen", this
-	 * one follows what the chunk holds and answers "was it speech".
+	 * Kept separately from `noiseFloor` because it is measured on a different
+	 * scale: that one follows the peak of a chunk and answers "did something
+	 * happen", this one follows what a chunk holds and answers "was it
+	 * speech".
+	 *
+	 * It starts unknown rather than at a level, because a guess here fails in
+	 * the worst direction. Seeded high, and with someone talking from the
+	 * first chunk, the estimate has no silence to learn from and settles on
+	 * the quietest part of their voice — and then asks speech to be several
+	 * times louder than itself, which nothing can be. That is silent
+	 * dictation with a full meter, and it is what this used to do.
 	 */
 	levelFloor: number;
 	/** Where in the buffer the last heard speech ended; 0 while the segment holds none. */
@@ -117,6 +125,10 @@ const CLIP_LEVEL_MINIMUM = 0.006;
 
 /** The bar a clip must clear to be worth handing to the model. */
 function clipThreshold(session: VoiceSession): number {
+	// Nothing heard of the room yet: take the lowest bar there is. Erring
+	// towards hearing costs a stray word; erring the other way is a
+	// microphone that does not work.
+	if (session.levelFloor < 0) return CLIP_LEVEL_MINIMUM;
 	return Math.max(CLIP_LEVEL_MINIMUM, session.levelFloor * CLIP_ABOVE_ROOM);
 }
 
@@ -503,7 +515,13 @@ export async function startVoice(): Promise<void> {
 	settled = [];
 	// Whatever is in the composer is the user's now, not a run to reclaim.
 	settleRun();
-	if (!status.ready) {
+	if (status.ready) {
+		// The weights are on disk, but that is not the same as loaded, and
+		// loading them is what the first clip used to wait on. Start it now
+		// and do not wait: capture begins immediately either way, so the load
+		// runs while the first words are still being spoken.
+		void api.speechPrepare();
+	} else {
 		// No message for this: the mic button spins until the model is here.
 		app.voicePreparing = true;
 		const prepared = await api.speechPrepare();
@@ -584,7 +602,7 @@ export async function startVoice(): Promise<void> {
 		watchdog: null,
 		peak: 0,
 		noiseFloor: 1,
-		levelFloor: 1,
+		levelFloor: -1,
 		speechEnd: 0,
 		passSpeechEnd: 0,
 		device: stream.getAudioTracks()[0]?.label ?? "",
@@ -607,7 +625,18 @@ export async function startVoice(): Promise<void> {
 		// moves the estimate only a hair, so a sentence cannot drag the bar up
 		// behind it and end up measuring the speech it was meant to detect.
 		session.noiseFloor = loudest < session.noiseFloor ? loudest : session.noiseFloor * 0.995 + loudest * 0.005;
-		session.levelFloor = level < session.levelFloor ? level : session.levelFloor * 0.995 + level * 0.005;
+		// Learn the room only from chunks the peak detector says are not
+		// speech. That detector runs off its own estimate, so there is no
+		// circle here — and while someone is talking this simply holds still,
+		// which is exactly right: a sentence is not evidence about the room.
+		if (loudest < speechThreshold(session)) {
+			session.levelFloor =
+				session.levelFloor < 0
+					? level
+					: level < session.levelFloor
+						? level
+						: session.levelFloor * 0.995 + level * 0.005;
+		}
 		// Where speech reaches is judged on the peak, and generously: a gap
 		// between two words is still the middle of a sentence, and a bar high
 		// enough to fall into those gaps stops passes running and puts the

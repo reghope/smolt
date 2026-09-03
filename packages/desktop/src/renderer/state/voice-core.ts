@@ -156,8 +156,25 @@ export function renderRun(
 	const reclaimed = rendered === "" || base.endsWith(rendered);
 	if (reclaimed && rendered !== "") base = base.slice(0, base.length - rendered.length);
 	base = base.replace(/\s+$/, "");
-	const next = text === "" ? base : base === "" ? text : `${base} ${text}`;
-	return { draft: next, rendered: text, reclaimed };
+	// Whisper hands back a lowercase first word when the clip it read began
+	// mid-thought, which it always does at the start of a sitting. A message
+	// starts with a capital, so one is given here — at the point the run is
+	// drawn, so it survives every redraw rather than being applied once to a
+	// word a later pass goes on to replace.
+	const shown = base === "" ? capitaliseFirst(text) : text;
+	const next = shown === "" ? base : base === "" ? shown : `${base} ${shown}`;
+	return { draft: next, rendered: shown, reclaimed };
+}
+
+/** Raise the first letter of a run, leaving the rest of it alone. */
+function capitaliseFirst(text: string): string {
+	// The first character is not always a letter — a run can open on a quote
+	// or a bracket — so the first one that can be raised is the one raised.
+	const characters = [...text];
+	const at = characters.findIndex((character) => character.toLowerCase() !== character.toUpperCase());
+	if (at === -1) return text;
+	characters[at] = characters[at].toUpperCase();
+	return characters.join("");
 }
 
 /**

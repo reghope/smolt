@@ -163,14 +163,39 @@ describe("planRun", () => {
 
 describe("renderRun", () => {
 	test("writes the run at the end of an empty draft", () => {
-		expect(renderRun("", "", "the quick")).toEqual({ draft: "the quick", rendered: "the quick", reclaimed: true });
+		expect(renderRun("", "", "The quick")).toEqual({ draft: "The quick", rendered: "The quick", reclaimed: true });
+	});
+
+	test("gives the opening word a capital, which the model does not", () => {
+		// Whisper reads the first clip of a sitting as mid-thought and answers
+		// in lowercase; a message starts with a capital.
+		expect(renderRun("", "", "refactor the middleware").draft).toBe("Refactor the middleware");
+	});
+
+	test("keeps the capital stable as the run is redrawn", () => {
+		const first = renderRun("", "", "refactor the");
+		const second = renderRun(first.draft, first.rendered, "refactor the middleware");
+		expect(second.draft).toBe("Refactor the middleware");
+		expect(second.reclaimed).toBe(true);
+	});
+
+	test("leaves the rest of the words as the model said them", () => {
+		expect(renderRun("", "", "refactor the JWT check").draft).toBe("Refactor the JWT check");
+	});
+
+	test("raises the first letter, not the first character", () => {
+		expect(renderRun("", "", '"refactor it"').draft).toBe('"Refactor it"');
+	});
+
+	test("never capitalises a run that continues what is already there", () => {
+		expect(renderRun("see also:", "", "the quick").draft).toBe("see also: the quick");
 	});
 
 	test("replaces the previous run rather than repeating it", () => {
 		const first = renderRun("", "", "hello ther");
 		expect(renderRun(first.draft, first.rendered, "hello there friend")).toEqual({
-			draft: "hello there friend",
-			rendered: "hello there friend",
+			draft: "Hello there friend",
+			rendered: "Hello there friend",
 			reclaimed: true,
 		});
 	});

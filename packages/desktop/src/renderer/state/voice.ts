@@ -45,6 +45,14 @@ interface VoiceSession {
 	 * against this room rather than loud in the abstract.
 	 */
 	noiseFloor: number;
+	/**
+	 * The room's sustained level, learned the same way as `noiseFloor`.
+	 *
+	 * Kept separately because it is measured on a different scale: that one
+	 * follows the peak of a chunk and answers "did something happen", this
+	 * one follows what the chunk holds and answers "was it speech".
+	 */
+	levelFloor: number;
 	/** Where in the buffer the last heard speech ended; 0 while the segment holds none. */
 	speechEnd: number;
 	/** How far the last completed pass had heard; a new pass needs speech beyond it. */
@@ -92,7 +100,25 @@ const SPEECH_PEAK_CAP = 0.25;
  * scale sits around 0.05 and up, so the bar sits between the two, low enough
  * that a quiet talker still clears it.
  */
-const CLIP_SPEECH_LEVEL = 0.042;
+/**
+ * How far a clip must rise above the room to count as speech.
+ *
+ * This was a fixed level once, picked off measurements of one synthesised
+ * voice — and a fixed level is only ever right for the microphone it was
+ * measured on. A quieter input sat under it and dictation heard nothing at
+ * all. A multiple of the room works on any microphone, at any gain: a tap
+ * barely doubles the level it interrupts, where speech is several times it.
+ *
+ * The absolute minimum below is a floor for a room so silent that a multiple
+ * of it would be a rounding error, not a bar.
+ */
+const CLIP_ABOVE_ROOM = 2.5;
+const CLIP_LEVEL_MINIMUM = 0.006;
+
+/** The bar a clip must clear to be worth handing to the model. */
+function clipThreshold(session: VoiceSession): number {
+	return Math.max(CLIP_LEVEL_MINIMUM, session.levelFloor * CLIP_ABOVE_ROOM);
+}
 
 /** Loud enough to be speech, in this room, on this microphone. */
 function speechThreshold(session: VoiceSession): number {
@@ -398,7 +424,12 @@ async function refreshTranscript(session: VoiceSession, final = false): Promise<
 		// handing it over is what made the model answer with a word nobody
 		// said. Note where it reached anyway, so the pass is not retried
 		// forever over the same quiet audio.
-		if (clipLevel(clip) < CLIP_SPEECH_LEVEL) {
+		const heardLevel = clipLevel(clip);
+		const bar = clipThreshold(session);
+		if (heardLevel < bar) {
+			// Worth being able to see: a microphone that hears nothing and a
+			// bar set too high look identical from the outside.
+			console.debug(`dictation: clip refused, level ${heardLevel.toFixed(4)} under bar ${bar.toFixed(4)}`);
 			session.passSpeechEnd = heard;
 			return true;
 		}
@@ -497,14 +528,19 @@ export async function startVoice(): Promise<void> {
 	try {
 		// The browser's own audio processing is the noise suppression here —
 		// the same WebRTC stack a voice chat runs, which is what strips a fan
-		// or a keyboard before the model ever hears it. Automatic gain is
-		// asked *off* on purpose: it is what winds a quiet room up until the
-		// hiss alone reads as talking, and it was making the room louder the
-		// longer nobody spoke.
+		// or a keyboard before the model ever hears it.
+		//
+		// Automatic gain stays *on*. Turning it off looked right — it is what
+		// winds a quiet room up until hiss alone reads as talking — but it is
+		// also the only thing bringing a quiet microphone up to a level worth
+		// transcribing, and without it a normal voice went unheard entirely.
+		// The gain it adds is handled where it belongs instead: every bar
+		// below is measured against the room rather than set as a number, so
+		// a loud room and a quiet one are judged the same way.
 		const processing = {
 			echoCancellation: true,
 			noiseSuppression: true,
-			autoGainControl: false,
+			autoGainControl: true,
 		};
 		stream = await navigator.mediaDevices.getUserMedia({
 			audio: app.micDeviceId ? { deviceId: { exact: app.micDeviceId }, ...processing } : processing,
@@ -548,6 +584,7 @@ export async function startVoice(): Promise<void> {
 		watchdog: null,
 		peak: 0,
 		noiseFloor: 1,
+		levelFloor: 1,
 		speechEnd: 0,
 		passSpeechEnd: 0,
 		device: stream.getAudioTracks()[0]?.label ?? "",
@@ -558,15 +595,19 @@ export async function startVoice(): Promise<void> {
 		session.samples.push(new Float32Array(input));
 		session.total += input.length;
 		let loudest = 0;
+		let energy = 0;
 		for (const sample of input) {
 			const size = sample < 0 ? -sample : sample;
 			if (size > loudest) loudest = size;
+			energy += sample * sample;
 		}
+		const level = Math.sqrt(energy / input.length);
 		if (loudest > session.peak) session.peak = loudest;
 		// Any quiet chunk is the room, and is believed at once; a loud one
 		// moves the estimate only a hair, so a sentence cannot drag the bar up
 		// behind it and end up measuring the speech it was meant to detect.
 		session.noiseFloor = loudest < session.noiseFloor ? loudest : session.noiseFloor * 0.995 + loudest * 0.005;
+		session.levelFloor = level < session.levelFloor ? level : session.levelFloor * 0.995 + level * 0.005;
 		// Where speech reaches is judged on the peak, and generously: a gap
 		// between two words is still the middle of a sentence, and a bar high
 		// enough to fall into those gaps stops passes running and puts the

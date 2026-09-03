@@ -9,7 +9,7 @@ import { isModelCached, modelCacheDir, speechStatus, transcribeSamples } from ".
  *
  * The weights are not shipped, so the first use downloads them. These cover
  * the cheap, deterministic half — the cache location and the status the
- * window reads to decide whether to say "fetching" — without pulling 40 MB
+ * window reads to decide whether to say "fetching" — without pulling the weights
  * over the network in a unit test.
  */
 
@@ -68,7 +68,7 @@ describe("speechStatus", () => {
 describe("transcribeSamples", () => {
 	test("returns nothing for silence of no length, without loading a model", async () => {
 		// Guards the common case of stopping before saying anything: it must
-		// not download 40 MB to tell you that you said nothing.
+		// not download the weights to tell you that you said nothing.
 		await expect(transcribeSamples(new Float32Array(0))).resolves.toBe("");
 	});
 });

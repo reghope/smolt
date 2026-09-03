@@ -26,10 +26,8 @@ export interface SmoltApi {
 		hasProject?: boolean;
 		folders?: string[];
 		continueLatest?: boolean;
-		canTranscribe?: boolean;
 		packaged?: boolean;
 	}>;
-	transcribe(audio: ArrayBuffer, mimeType: string): Promise<AgentCallResult>;
 	stats(): Promise<AgentCallResult>;
 	micAccess(): Promise<AgentCallResult>;
 	openMicSettings(): Promise<{ ok: boolean; error?: string }>;

@@ -789,6 +789,7 @@ export function Composer() {
 	// The composer alone follows the draft, so typing wakes nothing else.
 	useDraft();
 	const inputRef = useRef<HTMLTextAreaElement>(null);
+	const mirrorRef = useRef<HTMLDivElement>(null);
 	const [dropping, setDropping] = useState(false);
 	const [paletteIndex, setPaletteIndex] = useState(0);
 	/**
@@ -1002,6 +1003,17 @@ export function Composer() {
 	})());
 
 	const canSend = state.draft.trim() !== "" || state.attachments.length > 0;
+	/**
+	 * The run of the draft that dictation is still producing.
+	 *
+	 * Only ever the very end of the text, and only while the microphone is
+	 * open. If the user has typed since, the draft no longer ends with it and
+	 * the styling simply stops rather than colouring the wrong words.
+	 */
+	const spokenTail =
+		state.voiceActive && state.voiceSpoken !== "" && state.draft.endsWith(state.voiceSpoken)
+			? state.voiceSpoken
+			: "";
 
 	return (
 		<div className="relative mx-auto w-full max-w-[804px] px-8 pb-3.5 @container">
@@ -1061,12 +1073,41 @@ export function Composer() {
 					selected={Math.min(paletteIndex, Math.max(0, paletteItems.length - 1))}
 					hidden={paletteHidden}
 				>
+					{/* A textarea cannot colour part of its own text, so while words are
+					    being spoken the draft is drawn twice: a mirror underneath with
+					    the spoken run in grey italics — the voice the transcript gives a
+					    thought — and the real textarea on top with its own glyphs made
+					    transparent. Everything that decides where a line breaks is shared
+					    between the two, so they sit exactly on top of one another. When
+					    the microphone closes the mirror goes and the words become
+					    ordinary text, which is how they will be sent. */}
+					<div className="relative">
+						{spokenTail !== "" && (
+							<div
+								ref={mirrorRef}
+								aria-hidden="true"
+								className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words px-0.5 pb-1 text-sm leading-relaxed"
+							>
+								{state.draft.slice(0, state.draft.length - spokenTail.length)}
+								<span className="italic text-faint">{spokenTail}</span>
+							</div>
+						)}
 					<textarea
 						ref={inputRef}
 						rows={1}
 						value={state.draft}
 						placeholder={state.chat.streaming ? "Queue a message for when it finishes…" : "Type / for commands"}
-						className="max-h-60 min-h-[26px] w-full resize-none bg-transparent px-0.5 pb-1 text-sm leading-relaxed outline-none placeholder:text-faint"
+						className={cn(
+							"relative max-h-60 min-h-[26px] w-full resize-none bg-transparent px-0.5 pb-1 text-sm leading-relaxed outline-none placeholder:text-faint",
+							// The mirror is showing the text; this one only carries the
+							// caret and the selection, both of which must stay visible.
+							spokenTail !== "" && "text-transparent caret-foreground selection:text-foreground",
+						)}
+						// A long draft scrolls; the mirror has to follow it exactly or the
+						// grey words drift away from the ones they belong to.
+						onScroll={(event) => {
+							if (mirrorRef.current) mirrorRef.current.scrollTop = event.currentTarget.scrollTop;
+						}}
 						// Clicking back into the composer with the "/" still in it brings
 						// the palette back up after a dismissal. This listens for the click
 						// rather than for focus, because clicking empty space to dismiss the
@@ -1174,6 +1215,7 @@ export function Composer() {
 							}
 						}}
 					/>
+					</div>
 				</CommandPalette>
 				<div className="flex items-center justify-between gap-2">
 					<div className="flex min-w-0 items-center gap-1">

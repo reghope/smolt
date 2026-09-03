@@ -3,7 +3,11 @@ import {
 	dropSamples,
 	freshWords,
 	isEcho,
+	isStockAnswer,
+	planRun,
+	renderRun,
 	type SampleBuffer,
+	tailWords,
 	UNSETTLED_TAIL,
 } from "../src/renderer/state/voice-core.ts";
 
@@ -44,6 +48,36 @@ describe("freshWords", () => {
 	});
 });
 
+describe("tailWords", () => {
+	test("shows the words a pass has not settled, so text keeps up with the voice", () => {
+		expect(tailWords([], "the quick brown fox", false)).toEqual(["brown", "fox"]);
+	});
+
+	test("never repeats a word the caller has already settled", () => {
+		// freshWords contributes "brown"; the tail picks up strictly after it.
+		expect(tailWords(["the", "quick"], "the quick brown fox jumps", false)).toEqual(["fox", "jumps"]);
+	});
+
+	test("shows everything while the clip is still shorter than the tail", () => {
+		// freshWords settles nothing this early, so without a tail these two
+		// words would sit unseen until more audio arrived.
+		expect(freshWords([], "hello there", false)).toEqual([]);
+		expect(tailWords([], "hello there", false)).toEqual(["hello", "there"]);
+	});
+
+	test("a final pass has no tail, because every word settles", () => {
+		expect(tailWords(["the"], "the quick brown fox", true)).toEqual([]);
+	});
+
+	test("offers nothing back when a pass hears fewer words than are settled", () => {
+		expect(tailWords(["the", "quick", "brown"], "the quick", false)).toEqual([]);
+	});
+
+	test("ignores stray whitespace from the model", () => {
+		expect(tailWords([], "  one   two three  four ", false)).toEqual(["three", "four"]);
+	});
+});
+
 describe("isEcho", () => {
 	test("catches the model repeating the last word into trailing quiet", () => {
 		expect(isEcho(["one", "two", "three", "four"], ["four"])).toBe(true);
@@ -62,6 +96,107 @@ describe("isEcho", () => {
 	test("never fires with nothing settled or nothing fresh", () => {
 		expect(isEcho([], ["four"])).toBe(false);
 		expect(isEcho(["four"], [])).toBe(false);
+	});
+});
+
+describe("isStockAnswer", () => {
+	test("catches what the model says when handed a fan or a keyboard", () => {
+		// The exact output that filled a composer nobody was talking to.
+		expect(isStockAnswer("You", [])).toBe(true);
+		expect(isStockAnswer("Okay.", [])).toBe(true);
+		expect(isStockAnswer("Thank you.", [])).toBe(true);
+		expect(isStockAnswer("Thanks for watching!", [])).toBe(true);
+	});
+
+	test("treats an empty pass as one of them", () => {
+		expect(isStockAnswer("", [])).toBe(true);
+		expect(isStockAnswer("  ", [])).toBe(true);
+	});
+
+	test("lets anything with real content through", () => {
+		expect(isStockAnswer("okay so refactor the middleware", [])).toBe(false);
+		expect(isStockAnswer("you should check the token", [])).toBe(false);
+	});
+
+	test("never second-guesses a segment that is already under way", () => {
+		// Mid sentence these are ordinary words, and someone answering a
+		// question with "okay" has to be heard.
+		expect(isStockAnswer("okay", ["and", "then"])).toBe(false);
+		expect(isStockAnswer("you", ["thank"])).toBe(false);
+	});
+});
+
+describe("planRun", () => {
+	test("a pass that only carries the run further just adds to the queue", () => {
+		expect(planRun(["the", "quick"], ["brown"], ["the", "quick", "brown", "fox"])).toEqual({
+			kind: "append",
+			words: ["fox"],
+		});
+	});
+
+	test("revising a word still waiting costs nothing, because nobody saw it", () => {
+		// "ther" was queued but not shown; the pass corrects it to "there".
+		expect(planRun(["hello"], ["ther"], ["hello", "there", "friend"])).toEqual({
+			kind: "requeue",
+			words: ["there", "friend"],
+		});
+	});
+
+	test("contradicting a word already on screen forces a redraw", () => {
+		expect(planRun(["hello", "ther"], [], ["hello", "there"])).toEqual({
+			kind: "rewrite",
+			words: ["hello", "there"],
+		});
+	});
+
+	test("a pass that says nothing new queues nothing", () => {
+		expect(planRun(["the", "quick"], [], ["the", "quick"])).toEqual({ kind: "append", words: [] });
+	});
+
+	test("a pass that hears fewer words than are shown redraws rather than truncating silently", () => {
+		expect(planRun(["the", "quick", "brown"], [], ["the", "quick"])).toEqual({
+			kind: "rewrite",
+			words: ["the", "quick"],
+		});
+	});
+});
+
+describe("renderRun", () => {
+	test("writes the run at the end of an empty draft", () => {
+		expect(renderRun("", "", "the quick")).toEqual({ draft: "the quick", rendered: "the quick", reclaimed: true });
+	});
+
+	test("replaces the previous run rather than repeating it", () => {
+		const first = renderRun("", "", "hello ther");
+		expect(renderRun(first.draft, first.rendered, "hello there friend")).toEqual({
+			draft: "hello there friend",
+			rendered: "hello there friend",
+			reclaimed: true,
+		});
+	});
+
+	test("keeps what the user typed before dictation started", () => {
+		expect(renderRun("see also:", "", "the quick").draft).toBe("see also: the quick");
+	});
+
+	test("refuses to reclaim once the user has typed past the run", () => {
+		// The draft no longer ends with what was written, so those words are
+		// the user's; the caller starts a new run instead of eating them.
+		const out = renderRun("hello ther — never mind", "hello ther", "hello there");
+		expect(out.reclaimed).toBe(false);
+	});
+
+	test("survives the draft being sent mid-dictation", () => {
+		const out = renderRun("", "the quick", "the quick brown");
+		expect(out.reclaimed).toBe(false);
+	});
+
+	test("empties cleanly when the run is taken back", () => {
+		expect(renderRun("the quick brown", "brown", "")).toEqual({
+			draft: "the quick",
+			rendered: "",
+			reclaimed: true,
+		});
 	});
 });
 

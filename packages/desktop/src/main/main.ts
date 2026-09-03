@@ -18,9 +18,8 @@ import { transformersEntry } from "./embeddings-module.ts";
 import { refreshIconCacheAfterUpdate } from "./icon-cache.ts";
 import { fetchLinkPreview } from "./link-preview.ts";
 import { listSessions, searchSessions } from "./sessions.ts";
-import { ensureModel, speechStatus, transcribeSamples } from "./speech.ts";
+import { ensureModel, speechStatus, stopSpeech, transcribeSamples } from "./speech.ts";
 import { collectStats } from "./stats.ts";
-import { findTranscriptionProvider, transcribeAudio } from "./transcribe.ts";
 import { checkNow, installUpdate, startUpdates, updateState } from "./updates.ts";
 import { createWorktree, listWorktrees, removeWorktree, repoRoot } from "./worktrees.ts";
 
@@ -1040,7 +1039,6 @@ app.whenReady().then(async () => {
 		folders: projectFolders,
 		version: appVersion(),
 		continueLatest: process.env.SMOLT_DESKTOP_CONTINUE === "1",
-		canTranscribe: findTranscriptionProvider() !== undefined,
 		// Only an installed build has an installer the updater can replace.
 		packaged: app.isPackaged,
 	}));
@@ -1604,16 +1602,6 @@ app.whenReady().then(async () => {
 		}
 	});
 
-	ipcMain.handle("app:transcribe", async (_e, audio: ArrayBuffer, mimeType: string) => {
-		try {
-			const text = await transcribeAudio(new Uint8Array(audio), mimeType);
-			return { ok: true, value: text };
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			return { ok: false, error: message };
-		}
-	});
-
 	// Screenshot mode: capture the window to the given path once the
 	// renderer settles, then exit. Used to document the UI.
 	const shotPath = process.env.SMOLT_DESKTOP_SHOT;
@@ -1681,6 +1669,9 @@ app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", () => {
+	// The speech model runs in a process of its own; nothing will be asked
+	// of it again, and it must not outlive the windows.
+	stopSpeech();
 	void Promise.all([...slots.map((slot) => slot.bridge.stop()), sideBridge?.stop(), telegramBridge?.stop()]).finally(
 		() => app.quit(),
 	);

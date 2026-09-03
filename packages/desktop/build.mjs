@@ -23,6 +23,19 @@ await build({
 	sourcemap: true,
 });
 
+// The speech model runs in a utility process of its own, so its arithmetic
+// never blocks the main process. Same externals: it is the side that
+// actually loads the native ONNX binding.
+await build({
+	entryPoints: ["src/main/speech-worker.ts"],
+	bundle: true,
+	platform: "node",
+	format: "cjs",
+	outfile: "dist/speech-worker.cjs",
+	external: ["electron", ...speechExternals],
+	sourcemap: true,
+});
+
 await build({
 	entryPoints: ["src/preload.ts"],
 	bundle: true,

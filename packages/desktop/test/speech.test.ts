@@ -45,7 +45,7 @@ describe("isModelCached", () => {
 	});
 
 	test("is true once the model's folder exists", () => {
-		mkdirSync(join(modelCacheDir(), "onnx-community", "whisper-tiny.en"), { recursive: true });
+		mkdirSync(join(modelCacheDir(), "onnx-community", "moonshine-base-ONNX"), { recursive: true });
 		expect(isModelCached()).toBe(true);
 	});
 });
@@ -55,12 +55,12 @@ describe("speechStatus", () => {
 		const status = speechStatus();
 		expect(status.ready).toBe(false);
 		expect(status.downloading).toBe(false);
-		expect(status.modelId).toContain("whisper");
+		expect(status.modelId).toContain("moonshine");
 		expect(status.cacheDir).toBe(modelCacheDir());
 	});
 
 	test("reports ready once the weights are on disk", () => {
-		mkdirSync(join(modelCacheDir(), "onnx-community", "whisper-tiny.en"), { recursive: true });
+		mkdirSync(join(modelCacheDir(), "onnx-community", "moonshine-base-ONNX"), { recursive: true });
 		expect(speechStatus().ready).toBe(true);
 	});
 });

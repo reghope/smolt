@@ -13,8 +13,17 @@
  * download is a message in the window rather than a dead worker.
  */
 
-/** Big enough to be worth the wait: clearly better than tiny on a real microphone. */
-const MODEL_ID = "onnx-community/whisper-tiny.en";
+/**
+ * Moonshine rather than Whisper, and base rather than tiny.
+ *
+ * Whisper pads every clip to a thirty-second window, so re-reading two
+ * seconds of audio costs almost what re-reading thirty would — and this
+ * re-reads a growing clip about once a second. Moonshine's cost follows the
+ * audio instead, which on the short clips dictation actually sends is four
+ * to five times quicker, at a size that is a step up in accuracy rather
+ * than down.
+ */
+const MODEL_ID = "onnx-community/moonshine-base-ONNX";
 
 type Transcriber = (audio: Float32Array, options?: Record<string, unknown>) => Promise<{ text?: unknown }>;
 
@@ -30,7 +39,7 @@ type Reply =
 
 /** The sample rate the renderer captures at and Whisper expects. */
 const SPEECH_RATE = 16000;
-/** Whisper's native window: audio past this is dropped unless chunked. */
+/** The window past which a clip is read in overlapping pieces. */
 const WINDOW_SECONDS = 30;
 
 let transcriber: Transcriber | null = null;
@@ -82,10 +91,10 @@ async function ensure(cacheDir: string): Promise<Transcriber> {
 /**
  * Transcribe 16 kHz mono samples.
  *
- * A clip longer than Whisper's thirty-second window is decoded in
- * overlapping chunks — without that the model reads the first window and
- * silently discards the rest, which is how the end of a long dictation
- * used to vanish.
+ * A clip longer than the window is decoded in overlapping chunks — without
+ * that a model reads the first window and silently discards the rest, which
+ * is how the end of a long dictation used to vanish. Segments are cut well
+ * below this, so it is a backstop rather than the usual path.
  */
 async function transcribe(cacheDir: string, samples: Float32Array): Promise<string> {
 	if (samples.length === 0) return "";

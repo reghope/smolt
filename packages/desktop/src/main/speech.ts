@@ -6,8 +6,8 @@ import { join } from "node:path";
  * Speech to text, on this machine.
  *
  * The model is not shipped with the app: the first time dictation is used it
- * downloads a small quantised Whisper into the smolt directory and caches it
- * there for good. That keeps the installer light and means nothing is
+ * downloads a small quantised model (~64 MB) into the smolt directory and
+ * caches it there for good. That keeps the installer light and means nothing is
  * fetched for someone who never dictates.
  *
  * Everything runs locally, so audio never leaves the machine — which is the
@@ -19,7 +19,7 @@ import { join } from "node:path";
  */
 
 /** Kept in step with the worker, which is what actually loads it. */
-const MODEL_ID = "onnx-community/whisper-tiny.en";
+const MODEL_ID = "onnx-community/moonshine-base-ONNX";
 
 export interface DownloadProgress {
 	/** 0–100 across the whole download. */
@@ -178,9 +178,9 @@ export async function ensureModel(onProgress?: (progress: DownloadProgress) => v
 /**
  * Transcribe 16 kHz mono samples.
  *
- * Whisper is not a streaming model, so live text comes from re-reading the
- * clip so far rather than decoding a tail in isolation: at this size that
- * costs a few hundred milliseconds and keeps the text coherent instead of
+ * This is not a streaming model, so live text comes from re-reading the clip
+ * so far rather than decoding a tail in isolation: at this size that costs
+ * tens to hundreds of milliseconds and keeps the text coherent instead of
  * fragmenting at chunk boundaries.
  */
 export async function transcribeSamples(samples: Float32Array): Promise<string> {

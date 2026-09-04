@@ -15,8 +15,14 @@ export function ExtensionDialog() {
 	useApp();
 	const request = app.uiRequests[0];
 	const [value, setValue] = useState("");
+	const [copied, setCopied] = useState(false);
 	// biome-ignore lint/correctness/useExhaustiveDependencies: reset the draft per request, not per keystroke
-	useEffect(() => setValue(""), [request?.id]);
+	useEffect(() => {
+		setValue("");
+		setCopied(false);
+	}, [request?.id]);
+	// The device-login code an extension puts in the title, e.g. "GitHub code: A4B0-B874".
+	const deviceCode = /\bcode: ([A-Z0-9]{4,}-[A-Z0-9]{4,})$/.exec(request?.title ?? "")?.[1];
 	if (!request) return null;
 	const cancel = () => answerUiRequest({ id: request.id, cancelled: true });
 	return (
@@ -66,6 +72,24 @@ export function ExtensionDialog() {
 						/>
 						<Button type="submit">OK</Button>
 					</form>
+				)}
+				{/* A one-time login code is the whole point of the dialog it appears in:
+				    shown as prose it gets lost, and it has to be retyped into a browser.
+				    Give it its own line, in monospace, with a button to copy it. */}
+				{deviceCode !== undefined && (
+					<div className="flex items-center justify-between gap-3 rounded-md border bg-muted/40 px-4 py-3">
+						<span className="select-all font-mono text-2xl tracking-[0.2em]">{deviceCode}</span>
+						<Button
+							variant="outline"
+							size="sm"
+							onClick={() => {
+								void navigator.clipboard.writeText(deviceCode);
+								setCopied(true);
+							}}
+						>
+							{copied ? "Copied" : "Copy"}
+						</Button>
+					</div>
 				)}
 				{request.method === "confirm" && (
 					<div className="flex justify-end gap-2">

@@ -28,10 +28,13 @@ interface DeviceCodeResponse {
 	interval: number;
 }
 
-/** What the reader must do to finish logging in. */
+/** What the reader must do to finish logging in, and what polling needs to follow it. */
 export interface DeviceLoginPrompt {
 	userCode: string;
 	verificationUri: string;
+	deviceCode: string;
+	intervalSeconds: number;
+	expiresInSeconds: number;
 }
 
 function credentialFile(): string {
@@ -86,10 +89,14 @@ export async function connectedAccount(): Promise<string | undefined> {
 }
 
 /**
- * Start a device login: ask GitHub for a code, hand it to `show`, then poll
- * until the reader approves it in a browser. Resolves with their login name.
+ * Ask GitHub for a code to show the reader.
+ *
+ * Split from the polling deliberately: polling blocks for as long as it takes
+ * someone to finish in a browser, and a caller that awaits the whole login
+ * before drawing anything leaves them staring at a page asking for a code
+ * that was never displayed.
  */
-export async function logIn(show: (prompt: DeviceLoginPrompt) => void, signal: AbortSignal): Promise<string> {
+export async function requestDeviceCode(): Promise<DeviceLoginPrompt> {
 	const started = await fetch(DEVICE_CODE_URL, {
 		method: "POST",
 		headers: { accept: "application/json", "content-type": "application/json" },
@@ -100,12 +107,21 @@ export async function logIn(show: (prompt: DeviceLoginPrompt) => void, signal: A
 	if (typeof device.device_code !== "string" || typeof device.user_code !== "string") {
 		throw new Error(device.error_description ?? "GitHub did not return a device code.");
 	}
-	show({ userCode: device.user_code, verificationUri: device.verification_uri ?? "https://github.com/login/device" });
+	return {
+		userCode: device.user_code,
+		verificationUri: device.verification_uri ?? "https://github.com/login/device",
+		deviceCode: device.device_code,
+		intervalSeconds: device.interval ?? 5,
+		expiresInSeconds: device.expires_in ?? 900,
+	};
+}
 
+/** Poll until the reader approves the code, then store the token and say who they are. */
+export async function awaitApproval(prompt: DeviceLoginPrompt, signal: AbortSignal): Promise<string> {
 	// RFC 8628 polling, kept here rather than imported: the shared helper in
 	// packages/ai is not exported from the package, and this is the whole of it.
-	const deadline = Date.now() + (device.expires_in ?? 900) * 1000;
-	let intervalMs = Math.max(1000, (device.interval ?? 5) * 1000);
+	const deadline = Date.now() + prompt.expiresInSeconds * 1000;
+	let intervalMs = Math.max(1000, prompt.intervalSeconds * 1000);
 	let token: { token: string; scope: string } | undefined;
 	while (token === undefined) {
 		if (signal.aborted) throw new Error("Login cancelled");
@@ -117,7 +133,7 @@ export async function logIn(show: (prompt: DeviceLoginPrompt) => void, signal: A
 				headers: { accept: "application/json", "content-type": "application/json" },
 				body: JSON.stringify({
 					client_id: CLIENT_ID,
-					device_code: device.device_code,
+					device_code: prompt.deviceCode,
 					grant_type: "urn:ietf:params:oauth:grant-type:device_code",
 				}),
 			});

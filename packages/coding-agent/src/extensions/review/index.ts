@@ -6,7 +6,7 @@ import type { ExtensionAPI, ExtensionContext } from "../../core/extensions/types
 import { projectStore } from "../../core/project-store.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
 import { DEFAULT_MAX_FINDINGS, loadReviewSettings, type ReviewSettings, saveReviewSettings } from "./config.ts";
-import { clearToken, connectedAccount, logIn } from "./github-login.ts";
+import { awaitApproval, clearToken, connectedAccount, requestDeviceCode } from "./github-login.ts";
 import {
 	FINDING_CATEGORIES,
 	FINDING_CONFIDENCES,
@@ -355,18 +355,20 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 					);
 					if (connect) {
 						try {
-							const login = await logIn((prompt) => {
-								// GitHub has no way to prefill the code, so the reader has to
-								// type it: open the page for them and keep the code on screen
-								// in the status line, since a notification scrolls away while
-								// they are still looking at the browser.
-								openBrowser(prompt.verificationUri);
-								ctx.ui.setStatus("review-login", `GitHub code ${prompt.userCode}`);
-								ctx.ui.notify(
-									`Enter code ${prompt.userCode} at ${prompt.verificationUri} — the browser should have opened.`,
-									"info",
-								);
-							}, new AbortController().signal);
+							const prompt = await requestDeviceCode();
+							// GitHub cannot prefill the code, so open the page and put the
+							// code in a dialog. Polling runs alongside rather than before:
+							// awaiting it first would block the command for as long as the
+							// reader takes, leaving them at a page asking for a code that
+							// was never drawn.
+							openBrowser(prompt.verificationUri);
+							ctx.ui.setStatus("review-login", `GitHub code ${prompt.userCode}`);
+							const approval = awaitApproval(prompt, new AbortController().signal);
+							await ctx.ui.confirm(
+								`GitHub code: ${prompt.userCode}`,
+								`Enter ${prompt.userCode} at ${prompt.verificationUri} to connect GitHub. The browser should have opened there already. Press OK once you have approved it.`,
+							);
+							const login = await approval;
 							ctx.ui.setStatus("review-login", undefined);
 							ctx.ui.notify(`Connected to GitHub as ${login}.`, "info");
 						} catch (error) {

@@ -1,8 +1,10 @@
+import type { Api, Model } from "@smolt/ai";
 import { Type } from "typebox";
 // Type-only import: a standalone install of this module outside the smolt
 // tree switches this single line to `from "smolt"`.
 import type { ExtensionAPI } from "../../core/extensions/types.ts";
 import { projectStore } from "../../core/project-store.ts";
+import { DEFAULT_MAX_FINDINGS, loadReviewSettings, type ReviewSettings, saveReviewSettings } from "./config.ts";
 import {
 	FINDING_CATEGORIES,
 	FINDING_CONFIDENCES,
@@ -77,7 +79,7 @@ function pullRequestNumber(target: string): string | undefined {
  * already logged in: no CI runs it, so the comment is authored by them rather
  * than by a bot, and no credential is uploaded anywhere.
  */
-function postingInstructions(pr: string): string {
+function postingInstructions(pr: string, maxFindings: number): string {
 	return `
 
 Then POST the review to pull request #${pr} as ONE comment, using gh on this machine:
@@ -85,18 +87,19 @@ Then POST the review to pull request #${pr} as ONE comment, using gh on this mac
   ${COMMENT_HEADING}
   Then the findings grouped by severity as '- **file:line** claim — failure scenario', then one summary line. With zero findings the body says the diff was reviewed and nothing worth flagging was found. Put the commits and files reviewed in a collapsed '<details><summary>Review details</summary>' block at the end.
 - Look for an existing comment carrying '${COMMENT_MARKER}' via 'gh pr view ${pr} --json comments'. If one exists, update it in place with 'gh api -X PATCH repos/{owner}/{repo}/issues/comments/<id> -f body=@<file>'; otherwise create it with 'gh pr comment ${pr} --body-file <file>'. Never post a second comment carrying the marker.
-- At most 10 findings in the comment; if more survived verification, the worst 10 plus a count of the rest.
+- At most ${maxFindings} findings in the comment; if more survived verification, the worst ${maxFindings} plus a count of the rest.
 - Plain, specific, courteous wording. No praise padding, and no model or vendor attribution beyond the heading.`;
 }
 
-function reviewPrompt(target: string): string {
+function reviewPrompt(target: string, settings: ReviewSettings): string {
 	const named = target === "" ? "No target was given: review the pending work." : `The target, as given: ${target}`;
-	const pr = pullRequestNumber(target);
+	const pr = settings.post === false ? undefined : pullRequestNumber(target);
+	const max = settings.maxFindings ?? DEFAULT_MAX_FINDINGS;
 	return `Review code changes for real defects. ${named}
 
 ${doctrine()}
 
-Then show me the review here in chat: findings grouped by severity, each as file:line, the claim, and the failure scenario in a sentence — plus the standing findings you re-verified and anything you marked fixed. I must be able to act on your message without opening the record (it lives in this project's review store, outside the repo).${pr === undefined ? "" : postingInstructions(pr)}`;
+Then show me the review here in chat: findings grouped by severity, each as file:line, the claim, and the failure scenario in a sentence — plus the standing findings you re-verified and anything you marked fixed. I must be able to act on your message without opening the record (it lives in this project's review store, outside the repo).${pr === undefined ? "" : postingInstructions(pr, max)}`;
 }
 
 export default function reviewExtension(smolt: ExtensionAPI): void {
@@ -174,10 +177,82 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 		},
 	});
 
+	// A review that runs on a different model switches the session to it and
+	// hands it straight back when the turn settles, so choosing a cheap
+	// reviewer never leaves the reader's chat on the wrong model.
+	let restoreModel: Model<Api> | undefined;
+	smolt.on("turn_end", async () => {
+		const previous = restoreModel;
+		restoreModel = undefined;
+		if (previous) await smolt.setModel(previous);
+	});
+
 	smolt.registerCommand("review", {
-		description: "Review code changes: /review (pending work), /review <PR|branch|range|path>",
-		handler: async (args) => {
-			smolt.sendUserMessage(reviewPrompt(args.trim()));
+		description: "Review code changes: /review (pending work), /review <PR|branch|range|path>, /review setup",
+		getArgumentCompletions: (argumentPrefix) => {
+			const items = [
+				{ value: "setup", label: "setup", description: "Choose the review model and how reviews are posted" },
+			];
+			const prefix = argumentPrefix.trim().toLowerCase();
+			return items.filter((item) => item.value.startsWith(prefix));
+		},
+		handler: async (args, ctx) => {
+			const trimmed = args.trim();
+
+			if (trimmed.toLowerCase() === "setup") {
+				const settings = loadReviewSettings(process.cwd());
+				// Every model is on offer: the review runs here, on this machine,
+				// so a subscription login is as usable as an API key.
+				const providers = [...new Set(ctx.modelRegistry.getAll().map((model) => model.provider))].sort();
+				if (providers.length === 0) {
+					ctx.ui.notify("Smolt has no models available. Log in with /login first.", "error");
+					return;
+				}
+				const provider = await ctx.ui.select("Which provider should reviews run on?", providers);
+				if (provider === undefined) {
+					ctx.ui.notify("Setup cancelled — nothing changed.", "info");
+					return;
+				}
+				const models = ctx.modelRegistry
+					.getAll()
+					.filter((model) => model.provider === provider)
+					.map((model) => model.id)
+					.sort();
+				const model = await ctx.ui.select(`Which ${provider} model?`, models);
+				if (model === undefined) {
+					ctx.ui.notify("Setup cancelled — nothing changed.", "info");
+					return;
+				}
+				const post = await ctx.ui.confirm(
+					"Post reviews to pull requests?",
+					"When you run /review on a pull request, smolt writes the review to it as a comment, from this machine, authored by your GitHub account.",
+				);
+				saveReviewSettings({ model: `${provider}/${model}`, post });
+				ctx.ui.notify(
+					`Reviews will run on ${provider}/${model}, and ${post ? "post to" : "stay out of"} pull requests. ` +
+						`At most ${settings.maxFindings ?? DEFAULT_MAX_FINDINGS} findings per comment. Settings live in review.json.`,
+					"info",
+				);
+				return;
+			}
+
+			const settings = loadReviewSettings(process.cwd());
+			const selector = settings.model ?? "";
+			const slash = selector.indexOf("/");
+			if (slash > 0) {
+				const wanted = ctx.modelRegistry.find(selector.slice(0, slash), selector.slice(slash + 1));
+				if (wanted === undefined) {
+					ctx.ui.notify(
+						`The review model ${selector} is not available; reviewing with the session's model.`,
+						"warning",
+					);
+				} else if (ctx.model && wanted.id === ctx.model.id && wanted.provider === ctx.model.provider) {
+					// already on it
+				} else if (await smolt.setModel(wanted)) {
+					restoreModel = ctx.model;
+				}
+			}
+			smolt.sendUserMessage(reviewPrompt(trimmed, settings));
 		},
 	});
 }

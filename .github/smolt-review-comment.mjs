@@ -70,7 +70,7 @@ function runConfiguration() {
 	return `| Setting | Value |\n| --- | --- |\n${rows.map(([k, v]) => `| ${k} | ${v} |`).join("\n")}`;
 }
 
-// The check row on the pull request: 'smolt — Review completed'.
+// The check row on the pull request: 'Smolt review — Review completed'.
 function status(state, description, commentId) {
 	if (!headSha) return;
 	const args = [
@@ -81,7 +81,7 @@ function status(state, description, commentId) {
 		"-f",
 		`state=${state}`,
 		"-f",
-		"context=smolt",
+		"context=Smolt review",
 		"-f",
 		`description=${description}`,
 		"--jq",

@@ -5,6 +5,7 @@ import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "../../core/extensions/types.ts";
 import { projectStore } from "../../core/project-store.ts";
 import { DEFAULT_MAX_FINDINGS, loadReviewSettings, type ReviewSettings, saveReviewSettings } from "./config.ts";
+import { clearToken, connectedAccount, logIn } from "./github-login.ts";
 import {
 	FINDING_CATEGORIES,
 	FINDING_CONFIDENCES,
@@ -229,6 +230,7 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 				const settings = loadReviewSettings(process.cwd());
 				const watching = sessionCtx ? beginWatching(sessionCtx) : "no session yet";
 				return reply({
+					githubAccount: (await connectedAccount()) ?? "not connected — tell the user to run /review setup",
 					model: settings.model ?? "the session's own model",
 					postsToPullRequests: settings.post !== false,
 					watch: settings.watch === true,
@@ -328,7 +330,12 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 		description: "Review code changes: /review (pending work), /review <PR|branch|range|path>, /review setup",
 		getArgumentCompletions: (argumentPrefix) => {
 			const items = [
-				{ value: "setup", label: "setup", description: "Choose the review model and how reviews are posted" },
+				{
+					value: "setup",
+					label: "setup",
+					description: "Connect GitHub, choose the review model and how reviews are posted",
+				},
+				{ value: "logout", label: "logout", description: "Disconnect the GitHub account reviews are posted from" },
 			];
 			const prefix = argumentPrefix.trim().toLowerCase();
 			return items.filter((item) => item.value.startsWith(prefix));
@@ -336,8 +343,38 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 		handler: async (args, ctx) => {
 			const trimmed = args.trim();
 
+			if (trimmed.toLowerCase() === "logout") {
+				clearToken();
+				ctx.ui.notify("Disconnected the GitHub account smolt was using for reviews.", "info");
+				return;
+			}
+
 			if (trimmed.toLowerCase() === "setup") {
 				const settings = loadReviewSettings(process.cwd());
+				// Connecting an account is the first thing setup does, because every
+				// answer after it is about a repo smolt may not be able to see yet.
+				const already = await connectedAccount();
+				if (already === undefined) {
+					const connect = await ctx.ui.confirm(
+						"Connect a GitHub account?",
+						"Smolt needs GitHub access to read pull request diffs and post reviews as you. It opens a browser and shows you a short code to approve.",
+					);
+					if (connect) {
+						try {
+							const login = await logIn(
+								(prompt) =>
+									ctx.ui.notify(
+										`Enter code ${prompt.userCode} at ${prompt.verificationUri} to connect GitHub.`,
+										"info",
+									),
+								new AbortController().signal,
+							);
+							ctx.ui.notify(`Connected to GitHub as ${login}.`, "info");
+						} catch (error) {
+							ctx.ui.notify(`GitHub login failed: ${error instanceof Error ? error.message : error}`, "error");
+						}
+					}
+				}
 				// Every model is on offer: the review runs here, on this machine,
 				// so a subscription login is as usable as an API key.
 				const providers = [...new Set(ctx.modelRegistry.getAll().map((model) => model.provider))].sort();

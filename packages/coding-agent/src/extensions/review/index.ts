@@ -1,10 +1,8 @@
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { Type } from "typebox";
 // Type-only import: a standalone install of this module outside the smolt
 // tree switches this single line to `from "smolt"`.
 import type { ExtensionAPI } from "../../core/extensions/types.ts";
+import { projectStore } from "../../core/project-store.ts";
 import {
 	FINDING_CATEGORIES,
 	FINDING_CONFIDENCES,
@@ -28,21 +26,22 @@ import {
  * earlier review of the same target already holds open bounces instead of
  * being re-reported — a re-review speaks only about what is new.
  *
- * `/review setup` wires the current GitHub repo so every PR gets the same
- * review automatically: it writes a GitHub Actions workflow that runs smolt
- * headless (`smolt -p`) on pull_request events and posts one consolidated,
- * self-updating review comment. One manual step remains for the user —
- * adding the model credential as a repo secret — and the command says so.
+ * When the target is a pull request the review is also posted to it, as one
+ * self-updating comment sent by smolt from this machine through `gh`. The
+ * comment is authored by whoever is logged in rather than by a bot, and no
+ * CI, workflow file or uploaded credential is involved anywhere.
  */
 
 function reviewRoot(): string {
-	return join(process.cwd(), ".smolt", "review");
+	return projectStore(process.cwd(), "review");
 }
 
-const WORKFLOW_PATH = join(".github", "workflows", "smolt-review.yml");
-
-/** The marker the CI comment carries so re-runs update it instead of stacking. */
+/** The marker the posted comment carries so a re-review updates it instead of stacking. */
 const COMMENT_MARKER = "<!-- smolt-review -->";
+
+/** The comment's masthead: the pixelfish beside the name, so a review is recognisable at a glance. */
+const COMMENT_HEADING =
+	'<img src="https://raw.githubusercontent.com/reghope/smolt/main/packages/desktop/build/icon.png" width="22" align="top" alt=""> **Smolt review**';
 
 /**
  * The review doctrine: how a session turns "review X" into verified
@@ -68,91 +67,36 @@ function doctrine(): string {
 QUALITY BAR: fewer, harder findings beat many soft ones. No praise padding, no restating the diff, no nitpicks the codebase's own style contradicts. If the change is good, a clean review with zero findings is the correct and complete result.`;
 }
 
+/** A target naming a pull request: 5, #5, or any .../pull/5 URL. */
+function pullRequestNumber(target: string): string | undefined {
+	return /^#?(\d+)$/.exec(target)?.[1] ?? /\/pull\/(\d+)\b/.exec(target)?.[1];
+}
+
+/**
+ * Posting is smolt's own job, done from this machine with the `gh` the reader
+ * already logged in: no CI runs it, so the comment is authored by them rather
+ * than by a bot, and no credential is uploaded anywhere.
+ */
+function postingInstructions(pr: string): string {
+	return `
+
+Then POST the review to pull request #${pr} as ONE comment, using gh on this machine:
+- Write the body to a file. It opens with the exact marker line '${COMMENT_MARKER}', a blank line, then the branded heading:
+  ${COMMENT_HEADING}
+  Then the findings grouped by severity as '- **file:line** claim — failure scenario', then one summary line. With zero findings the body says the diff was reviewed and nothing worth flagging was found. Put the commits and files reviewed in a collapsed '<details><summary>Review details</summary>' block at the end.
+- Look for an existing comment carrying '${COMMENT_MARKER}' via 'gh pr view ${pr} --json comments'. If one exists, update it in place with 'gh api -X PATCH repos/{owner}/{repo}/issues/comments/<id> -f body=@<file>'; otherwise create it with 'gh pr comment ${pr} --body-file <file>'. Never post a second comment carrying the marker.
+- At most 10 findings in the comment; if more survived verification, the worst 10 plus a count of the rest.
+- Plain, specific, courteous wording. No praise padding, and no model or vendor attribution beyond the heading.`;
+}
+
 function reviewPrompt(target: string): string {
 	const named = target === "" ? "No target was given: review the pending work." : `The target, as given: ${target}`;
+	const pr = pullRequestNumber(target);
 	return `Review code changes for real defects. ${named}
 
 ${doctrine()}
 
-Then show me the review here in chat: findings grouped by severity, each as file:line, the claim, and the failure scenario in a sentence — plus the standing findings you re-verified and anything you marked fixed. I must be able to act on your message without opening the record (it lives under .smolt/review/).`;
-}
-
-/** The prompt the CI workflow feeds to headless smolt. Kept as one line per gh constraint-free quoting. */
-function ciPrompt(): string {
-	return `You are reviewing pull request #\${PR_NUMBER} in CI. ${doctrine()}
-
-Then POST the review to the pull request as ONE comment:
-- Build the comment body: start it with the exact marker line '${COMMENT_MARKER}', then '## Smolt review', then findings grouped by severity as '- **file:line** claim — failure scenario', then one summary line. If there are zero findings, the body says the diff was reviewed and nothing worth flagging was found.
-- Look for an existing comment containing '${COMMENT_MARKER}' via 'gh api repos/\${GITHUB_REPOSITORY}/issues/\${PR_NUMBER}/comments'. If one exists, update it with 'gh api -X PATCH repos/\${GITHUB_REPOSITORY}/issues/comments/<id> -f body=@<file>'; otherwise create it with 'gh pr comment \${PR_NUMBER} --body-file <file>'. Never post a second marker comment.
-- At most 10 findings in the comment; if more survived verification, the worst 10 plus a count of the rest.
-- Plain, specific, courteous wording. No praise padding, no tool or model attribution beyond the heading.`;
-}
-
-/** The env-var name a provider's API key is conventionally read from. */
-function providerSecretName(provider: string): string {
-	const known: Record<string, string> = {
-		anthropic: "ANTHROPIC_API_KEY",
-		openai: "OPENAI_API_KEY",
-		google: "GEMINI_API_KEY",
-		groq: "GROQ_API_KEY",
-		openrouter: "OPENROUTER_API_KEY",
-		xai: "XAI_API_KEY",
-		mistral: "MISTRAL_API_KEY",
-	};
-	return known[provider] ?? `${provider.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_API_KEY`;
-}
-
-/** The GitHub Actions workflow `/review setup` writes, pinned to the chosen model. */
-function workflowYaml(choice: { provider: string; model: string; secret: string }): string {
-	return `# Written by smolt's /review setup. Re-running the command updates it;
-# /review setup --remove deletes it.
-name: Smolt review
-
-on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-
-concurrency:
-  group: smolt-review-\${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
-jobs:
-  review:
-    if: \${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Install smolt
-        run: npm install -g smolt
-      - name: Review the pull request
-        env:
-          GH_TOKEN: \${{ github.token }}
-          PR_NUMBER: \${{ github.event.pull_request.number }}
-          # The credential for the chosen provider, from a repository secret.
-          ${choice.secret}: \${{ secrets.${choice.secret} }}
-          # The model /review setup was told to use; repo variables override.
-          SMOLT_PROVIDER: \${{ vars.SMOLT_PROVIDER || '${choice.provider}' }}
-          SMOLT_MODEL: \${{ vars.SMOLT_MODEL || '${choice.model}' }}
-        run: smolt -p "$(node -e "process.stdout.write(require('fs').readFileSync('.github/smolt-review-prompt.md','utf8'))")"
-`;
-}
-
-const PROMPT_PATH = join(".github", "smolt-review-prompt.md");
-
-function git(args: string[]): string | undefined {
-	try {
-		return execFileSync("git", args, { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-	} catch {
-		return undefined;
-	}
+Then show me the review here in chat: findings grouped by severity, each as file:line, the claim, and the failure scenario in a sentence — plus the standing findings you re-verified and anything you marked fixed. I must be able to act on your message without opening the record (it lives in this project's review store, outside the repo).${pr === undefined ? "" : postingInstructions(pr)}`;
 }
 
 export default function reviewExtension(smolt: ExtensionAPI): void {
@@ -162,8 +106,8 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 		name: "review",
 		label: "Review",
 		description:
-			"Record and consult code reviews: verified findings stored under the project's .smolt/review/ " +
-			"directory, one review per resolved target.\n\n" +
+			"Record and consult code reviews: verified findings stored in this project's review store, outside " +
+			"the repo, one review per resolved target.\n\n" +
 			"ACTIONS: 'list' all reviews; 'start' (target, target_key, title?) opens a review record and " +
 			"returns the standing findings from earlier reviews of the same target — the ratchet; 'view' " +
 			"one review (omit 'review' for the latest); 'view_finding' (finding, review?) for a finding's " +
@@ -231,124 +175,9 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 	});
 
 	smolt.registerCommand("review", {
-		description: "Review code changes: /review (pending work), /review <PR|branch|range|path>, /review setup",
-		getArgumentCompletions: (argumentPrefix) => {
-			const items = [
-				{
-					value: "setup",
-					label: "setup",
-					description: "Wire this GitHub repo: every PR gets reviewed automatically",
-				},
-				{ value: "setup --remove", label: "setup --remove", description: "Remove the automatic PR review" },
-			];
-			const prefix = argumentPrefix.trim().toLowerCase();
-			return items.filter((item) => item.value.startsWith(prefix));
-		},
-		handler: async (args, ctx) => {
-			const trimmed = args.trim();
-			const [first = ""] = trimmed.split(/\s+/);
-
-			if (first.toLowerCase() === "setup") {
-				const remove = /\s--remove\b/.test(trimmed);
-				if (git(["rev-parse", "--is-inside-work-tree"]) !== "true") {
-					ctx.ui.notify("This folder is not a git repository, so there is nothing to wire up.", "error");
-					return;
-				}
-				const workflowFile = join(process.cwd(), WORKFLOW_PATH);
-				const promptFile = join(process.cwd(), PROMPT_PATH);
-				if (remove) {
-					if (!existsSync(workflowFile)) {
-						ctx.ui.notify("Automatic PR review is not set up here — nothing to remove.", "info");
-						return;
-					}
-					rmSync(workflowFile);
-					rmSync(promptFile, { force: true });
-					ctx.ui.notify(
-						"Automatic PR review removed. Commit the deletion and PRs will stop being reviewed.",
-						"info",
-					);
-					return;
-				}
-				const remote = git(["remote", "get-url", "origin"]) ?? "";
-				if (!remote.includes("github.com")) {
-					ctx.ui.notify(
-						remote === ""
-							? "No 'origin' remote found. Add a GitHub remote first, then run /review setup again."
-							: `The 'origin' remote (${remote}) is not on github.com — automatic PR review currently supports GitHub only.`,
-						"error",
-					);
-					return;
-				}
-				// The CI reviewer runs on whatever the user picks here — never a
-				// silent default. The session's own provider leads the list.
-				const current = ctx.model;
-				const providers = [...new Set(ctx.modelRegistry.getAll().map((model) => model.provider))].sort((a, b) =>
-					a === current?.provider ? -1 : b === current?.provider ? 1 : a.localeCompare(b),
-				);
-				if (providers.length === 0) {
-					ctx.ui.notify(
-						"No providers are configured, so there is no model the PR reviewer could run on.",
-						"error",
-					);
-					return;
-				}
-				const provider = await ctx.ui.select(
-					"Which provider should review PRs?",
-					providers.map((name) => (name === current?.provider ? `${name} (current)` : name)),
-				);
-				if (provider === undefined) {
-					ctx.ui.notify("Setup cancelled — nothing was written.", "info");
-					return;
-				}
-				const chosenProvider = provider.replace(/ \(current\)$/, "");
-				const models = ctx.modelRegistry
-					.getAll()
-					.filter((model) => model.provider === chosenProvider)
-					.map((model) => model.id)
-					.sort((a, b) => (a === current?.id ? -1 : b === current?.id ? 1 : a.localeCompare(b)));
-				const model = await ctx.ui.select(
-					`Which ${chosenProvider} model?`,
-					models.map((id) =>
-						id === current?.id && chosenProvider === current?.provider ? `${id} (current)` : id,
-					),
-				);
-				if (model === undefined) {
-					ctx.ui.notify("Setup cancelled — nothing was written.", "info");
-					return;
-				}
-				const choice = {
-					provider: chosenProvider,
-					model: model.replace(/ \(current\)$/, ""),
-					secret: providerSecretName(chosenProvider),
-				};
-				const existed = existsSync(workflowFile);
-				const upToDate =
-					existed &&
-					readFileSync(workflowFile, "utf-8") === workflowYaml(choice) &&
-					existsSync(promptFile) &&
-					readFileSync(promptFile, "utf-8") === ciPrompt();
-				if (upToDate) {
-					ctx.ui.notify(
-						`Automatic PR review is already set up for ${choice.provider}/${choice.model}. If PRs are ` +
-							`not being reviewed, check that the ${choice.secret} secret is set on the repo.`,
-						"info",
-					);
-					return;
-				}
-				mkdirSync(join(process.cwd(), ".github", "workflows"), { recursive: true });
-				writeFileSync(workflowFile, workflowYaml(choice), "utf-8");
-				writeFileSync(promptFile, ciPrompt(), "utf-8");
-				ctx.ui.notify(
-					`${existed ? "Updated" : "Wrote"} ${WORKFLOW_PATH}: PRs will be reviewed by ${choice.provider}/${choice.model}. Two steps left:\n` +
-						`1. Give the workflow its credential: gh secret set ${choice.secret}\n` +
-						"2. Commit and push both files.\n" +
-						"After that, every opened or updated PR gets one self-updating review comment.",
-					"info",
-				);
-				return;
-			}
-
-			smolt.sendUserMessage(reviewPrompt(trimmed));
+		description: "Review code changes: /review (pending work), /review <PR|branch|range|path>",
+		handler: async (args) => {
+			smolt.sendUserMessage(reviewPrompt(args.trim()));
 		},
 	});
 }

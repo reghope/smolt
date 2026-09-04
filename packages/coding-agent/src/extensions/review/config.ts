@@ -45,6 +45,17 @@ export function reviewSettingsFile(): string {
 	return path.join(getAgentDir(), "review.json");
 }
 
+/**
+ * The file that says which process is watching a repo.
+ *
+ * GitHub allows one forwarder webhook per repository, so two sessions watching
+ * the same repo would take turns deleting each other's hook. The claim makes
+ * one of them the owner and the other wait for it.
+ */
+export function watchClaimFile(repo: string): string {
+	return path.join(getAgentDir(), "review-watch", `${repo.replace(/[^a-zA-Z0-9._-]+/g, "-")}.json`);
+}
+
 function readIfExists(file: string): string | undefined {
 	try {
 		return fs.readFileSync(file, "utf-8");

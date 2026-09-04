@@ -1,9 +1,10 @@
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import type { Api, Model } from "@smolt/ai";
 import { Type } from "typebox";
 // Type-only import: a standalone install of this module outside the smolt
 // tree switches this single line to `from "smolt"`.
-import type { ExtensionAPI, ExtensionContext } from "../../core/extensions/types.ts";
+import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "../../core/extensions/types.ts";
 import { projectStore } from "../../core/project-store.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
 import { spawnChildSession } from "../battletest/spawn.ts";
@@ -56,6 +57,44 @@ const COMMENT_MARKER = "<!-- smolt-review -->";
 /** The comment's masthead: the pixelfish beside the name, so a review is recognisable at a glance. */
 const COMMENT_HEADING =
 	'<img src="https://raw.githubusercontent.com/reghope/smolt/main/packages/desktop/build/icon.png" width="22" align="top" alt=""> **Smolt review**';
+
+/**
+ * Say on the pull request that a review has started, before it starts.
+ *
+ * A review takes minutes, and until now the pull request said nothing at all
+ * in the meantime: whoever asked for it, by opening the pull request or by
+ * commenting, had no way to tell it had been heard. This is the same marker
+ * comment the finished review updates in place, so the acknowledgement becomes
+ * the review rather than standing beside it.
+ */
+function acknowledge(repo: string, pr: string): void {
+	const body = `${COMMENT_MARKER}\n\n${COMMENT_HEADING}\n\nReviewing this pull request now. This comment will be updated with the findings.`;
+	const gh = (args: string[]): string =>
+		execFileSync("gh", args, { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+	try {
+		const existing = gh([
+			"pr",
+			"view",
+			pr,
+			"--repo",
+			repo,
+			"--json",
+			"comments",
+			"--jq",
+			`[.comments[] | select(.body | contains("${COMMENT_MARKER}")) | .url] | last // ""`,
+		]);
+		// The comments API needs the numeric id, which the URL ends with.
+		const id = /#issuecomment-(\d+)$/.exec(existing)?.[1];
+		if (id === undefined) {
+			gh(["pr", "comment", pr, "--repo", repo, "--body", body]);
+			return;
+		}
+		gh(["api", "--method", "PATCH", `repos/${repo}/issues/comments/${id}`, "-f", `body=${body}`]);
+	} catch {
+		// A pull request we cannot comment on is still worth reviewing; the review
+		// itself will report what it could not post.
+	}
+}
 
 /**
  * The review doctrine: how a session turns "review X" into verified
@@ -141,7 +180,7 @@ Then POST the review to pull request #${pr} as ONE comment, using gh on this mac
 - Write the body to a file. It opens with the exact marker line '${COMMENT_MARKER}', a blank line, then the branded heading:
   ${COMMENT_HEADING}
   Then the findings grouped by severity as '- **file:line** claim — failure scenario', then one summary line. With zero findings the body says the diff was reviewed and nothing worth flagging was found. Put the commits and files reviewed in a collapsed '<details><summary>Review details</summary>' block at the end.
-- Look for an existing comment carrying '${COMMENT_MARKER}' via 'gh pr view ${pr} --json comments'. If one exists, update it in place with 'gh api -X PATCH repos/{owner}/{repo}/issues/comments/<id> -f body=@<file>'; otherwise create it with 'gh pr comment ${pr} --body-file <file>'. Never post a second comment carrying the marker.
+- Look for an existing comment carrying '${COMMENT_MARKER}' via 'gh pr view ${pr} --json comments'. If one exists, update it in place with 'gh api -X PATCH repos/{owner}/{repo}/issues/comments/<id> -F body=@<file>'; otherwise create it with 'gh pr comment ${pr} --body-file <file>'. Never post a second comment carrying the marker.
 - At most ${maxFindings} findings in the comment; if more survived verification, the worst ${maxFindings} plus a count of the rest.
 - Plain, specific, courteous wording. No praise padding, and no model or vendor attribution beyond the heading.`;
 }
@@ -170,12 +209,96 @@ ${doctrine()}
 Then show me the review here in chat: findings grouped by severity, each as file:line, the claim, and the failure scenario in a sentence — plus the standing findings you re-verified and anything you marked fixed. I must be able to act on your message without opening the record (it lives in this project's review store, outside the repo).${elsewhere !== undefined && pr !== undefined ? elsewhereInstructions(elsewhere, pr) : ""}${pr === undefined ? "" : postingInstructions(pr, max)}`;
 }
 
+/** The review tool's arguments, extracted so the definition can be typed and reused. */
+const reviewParameters = Type.Object({
+	action: Type.Union(
+		[
+			Type.Literal("list"),
+			Type.Literal("start"),
+			Type.Literal("view"),
+			Type.Literal("view_finding"),
+			Type.Literal("add_finding"),
+			Type.Literal("update_finding"),
+			Type.Literal("complete"),
+			Type.Literal("settings"),
+			Type.Literal("configure"),
+		],
+		{ description: "Operation to perform" },
+	),
+	model: Type.Optional(
+		Type.String({
+			description:
+				"For 'configure': 'provider/id' of the model reviews run on, e.g. 'anthropic/claude-sonnet-4'. " +
+				"Omit to leave it as it is.",
+		}),
+	),
+	watchRepos: Type.Optional(
+		Type.Array(Type.String(), {
+			description:
+				"For 'configure': repos as 'owner/name' that may be watched. Watching also needs 'watch' on. " +
+				"smolt runs. Needs admin on each. Pass [] to stop watching.",
+		}),
+	),
+	watch: Type.Optional(
+		Type.Boolean({
+			description:
+				"For 'configure': whether pull requests on the watched repos are reviewed as they arrive " +
+				"while smolt runs. Off by default.",
+		}),
+	),
+	autoFix: Type.Optional(
+		Type.Boolean({
+			description:
+				"For 'configure': whether a finished review hands its findings to a hidden session that fixes " +
+				"them in the working tree. Off by default; turn it on only when the user asks.",
+		}),
+	),
+	review: Type.Optional(Type.String({ description: "Review slug. Omit to mean the latest review." })),
+	finding: Type.Optional(Type.String({ description: "Finding slug (view_finding, update_finding)" })),
+	target: Type.Optional(Type.String({ description: "For 'start': the target as the user named it" })),
+	target_key: Type.Optional(
+		Type.String({
+			description:
+				"For 'start': normalized identity of what is reviewed — a branch name, 'pr-123', " +
+				"'worktree', a range. Reviews sharing a key ratchet against each other.",
+		}),
+	),
+	title: Type.Optional(Type.String({ description: "For 'start': a human-readable review title" })),
+	file: Type.Optional(Type.String({ description: "Repo-relative path the finding anchors to" })),
+	line: Type.Optional(Type.Number({ description: "1-indexed line, when one line pins the finding down" })),
+	severity: Type.Optional(Type.String({ description: `One of: ${FINDING_SEVERITIES.join(", ")}` })),
+	category: Type.Optional(Type.String({ description: `One of: ${FINDING_CATEGORIES.join(", ")}` })),
+	confidence: Type.Optional(Type.String({ description: `One of: ${FINDING_CONFIDENCES.join(", ")}` })),
+	claim: Type.Optional(Type.String({ description: "The defect, stated as a claim about behavior" })),
+	failure_scenario: Type.Optional(
+		Type.String({
+			description: "Concrete inputs or state that produce the wrong outcome. Required for add_finding.",
+		}),
+	),
+	evidence: Type.Optional(
+		Type.String({ description: "What in the code supports the claim. Required for add_finding." }),
+	),
+	suggested_fix: Type.Optional(Type.String({ description: "How to fix it, when the fix is clear" })),
+	status: Type.Optional(Type.String({ description: `New finding status: ${FINDING_STATUSES.join(", ")}` })),
+	summary: Type.Optional(Type.String({ description: "For 'complete': what was reviewed and found" })),
+	force: Type.Optional(
+		Type.Boolean({
+			description:
+				"For 'add_finding': record even though a standing finding matches — only when this is " +
+				"genuinely a different problem",
+		}),
+	),
+});
+
 export default function reviewExtension(smolt: ExtensionAPI): void {
 	const store = new ReviewStore(reviewRoot());
 	let stopWatching: (() => void) | undefined;
 	let sessionCtx: ExtensionContext | undefined;
 
-	smolt.registerTool({
+	// Kept as a value, not just registered: a watched pull request is reviewed in
+	// a hidden chat, and that chat runs without extensions, so it is handed this
+	// same tool directly. One definition, so the two paths cannot drift.
+	const reviewToolDefinition: ToolDefinition<typeof reviewParameters> = {
 		name: "review",
 		label: "Review",
 		description:
@@ -198,85 +321,7 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 			"findings — mark them 'fixed' as they are dealt with. Also when the user asks in plain words " +
 			"for automatic or CodeRabbit-style reviews on their pull requests: call 'settings' to see " +
 			"where things stand, then 'configure' to turn it on, rather than telling them to run a command.",
-		parameters: Type.Object({
-			action: Type.Union(
-				[
-					Type.Literal("list"),
-					Type.Literal("start"),
-					Type.Literal("view"),
-					Type.Literal("view_finding"),
-					Type.Literal("add_finding"),
-					Type.Literal("update_finding"),
-					Type.Literal("complete"),
-					Type.Literal("settings"),
-					Type.Literal("configure"),
-				],
-				{ description: "Operation to perform" },
-			),
-			model: Type.Optional(
-				Type.String({
-					description:
-						"For 'configure': 'provider/id' of the model reviews run on, e.g. 'anthropic/claude-sonnet-4'. " +
-						"Omit to leave it as it is.",
-				}),
-			),
-			watchRepos: Type.Optional(
-				Type.Array(Type.String(), {
-					description:
-						"For 'configure': repos as 'owner/name' that may be watched. Watching also needs 'watch' on. " +
-						"smolt runs. Needs admin on each. Pass [] to stop watching.",
-				}),
-			),
-			watch: Type.Optional(
-				Type.Boolean({
-					description:
-						"For 'configure': whether pull requests on the watched repos are reviewed as they arrive " +
-						"while smolt runs. Off by default.",
-				}),
-			),
-			autoFix: Type.Optional(
-				Type.Boolean({
-					description:
-						"For 'configure': whether a finished review hands its findings to a hidden session that fixes " +
-						"them in the working tree. Off by default; turn it on only when the user asks.",
-				}),
-			),
-			review: Type.Optional(Type.String({ description: "Review slug. Omit to mean the latest review." })),
-			finding: Type.Optional(Type.String({ description: "Finding slug (view_finding, update_finding)" })),
-			target: Type.Optional(Type.String({ description: "For 'start': the target as the user named it" })),
-			target_key: Type.Optional(
-				Type.String({
-					description:
-						"For 'start': normalized identity of what is reviewed — a branch name, 'pr-123', " +
-						"'worktree', a range. Reviews sharing a key ratchet against each other.",
-				}),
-			),
-			title: Type.Optional(Type.String({ description: "For 'start': a human-readable review title" })),
-			file: Type.Optional(Type.String({ description: "Repo-relative path the finding anchors to" })),
-			line: Type.Optional(Type.Number({ description: "1-indexed line, when one line pins the finding down" })),
-			severity: Type.Optional(Type.String({ description: `One of: ${FINDING_SEVERITIES.join(", ")}` })),
-			category: Type.Optional(Type.String({ description: `One of: ${FINDING_CATEGORIES.join(", ")}` })),
-			confidence: Type.Optional(Type.String({ description: `One of: ${FINDING_CONFIDENCES.join(", ")}` })),
-			claim: Type.Optional(Type.String({ description: "The defect, stated as a claim about behavior" })),
-			failure_scenario: Type.Optional(
-				Type.String({
-					description: "Concrete inputs or state that produce the wrong outcome. Required for add_finding.",
-				}),
-			),
-			evidence: Type.Optional(
-				Type.String({ description: "What in the code supports the claim. Required for add_finding." }),
-			),
-			suggested_fix: Type.Optional(Type.String({ description: "How to fix it, when the fix is clear" })),
-			status: Type.Optional(Type.String({ description: `New finding status: ${FINDING_STATUSES.join(", ")}` })),
-			summary: Type.Optional(Type.String({ description: "For 'complete': what was reviewed and found" })),
-			force: Type.Optional(
-				Type.Boolean({
-					description:
-						"For 'add_finding': record even though a standing finding matches — only when this is " +
-						"genuinely a different problem",
-				}),
-			),
-		}),
+		parameters: reviewParameters,
 		async execute(_toolCallId, params) {
 			const reply = (value: unknown) => ({
 				content: [{ type: "text" as const, text: JSON.stringify(value) }],
@@ -322,7 +367,9 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 			const result = reviewTool(store, params);
 			return reply(result);
 		},
-	});
+	};
+
+	smolt.registerTool(reviewToolDefinition);
 
 	// A review that runs on a different model switches the session to it and
 	// hands it straight back when the run settles, so choosing a cheap reviewer
@@ -362,21 +409,101 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 		return undefined;
 	};
 
+	/**
+	 * Say something in the reader's chat, whatever session they are in now.
+	 *
+	 * Callers include the forwarder's output handler, where a throw would be an
+	 * uncaught exception that takes the session with it, and a context that has
+	 * outlived its session throws on use.
+	 */
+	const say = (message: string, kind: "info" | "warning"): void => {
+		try {
+			sessionCtx?.ui.notify(message, kind);
+		} catch {
+			// a context that has outlived its session says nothing; the work still runs
+		}
+	};
+
+	/**
+	 * Show what watching is doing, from wherever it changed.
+	 *
+	 * Called from fs.watch callbacks and the forwarder's handlers, where a throw
+	 * is an uncaught exception that takes the session with it, and a context that
+	 * has outlived its session throws on use.
+	 */
+	const setWatchStatus = (ctx: ExtensionContext, value: string | undefined): void => {
+		try {
+			ctx.ui.setStatus("review-watch", value);
+		} catch {
+			// a context that has outlived its session shows nothing; the watching still runs
+		}
+	};
+
+	/** The model a review runs on, when the reader chose one that exists. */
+	const reviewModel = (settings: ReviewSettings, ctx: ExtensionContext): Model<Api> | undefined => {
+		const selector = settings.model ?? "";
+		const slash = selector.indexOf("/");
+		if (slash <= 0) return undefined;
+		return ctx.modelRegistry.find(selector.slice(0, slash), selector.slice(slash + 1));
+	};
+
+	/** Whether a watched pull request is being reviewed right now: they go one at a time. */
+	let reviewingPullRequest = false;
+
+	/**
+	 * Review the next watched pull request, in a chat of its own.
+	 *
+	 * Not in the reader's chat: a pull request opened while they are mid-thought
+	 * would otherwise push a review prompt into the conversation they are having,
+	 * and several arriving together take it over completely. The review is real
+	 * work worth keeping, so it runs as a hidden chat — readable afterwards with
+	 * showHiddenChats — and only its outcome is announced here.
+	 */
 	const drain = async (): Promise<void> => {
+		if (reviewingPullRequest) return;
+		const ctx = sessionCtx;
+		if (ctx === undefined) return;
 		const next = pending.shift();
 		if (next === undefined) return;
 		const settings = loadReviewSettings(process.cwd());
 		// Only say "this is elsewhere" when it really is: a pull request on the
 		// repo open here is reviewed in place, with no clone.
 		const here = currentRepo();
-		const warning = await useReviewModel(settings, sessionCtx);
-		if (warning !== undefined) sessionCtx?.ui.notify(warning, "warning");
-		reviewing = Date.now();
-		// followUp rather than an unqualified send: anything still in flight makes
-		// the session queue this behind it instead of refusing it.
-		smolt.sendUserMessage(reviewPrompt(String(next.number), settings, next.repo === here ? undefined : next.repo), {
-			deliverAs: "followUp",
-		});
+		const task = reviewPrompt(String(next.number), settings, next.repo === here ? undefined : next.repo);
+		const startedAt = Date.now();
+		const model = reviewModel(settings, ctx);
+		// Before the review, not after it: the pull request should show it was heard.
+		acknowledge(next.repo, String(next.number));
+		reviewingPullRequest = true;
+		try {
+			await spawnChildSession(
+				{
+					task,
+					customTools: [reviewToolDefinition],
+					ctx,
+					hidden: true,
+					defaultThinkingLevel: "medium",
+					...(model ? { model } : {}),
+				},
+				(status, detail) => {
+					reviewingPullRequest = false;
+					say(
+						status === "completed"
+							? `Review of ${next.repo} #${next.number} finished: ${detail}`
+							: `Review of ${next.repo} #${next.number} failed: ${detail}`,
+						status === "completed" ? "info" : "warning",
+					);
+					if (status === "completed") void autoFix(startedAt, next.repo);
+					void drain().catch(() => undefined);
+				},
+			);
+		} catch (error) {
+			reviewingPullRequest = false;
+			say(
+				`Could not start the review of #${next.number}: ${error instanceof Error ? error.message : error}`,
+				"warning",
+			);
+		}
 	};
 
 	smolt.on("agent_settled", async (_event, ctx) => {
@@ -390,10 +517,7 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 		if (previous) await smolt.setModel(previous);
 		const startedAt = reviewing;
 		reviewing = undefined;
-		// Not awaited: the fixer is a background chat, and agent_settled is awaited
-		// before the session counts as settled, so waiting here kept the session
-		// visibly busy for the whole fix and held a headless run open.
-		if (startedAt !== undefined) void autoFix(startedAt);
+		if (startedAt !== undefined) await autoFix(startedAt, currentRepo());
 		await drain();
 	});
 
@@ -419,10 +543,22 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 	 * sight, and a notice says what came of it. Off unless asked for — a review
 	 * that edits code on its own is a bigger promise than one that reports.
 	 */
-	const autoFix = async (startedAt: number): Promise<void> => {
+	const autoFix = async (startedAt: number, repo: string | undefined): Promise<void> => {
 		if (loadReviewSettings(process.cwd()).autoFix !== true) return;
 		const ctx = sessionCtx;
 		if (ctx === undefined) return;
+		// The findings name paths in the repo that was reviewed. A review of a
+		// watched repo that is not the one open here was done in a temporary clone,
+		// so fixing it in this working tree would edit same-named files belonging to
+		// entirely unrelated work.
+		const here = currentRepo();
+		if (repo !== undefined && here !== undefined && repo !== here) {
+			say(
+				`Auto-fix skipped: ${repo} is not the repository open here, so its findings are left to fix there.`,
+				"info",
+			);
+			return;
+		}
 		// The record the session just opened: the newest one, and only if this run
 		// is what created it. A review that recorded nothing leaves nothing to fix.
 		const review = store.listReviews().pop();
@@ -451,33 +587,22 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 	const beginWatching = (ctx: ExtensionContext): string => {
 		stopWatching?.();
 		stopWatching = undefined;
-		ctx.ui.setStatus("review-watch", undefined);
+		setWatchStatus(ctx, undefined);
 		const settings = loadReviewSettings(process.cwd());
 		const repos = settings.watchRepos ?? [];
 		if (settings.watch !== true) return "off";
 		if (repos.length === 0) return "not watching anything";
 		if (!forwardingAvailable()) return "needs: gh extension install cli/gh-webhook";
-		// These run inside the forwarder's stdout listener, where a throw is an
-		// uncaught exception that takes the session with it. They speak through
-		// whichever context is current rather than the one captured here, because
-		// this one is stale as soon as the session is replaced or reloaded.
-		const say = (message: string, kind: "info" | "warning"): void => {
-			try {
-				sessionCtx?.ui.notify(message, kind);
-			} catch {
-				// a context that has outlived its session says nothing; the review still runs
-			}
-		};
 		stopWatching = watchAll(repos, {
 			review: (event) => {
-				say(`Reviewing ${event.repo} #${event.number}: ${event.title}`, "info");
+				say(`Reviewing ${event.repo} #${event.number} in a hidden chat: ${event.title}`, "info");
 				pending.push({ number: event.number, repo: event.repo });
 				void drain().catch(() => undefined);
 			},
 			notice: (message, kind) => say(message, kind),
 		});
 		const label = repos.length === 1 ? repos[0] : `${repos.length} repos`;
-		ctx.ui.setStatus("review-watch", `watching ${label}`);
+		setWatchStatus(ctx, `watching ${label}`);
 		return `watching ${repos.join(", ")}`;
 	};
 
@@ -486,7 +611,11 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 	// and has no way to reach into this extension, so without this a reader who
 	// turned watching on would see nothing happen until the next launch.
 	let stopSettingsWatch: (() => void) | undefined;
-	const followSettings = (ctx: ExtensionContext): void => {
+	const followSettings = (): void => {
+		// A restarted session must not leave the previous watcher running: it holds
+		// the context of a session that no longer exists.
+		stopSettingsWatch?.();
+		stopSettingsWatch = undefined;
 		let last =
 			JSON.stringify(loadReviewSettings(process.cwd()).watchRepos ?? []) + loadReviewSettings(process.cwd()).watch;
 		try {
@@ -495,7 +624,11 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 				const next = JSON.stringify(settings.watchRepos ?? []) + settings.watch;
 				if (next === last) return;
 				last = next;
-				beginWatching(ctx);
+				// The live context, not the one captured when this watcher was made:
+				// review.json may be written hours later, by then the session may have
+				// been replaced, and using a context that outlived its session throws.
+				const live = sessionCtx;
+				if (live !== undefined) beginWatching(live);
 			});
 			stopSettingsWatch = () => watcher.close();
 		} catch {
@@ -506,7 +639,7 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 	smolt.on("session_start", async (_event, ctx) => {
 		sessionCtx = ctx;
 		beginWatching(ctx);
-		followSettings(ctx);
+		followSettings();
 	});
 
 	smolt.on("session_shutdown", async () => {
@@ -699,6 +832,11 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 			const settings = loadReviewSettings(process.cwd());
 			const warning = await useReviewModel(settings, ctx);
 			if (warning !== undefined) ctx.ui.notify(warning, "warning");
+			// A pull request asked for by hand is acknowledged on it too, so the
+			// people watching that pull request see the review coming.
+			const pr = pullRequestNumber(trimmed);
+			const repo = currentRepo();
+			if (pr !== undefined && repo !== undefined) acknowledge(repo, pr);
 			reviewing = Date.now();
 			smolt.sendUserMessage(reviewPrompt(trimmed, settings), { deliverAs: "followUp" });
 		},

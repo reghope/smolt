@@ -1,8 +1,8 @@
-> smolt can help you use the SDK. Ask it to build an integration for your use case.
+> Smolt can help you use the SDK. Ask it to build an integration for your use case.
 
 # SDK
 
-The SDK provides programmatic access to smolt's agent capabilities. Use it to embed smolt in other applications, build custom interfaces, or integrate with automated workflows.
+The SDK provides programmatic access to Smolt's agent capabilities. Use it to embed Smolt in other applications, build custom interfaces, or integrate with automated workflows.
 
 **Example use cases:**
 - Build a custom UI (web, desktop, mobile)

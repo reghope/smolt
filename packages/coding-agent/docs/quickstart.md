@@ -1,6 +1,6 @@
 # Quickstart
 
-This page gets you from install to a useful first smolt session.
+This page gets you from install to a useful first Smolt session.
 
 ## Install
 
@@ -14,7 +14,7 @@ npm install -g --ignore-scripts smolt
 
 ### Uninstall
 
-Use the package manager that installed smolt. The curl installer uses npm globally, so curl and npm installs are removed with npm:
+Use the package manager that installed Smolt. The curl installer uses npm globally, so curl and npm installs are removed with npm:
 
 ```bash
 # curl installer or npm install -g
@@ -30,9 +30,9 @@ yarn global remove smolt
 bun uninstall -g smolt
 ```
 
-Uninstalling smolt leaves settings, credentials, sessions, and installed smolt packages in `~/.smolt/agent/`.
+Uninstalling Smolt leaves settings, credentials, sessions, and installed Smolt packages in `~/.smolt/agent/`.
 
-Then start smolt in the project directory you want it to work on:
+Then start Smolt in the project directory you want it to work on:
 
 ```bash
 cd /path/to/project
@@ -45,7 +45,7 @@ Smolt can use subscription providers through `/login`, or API-key providers thro
 
 ### Option 1: subscription login
 
-Start smolt and run:
+Start Smolt and run:
 
 ```text
 /login
@@ -55,7 +55,7 @@ Then select a provider. Built-in subscription logins include Claude Pro/Max, Cha
 
 ### Option 2: API key
 
-Set an API key before launching smolt:
+Set an API key before launching Smolt:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -68,13 +68,13 @@ See [Providers](providers.md) for all supported providers, environment variables
 
 ## First session
 
-Once smolt starts, type a request and press Enter:
+Once Smolt starts, type a request and press Enter:
 
 ```text
 Summarize this repository and tell me how to run its checks.
 ```
 
-By default, smolt gives the model four tools:
+By default, Smolt gives the model four tools:
 
 - `read` - read files
 - `write` - create or overwrite files
@@ -83,7 +83,7 @@ By default, smolt gives the model four tools:
 
 Additional built-in read-only tools (`grep`, `find`, `ls`) are available through tool options. Smolt runs in your current working directory and can modify files there. Use git or another checkpointing workflow if you want easy rollback.
 
-## Give smolt project instructions
+## Give Smolt project instructions
 
 Smolt loads context files at startup. Add an `AGENTS.md` file to tell it how to work in a project:
 
@@ -102,7 +102,7 @@ Smolt loads:
 
 If a directory contains `AGENTS.override.md`, Smolt loads it instead of `AGENTS.md` or `CLAUDE.md` from that directory.
 
-Restart smolt, or run `/reload`, after changing context files.
+Restart Smolt, or run `/reload`, after changing context files.
 
 ## Common things to try
 
@@ -142,7 +142,7 @@ smolt --name "my task"    # Set session display name at startup
 smolt --session <path|id> # Open a specific session
 ```
 
-Inside smolt, use `/resume`, `/new`, `/tree`, `/fork`, and `/clone` to manage sessions.
+Inside Smolt, use `/resume`, `/new`, `/tree`, `/fork`, and `/clone` to manage sessions.
 
 ### Non-interactive mode
 

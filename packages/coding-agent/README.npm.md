@@ -4,13 +4,13 @@
   </a>
 </p>
 
-<h1 align="center">smolt</h1>
+<h1 align="center">Smolt</h1>
 
 <p align="center"><em>The coding agent that keeps what it learns.</em></p>
 
 ---
 
-smolt is a minimal terminal coding agent with one addition that compounds: it remembers. Curated project memory and full-text recall over every past session, so Tuesday's dead end never costs you Thursday.
+Smolt is a minimal terminal coding agent with one addition that compounds: it remembers. Curated project memory and full-text recall over every past session, so Tuesday's dead end never costs you Thursday.
 
 ## Install
 
@@ -18,7 +18,7 @@ smolt is a minimal terminal coding agent with one addition that compounds: it re
 npm install -g @smolt/cli
 ```
 
-Prefer a window? [smolt desktop](https://smolt.dev/desktop) is the same agent, same memory, same sessions.
+Prefer a window? [Smolt desktop](https://smolt.dev/desktop) is the same agent, same memory, same sessions.
 
 ## Use
 
@@ -57,7 +57,7 @@ Three tools the agent uses on its own, nudged every few turns to persist anythin
 - **skill_manage** — when the agent solves something gnarly, it can write the working path down as a real skill (`SKILL.md` plus supporting files) in the standard skills directory. Next session it discovers and follows its own instructions like any hand-written skill.
 - **session_search** — full-text search (SQLite FTS5) across everything it has ever done in your projects, including command output. It can find "that error we hit last month", scroll the surrounding conversation, and read the fix.
 
-Why this is good: agents normally start every session at zero. smolt's knowledge compounds instead — the model stops re-deriving your build quirks, re-hitting known dead ends, and re-asking how you like things done. And because memory is just two Markdown files, you can open them, read exactly what the agent believes, and edit or delete anything. No vector database, no embeddings, no cloud — it all lives in your home directory.
+Why this is good: agents normally start every session at zero. Smolt's knowledge compounds instead — the model stops re-deriving your build quirks, re-hitting known dead ends, and re-asking how you like things done. And because memory is just two Markdown files, you can open them, read exactly what the agent believes, and edit or delete anything. No vector database, no embeddings, no cloud — it all lives in your home directory.
 
 ## Lightweight and modular
 

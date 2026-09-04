@@ -1,4 +1,4 @@
-> smolt can help you create smolt packages. Ask it to bundle your extensions, skills, prompt templates, or themes.
+> Smolt can help you create Smolt packages. Ask it to bundle your extensions, skills, prompt templates, or themes.
 
 # Smolt Packages
 
@@ -38,9 +38,9 @@ smolt update npm:@foo/bar      # update one package
 smolt update --extension npm:@foo/bar
 ```
 
-These commands manage smolt packages and `smolt update` can update the smolt CLI installation. For experimental installer-managed installations, `smolt update` installs the exact checked version into a staged, lockfile-backed release and activates it only after verification, leaving the current release intact if the update fails. Managed installations do not support `--force`; rerun the installer to repair one. To uninstall smolt itself, see [Quickstart](quickstart.md#uninstall).
+These commands manage Smolt packages and `smolt update` can update the Smolt CLI installation. For experimental installer-managed installations, `smolt update` installs the exact checked version into a staged, lockfile-backed release and activates it only after verification, leaving the current release intact if the update fails. Managed installations do not support `--force`; rerun the installer to repair one. To uninstall Smolt itself, see [Quickstart](quickstart.md#uninstall).
 
-By default, `install` and `remove` write to user settings (`~/.smolt/agent/settings.json`). Use `-l` to write to project settings (`.smolt/settings.json`) instead. Project settings can be shared with your team, and smolt installs any missing packages automatically on startup after the project is trusted.
+By default, `install` and `remove` write to user settings (`~/.smolt/agent/settings.json`). Use `-l` to write to project settings (`.smolt/settings.json`) instead. Project settings can be shared with your team, and Smolt installs any missing packages automatically on startup after the project is trusted.
 
 To try a package without installing it, use `--extension` or `-e`. This installs to a temporary directory for the current run only:
 
@@ -90,7 +90,7 @@ ssh://git@github.com/user/repo@v1
 - Refs are pinned tags or commits. `smolt update --extensions` and `smolt update --all` do not move them to newer refs, but they do reconcile an existing clone to the configured ref.
 - Use `smolt install git:host/user/repo@new-ref` to update settings and move an existing package to a new pinned ref.
 - Cloned to `~/.smolt/agent/git/<host>/<path>` (global) or `.smolt/git/<host>/<path>` (project).
-- When reconciliation changes the checkout, smolt resets and cleans the clone, then runs `npm install` if `package.json` exists.
+- When reconciliation changes the checkout, Smolt resets and cleans the clone, then runs `npm install` if `package.json` exists.
 
 **SSH examples:**
 ```bash
@@ -111,7 +111,7 @@ smolt install git:git@github.com:user/repo@v1.0.0
 ./relative/path/to/package
 ```
 
-Local paths point to files or directories on disk and are added to settings without copying. Relative paths are resolved against the settings file they appear in. If the path is a file, it loads as a single extension. If it is a directory, smolt loads resources using package rules.
+Local paths point to files or directories on disk and are added to settings without copying. Relative paths are resolved against the settings file they appear in. If the path is a file, it loads as a single extension. If it is a directory, Smolt loads resources using package rules.
 
 ## Creating a Smolt Package
 
@@ -157,7 +157,7 @@ If both are set, video takes precedence.
 
 ### Convention Directories
 
-If no `smolt` manifest is present, smolt auto-discovers resources from these directories:
+If no `smolt` manifest is present, Smolt auto-discovers resources from these directories:
 
 - `extensions/` loads `.ts` and `.js` files
 - `skills/` recursively finds `SKILL.md` folders and loads top-level `.md` files as skills
@@ -166,11 +166,11 @@ If no `smolt` manifest is present, smolt auto-discovers resources from these dir
 
 ## Dependencies
 
-Third party runtime dependencies belong in `dependencies` in `package.json`. Dependencies that do not register extensions, skills, prompt templates, or themes also belong in `dependencies`. When smolt installs a package from npm or git, it runs `npm install`, so those dependencies are installed automatically.
+Third party runtime dependencies belong in `dependencies` in `package.json`. Dependencies that do not register extensions, skills, prompt templates, or themes also belong in `dependencies`. When Smolt installs a package from npm or git, it runs `npm install`, so those dependencies are installed automatically.
 
 Smolt bundles core packages for extensions and skills. If you import any of these, list them in `peerDependencies` with a `"*"` range and do not bundle them: `@smolt/ai`, `@smolt/agent-core`, `smolt`, `@smolt/tui`, `typebox`.
 
-Other smolt packages must be bundled in your tarball. Add them to `dependencies` and `bundledDependencies`, then reference their resources through `node_modules/` paths. Smolt loads packages with separate module roots, so separate installs do not collide or share modules.
+Other Smolt packages must be bundled in your tarball. Add them to `dependencies` and `bundledDependencies`, then reference their resources through `node_modules/` paths. Smolt loads packages with separate module roots, so separate installs do not collide or share modules.
 
 Example:
 

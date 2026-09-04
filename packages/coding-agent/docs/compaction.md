@@ -178,7 +178,7 @@ After navigation with summary:
 
 ### Cumulative File Tracking
 
-Both compaction and branch summarization track files cumulatively. When generating a summary, smolt extracts file operations from:
+Both compaction and branch summarization track files cumulatively. When generating a summary, Smolt extracts file operations from:
 - Tool calls in the messages being summarized
 - Previous compaction or branch summary `details` (if any)
 

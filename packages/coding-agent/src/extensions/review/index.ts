@@ -332,12 +332,13 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 	 */
 	const useReviewModel = async (
 		settings: ReviewSettings,
-		current: Model<Api> | undefined,
+		ctx: ExtensionContext | undefined,
 	): Promise<string | undefined> => {
 		const selector = settings.model ?? "";
 		const slash = selector.indexOf("/");
 		if (slash <= 0) return undefined;
-		const wanted = sessionCtx?.modelRegistry.find(selector.slice(0, slash), selector.slice(slash + 1));
+		const current = ctx?.model;
+		const wanted = ctx?.modelRegistry.find(selector.slice(0, slash), selector.slice(slash + 1));
 		if (wanted === undefined)
 			return `The review model ${selector} is not available; reviewing with the session's model.`;
 		if (current && wanted.id === current.id && wanted.provider === current.provider) return undefined;
@@ -352,7 +353,7 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 		// Only say "this is elsewhere" when it really is: a pull request on the
 		// repo open here is reviewed in place, with no clone.
 		const here = currentRepo();
-		const warning = await useReviewModel(settings, sessionCtx?.model);
+		const warning = await useReviewModel(settings, sessionCtx);
 		if (warning !== undefined) sessionCtx?.ui.notify(warning, "warning");
 		reviewing = Date.now();
 		// followUp rather than an unqualified send: anything still in flight makes
@@ -467,6 +468,12 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 			return items.filter((item) => item.value.startsWith(prefix));
 		},
 		handler: async (args, ctx) => {
+			// The command's ctx is the live one. The captured session ctx goes stale
+			// whenever the session is replaced or reloaded, and using a stale ctx
+			// throws — which killed a whole run when a review was asked for right
+			// after a replacement. Refreshing here keeps the watcher's later use of
+			// it (notices, auto-fix) pointed at the session that actually exists.
+			sessionCtx = ctx;
 			const trimmed = args.trim();
 
 			if (trimmed.toLowerCase() === "logout") {
@@ -597,7 +604,7 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 			}
 
 			const settings = loadReviewSettings(process.cwd());
-			const warning = await useReviewModel(settings, ctx.model);
+			const warning = await useReviewModel(settings, ctx);
 			if (warning !== undefined) ctx.ui.notify(warning, "warning");
 			reviewing = Date.now();
 			smolt.sendUserMessage(reviewPrompt(trimmed, settings), { deliverAs: "followUp" });

@@ -7,7 +7,7 @@ import { projectStore } from "../../core/project-store.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
 import { spawnChildSession } from "../battletest/spawn.ts";
 import { DEFAULT_MAX_FINDINGS, loadReviewSettings, type ReviewSettings, saveReviewSettings } from "./config.ts";
-import { awaitApproval, clearToken, connectedAccount, requestDeviceCode } from "./github-login.ts";
+import { ACCESS_URL, awaitApproval, clearToken, connectedAccount, requestDeviceCode } from "./github-login.ts";
 import {
 	FINDING_CATEGORIES,
 	FINDING_CONFIDENCES,
@@ -73,6 +73,16 @@ function doctrine(): string {
 7. CLOSE: action 'complete' with a short summary (what was reviewed, the shape of what was found, what is fine).
 QUALITY BAR: fewer, harder findings beat many soft ones. No praise padding, no restating the diff, no nitpicks the codebase's own style contradicts. If the change is good, a clean review with zero findings is the correct and complete result.`;
 }
+
+/**
+ * The picker entry that leads to GitHub's own access page.
+ *
+ * The commonest thing to go wrong in setup is a repo that is simply not in the
+ * list, and the fix is never in smolt: it is granting the app access to that
+ * organisation, on a page nobody remembers the address of. Offering it here
+ * turns a dead end into one more click.
+ */
+const MANAGE_ACCESS = "Add or change repo access on GitHub…";
 
 /**
  * What the hidden fixing session is told.
@@ -394,12 +404,13 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 		const open = store.listFindings(review.slug).filter((finding) => finding.status === "open");
 		if (open.length === 0) return;
 		ctx.ui.notify(
-			`Auto-fix: working through ${open.length} finding${open.length === 1 ? "" : "s"} from ${review.slug} in a hidden session.`,
+			`Auto-fix: working through ${open.length} finding${open.length === 1 ? "" : "s"} from ${review.slug} in a hidden chat. ` +
+				'Set "showHiddenChats": true in settings.json to read it afterwards.',
 			"info",
 		);
 		try {
 			await spawnChildSession(
-				{ task: fixBrief(open), customTools: [], ctx, defaultThinkingLevel: "medium" },
+				{ task: fixBrief(open), customTools: [], ctx, defaultThinkingLevel: "medium", hidden: true },
 				(status, detail) =>
 					ctx.ui.notify(
 						status === "completed" ? `Auto-fix finished: ${detail}` : `Auto-fix failed: ${detail}`,
@@ -548,11 +559,28 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 					);
 					return;
 				}
-				const chosen = await ctx.ui.multiselect(
-					"Which repos should smolt review pull requests on?",
-					candidates,
-					settings.watchRepos ?? [],
-				);
+				let chosen: string[] | undefined;
+				let offered = candidates;
+				for (;;) {
+					const picked = await ctx.ui.multiselect(
+						"Which repos should smolt review pull requests on?",
+						[...offered, MANAGE_ACCESS],
+						settings.watchRepos ?? [],
+					);
+					if (picked === undefined) break;
+					if (!picked.includes(MANAGE_ACCESS)) {
+						chosen = picked;
+						break;
+					}
+					// Access changed on GitHub, so the list is asked for again rather
+					// than reused: the whole point was that it was missing something.
+					openBrowser(ACCESS_URL);
+					await ctx.ui.confirm(
+						"Change repo access on GitHub",
+						"Grant or revoke smolt's access to your repositories and organisations in the browser, then press OK to pick from the updated list.",
+					);
+					offered = adminRepos().sort((a, b) => (a === here ? -1 : b === here ? 1 : 0));
+				}
 				if (chosen === undefined) {
 					ctx.ui.notify("Setup cancelled — nothing changed.", "info");
 					return;

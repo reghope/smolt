@@ -91,8 +91,25 @@ export type PackageSource =
 			themes?: string[];
 	  };
 
+/**
+ * The `subagent` tool's threads: limits, and what a child session runs on
+ * when its agent definition does not say.
+ */
+export interface AgentsSettings {
+	enabled?: boolean;
+	maxConcurrentThreadsPerSession?: number;
+	/** `provider/id` or a bare model id; default the parent's model. */
+	defaultSubagentModel?: string;
+	/** Default "medium"; the parent's own level is often the user's ceiling, not a child's need. */
+	defaultSubagentThinking?: ThinkingLevel;
+	/** Write child sessions to disk like any other session. Default false: children are in-memory. */
+	persistChildSessions?: boolean;
+}
+
 export interface Settings {
 	lastChangelogVersion?: string;
+	/** Subagent threads (the `subagent` tool); child sessions of battletest and research read persistChildSessions too. */
+	agents?: AgentsSettings;
 	defaultProvider?: string;
 	defaultModel?: string;
 	defaultThinkingLevel?: ThinkingLevel;
@@ -106,6 +123,7 @@ export interface Settings {
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
 	showCacheMissNotices?: boolean; // default: false - show prompt-cache miss and compaction cost notices
+	showHiddenChats?: boolean; // default: false - list sessions an extension kept out of the way (e.g. review auto-fix)
 	externalEditor?: string; // Command for Ctrl+G external editor; takes precedence over VISUAL/EDITOR
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows); supports leading ~ expansion
 	quietStartup?: boolean;
@@ -856,6 +874,10 @@ export class SettingsManager {
 		};
 	}
 
+	getAgentsSettings(): AgentsSettings {
+		return this.settings.agents ?? {};
+	}
+
 	getBranchSummarySettings(): { reserveTokens: number; skipPrompt: boolean } {
 		return {
 			reserveTokens: this.settings.branchSummary?.reserveTokens ?? 16384,
@@ -919,6 +941,16 @@ export class SettingsManager {
 
 	getShowCacheMissNotices(): boolean {
 		return this.settings.showCacheMissNotices ?? false;
+	}
+
+	/**
+	 * Whether session lists include hidden chats: sessions an extension started
+	 * on the reader's behalf and kept out of the way, such as the one that fixes
+	 * what a review found. They are kept, not discarded — this decides whether
+	 * they are shown.
+	 */
+	getShowHiddenChats(): boolean {
+		return this.settings.showHiddenChats ?? false;
 	}
 
 	getExternalEditorCommand(): string {

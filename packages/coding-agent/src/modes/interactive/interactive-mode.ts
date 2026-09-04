@@ -2432,6 +2432,7 @@ export class InteractiveMode {
 	private createExtensionUIContext(): ExtensionUIContext {
 		return {
 			select: (title, options, opts) => this.showExtensionSelector(title, options, opts),
+			multiselect: (title, options, selected, opts) => this.showExtensionMultiselect(title, options, selected, opts),
 			confirm: (title, message, opts) => this.showExtensionConfirm(title, message, opts),
 			input: (title, placeholder, opts) => this.showExtensionInput(title, placeholder, opts),
 			notify: (message, type) => this.showExtensionNotify(message, type),
@@ -2486,6 +2487,35 @@ export class InteractiveMode {
 	/**
 	 * Show a selector for extensions.
 	 */
+	/**
+	 * A checklist, built from the single-choice selector.
+	 *
+	 * The terminal selector answers on the first key, so ticking several things
+	 * means reopening it after each one. That reads fine in a terminal, where
+	 * the list simply redraws in place.
+	 */
+	private async showExtensionMultiselect(
+		title: string,
+		options: string[],
+		selected?: string[],
+		opts?: ExtensionUIDialogOptions,
+	): Promise<string[] | undefined> {
+		const chosen = new Set(selected ?? []);
+		for (;;) {
+			const done = `Done — ${chosen.size} selected`;
+			const pick = await this.showExtensionSelector(
+				title,
+				[done, ...options.map((option) => `${chosen.has(option) ? "[x] " : "[ ] "}${option}`)],
+				opts,
+			);
+			if (pick === undefined) return undefined;
+			if (pick === done) return [...chosen];
+			const option = pick.slice(4);
+			if (chosen.has(option)) chosen.delete(option);
+			else chosen.add(option);
+		}
+	}
+
 	private showExtensionSelector(
 		title: string,
 		options: string[],
@@ -5385,7 +5415,9 @@ export class InteractiveMode {
 		this.showSelector((done) => {
 			const selector = new SessionSelectorComponent(
 				(onProgress) =>
-					SessionManager.list(this.sessionManager.getCwd(), this.sessionManager.getSessionDir(), onProgress),
+					SessionManager.list(this.sessionManager.getCwd(), this.sessionManager.getSessionDir(), onProgress, {
+						includeHidden: this.settingsManager.getShowHiddenChats(),
+					}),
 				(onProgress) =>
 					this.sessionManager.usesDefaultSessionDir()
 						? SessionManager.listAll(onProgress)

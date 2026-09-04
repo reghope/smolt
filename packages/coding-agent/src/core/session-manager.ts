@@ -488,6 +488,33 @@ export function getDefaultSessionDir(cwd: string, agentDir: string = getDefaultA
 	return sessionDir;
 }
 
+/** Name of the folder inside a project's session directory holding hidden sessions. */
+const HIDDEN_DIR_NAME = "hidden";
+
+/**
+ * Where a hidden session is written: a folder inside the project's session
+ * directory, rather than a flag on the file.
+ *
+ * Everything that lists sessions — /resume, the startup picker, session
+ * search, the desktop sidebar — reads the `.jsonl` files of one directory and
+ * ignores anything else in it. Putting a hidden session one level down means
+ * every one of them skips it without being taught to, and there is no way to
+ * forget the filter in a lister written later. Showing hidden chats is then
+ * listing one more directory, which is `SessionManager.list` with
+ * `includeHidden`.
+ *
+ * A session that fixes what a review found is the case this exists for: it is
+ * real work, worth keeping and worth reading afterwards, but it is not a
+ * conversation the reader had and should not sit in their list as if it were.
+ */
+export function getHiddenSessionDir(cwd: string, agentDir: string = getDefaultAgentDir()): string {
+	const hiddenDir = join(getDefaultSessionDirPath(cwd, agentDir), HIDDEN_DIR_NAME);
+	if (!existsSync(hiddenDir)) {
+		mkdirSync(hiddenDir, { recursive: true });
+	}
+	return hiddenDir;
+}
+
 const SESSION_READ_BUFFER_SIZE = 1024 * 1024;
 const SESSION_HEADER_READ_BUFFER_SIZE = 4096;
 /** Bound synchronous header discovery while allowing large cwd and custom metadata fields. */
@@ -1637,13 +1664,21 @@ export class SessionManager {
 	 * @param sessionDir Optional session directory. If omitted, uses default (~/.smolt/agent/sessions/<encoded-cwd>/).
 	 * @param onProgress Optional callback for progress updates (loaded, total)
 	 */
-	static async list(cwd: string, sessionDir?: string, onProgress?: SessionListProgress): Promise<SessionInfo[]> {
+	static async list(
+		cwd: string,
+		sessionDir?: string,
+		onProgress?: SessionListProgress,
+		options?: { includeHidden?: boolean },
+	): Promise<SessionInfo[]> {
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
 		const filterCwd = sessionDir !== undefined && dir !== getDefaultSessionDirPath(cwd);
 		const resolvedCwd = resolvePath(cwd);
-		const sessions = (await listSessionsFromDir(dir, onProgress)).filter(
-			(session) => !filterCwd || sessionCwdMatches(session.cwd, resolvedCwd),
-		);
+		const found = await listSessionsFromDir(dir, onProgress);
+		// Hidden sessions live one level down and are listed only when asked for.
+		if (options?.includeHidden === true) {
+			found.push(...(await listSessionsFromDir(join(dir, HIDDEN_DIR_NAME))));
+		}
+		const sessions = found.filter((session) => !filterCwd || sessionCwdMatches(session.cwd, resolvedCwd));
 		sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
 		return sessions;
 	}

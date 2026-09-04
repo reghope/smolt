@@ -17,6 +17,14 @@ const CLIENT_ID = "Ov23liM2o3kxVmC6o7fJ";
  */
 const SCOPES = "repo admin:repo_hook";
 
+/**
+ * Where a reader grants or revokes what smolt may reach: this app's page under
+ * their GitHub account settings, listing every organisation and the access it
+ * has. A repo missing from setup is fixed here, not in smolt — nothing in the
+ * device flow can widen access after the fact.
+ */
+export const ACCESS_URL = `https://github.com/settings/connections/applications/${CLIENT_ID}`;
+
 const DEVICE_CODE_URL = "https://github.com/login/device/code";
 const TOKEN_URL = "https://github.com/login/oauth/access_token";
 

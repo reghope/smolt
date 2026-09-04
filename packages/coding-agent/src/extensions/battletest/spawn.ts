@@ -5,6 +5,9 @@ import type { Api, Model } from "@smolt/ai";
 import { getAgentDir } from "../../config.ts";
 import { ActionMetrics, type ActionSummary } from "../../core/action-metrics.ts";
 import type { ExtensionContext, ToolDefinition } from "../../core/extensions/types.ts";
+import { DefaultResourceLoader } from "../../core/resource-loader.ts";
+import type { SettingsManager } from "../../core/settings-manager.ts";
+import { createLeanChildExtension, type LeanChildOptions } from "./lean.ts";
 
 /**
  * The child-session foundation battletest and research share: one background
@@ -31,7 +34,34 @@ export interface ChildDriver {
 	/** The child's last actions, oldest first, for the expandable roster. */
 	recentActions?(): string[];
 	/** The child's own LLM spend so far, summed over its requests. */
-	tokens?(): { input: number; output: number; cost: number };
+	tokens?(): ChildTokens;
+}
+
+/**
+ * A child's spend, every part of it. `input` is only what the provider
+ * billed as fresh; the context re-sent on every turn comes back as
+ * `cacheRead` (or `cacheWrite` the first time), and for a long session that
+ * is most of the tokens — leave it out and the roster shows a tenth of the
+ * truth.
+ */
+export interface ChildTokens {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+}
+
+/** Every token the child was billed for, cached or not. */
+export function childTokenTotal(tokens: ChildTokens): number {
+	return tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite;
+}
+
+/** "112.4k tokens" — the roster's spend label; empty until something was spent. */
+export function childSpendLabel(tokens: ChildTokens | undefined): string {
+	if (!tokens) return "";
+	const total = childTokenTotal(tokens);
+	if (total <= 0) return "";
+	return `${(total / 1000).toFixed(1)}k tokens`;
 }
 
 export interface ChildSpawnOptions {
@@ -50,6 +80,15 @@ export interface ChildSpawnOptions {
 	excludeTools?: string[];
 	/** Hard ceiling on one uncapped child shell call, in seconds. */
 	shellTimeoutSeconds?: number;
+	/** How lean the child's context is kept (tool-result budget, shedding of old results). */
+	lean?: LeanChildOptions;
+	/**
+	 * Keep this child's transcript, but out of the session list: it is written
+	 * to the project's hidden session folder, which nothing lists until the
+	 * reader turns on `showHiddenChats`. For work done on their behalf that
+	 * they did not sit and watch, and may want to read afterwards.
+	 */
+	hidden?: boolean;
 }
 
 export type ChildFinish = (status: "completed" | "errored", detail: string) => void;
@@ -62,9 +101,8 @@ export type ChildFinish = (status: "completed" | "errored", detail: string) => v
  * `agents.persistChildSessions: true` in settings.json to keep the old
  * behavior (real session files, recoverable transcripts).
  */
-export function persistChildSessions(ctx: ExtensionContext): boolean {
-	const settings = (ctx as unknown as { settings?: { agents?: { persistChildSessions?: boolean } } }).settings;
-	return settings?.agents?.persistChildSessions === true;
+export function persistChildSessions(settingsManager: SettingsManager): boolean {
+	return settingsManager.getAgentsSettings().persistChildSessions === true;
 }
 
 /**
@@ -78,26 +116,58 @@ export function persistChildSessions(ctx: ExtensionContext): boolean {
  */
 export const CHILD_SHELL_TIMEOUT_SECONDS = 180;
 
+/**
+ * The resources a child session loads: as few as it can work with, because
+ * every one of them rides on every turn, and a child makes fifty turns.
+ *
+ * - noExtensions keeps the child a worker, not an orchestrator: no subagent
+ *   tool, no battletest or research command, nothing below this level
+ *   spawns anything. The one extension it does run is inline: the budget
+ *   on tool results, the shedding of old ones, and the reading habits —
+ *   see lean.ts.
+ * - noSkills: the skills catalogue is written for whoever is directing the
+ *   work, and a child is handed its whole task in its brief. Left in, a
+ *   catalogue of forty skills came to two thousand tokens on every turn of
+ *   every researcher — a quarter of the fixed context — for nothing.
+ * - No project context files (AGENTS.md and kin): coding conventions for
+ *   whoever edits this repository, and a child never edits it.
+ */
+export function createChildResourceLoader(options: {
+	cwd: string;
+	agentDir: string;
+	settingsManager: SettingsManager;
+	lean?: LeanChildOptions;
+	/** Text appended to the child's system prompt (an agent definition's instructions). */
+	appendSystemPrompt?: string[];
+	/**
+	 * Keep the project's context files (AGENTS.md and kin). Off by default;
+	 * a subagent that edits the repository is the one child that needs them.
+	 */
+	contextFiles?: boolean;
+}): DefaultResourceLoader {
+	return new DefaultResourceLoader({
+		cwd: options.cwd,
+		agentDir: options.agentDir,
+		settingsManager: options.settingsManager,
+		noExtensions: true,
+		noSkills: true,
+		extensionFactories: [createLeanChildExtension(options.lean)],
+		...(options.contextFiles ? {} : { agentsFilesOverride: () => ({ agentsFiles: [] }) }),
+		...(options.appendSystemPrompt ? { appendSystemPrompt: options.appendSystemPrompt } : {}),
+	});
+}
+
 /** Start one child as a real background agent session. */
 export async function spawnChildSession(options: ChildSpawnOptions, onFinish: ChildFinish): Promise<ChildDriver> {
 	const { task, customTools, ctx, model, thinkingLevel, metricsPath } = options;
 	const shellTimeout = options.shellTimeoutSeconds ?? CHILD_SHELL_TIMEOUT_SECONDS;
 	const { createAgentSession } = await import("../../core/sdk.ts");
-	const { DefaultResourceLoader } = await import("../../core/resource-loader.ts");
 	const { SettingsManager } = await import("../../core/settings-manager.ts");
-	const { getDefaultSessionDir, SessionManager } = await import("../../core/session-manager.ts");
+	const { getDefaultSessionDir, getHiddenSessionDir, SessionManager } = await import("../../core/session-manager.ts");
 
 	const agentDir = getAgentDir();
 	const settingsManager = SettingsManager.create(ctx.cwd, agentDir);
-	// noExtensions keeps the child a worker, not an orchestrator: no subagent
-	// tool, no battletest or research command, nothing below this level
-	// spawns anything.
-	const resourceLoader = new DefaultResourceLoader({
-		cwd: ctx.cwd,
-		agentDir,
-		settingsManager,
-		noExtensions: true,
-	});
+	const resourceLoader = createChildResourceLoader({ cwd: ctx.cwd, agentDir, settingsManager, lean: options.lean });
 	await resourceLoader.reload();
 
 	const { session } = await createAgentSession({
@@ -114,9 +184,11 @@ export async function spawnChildSession(options: ChildSpawnOptions, onFinish: Ch
 		customTools,
 		resourceLoader,
 		settingsManager,
-		sessionManager: persistChildSessions(ctx)
-			? SessionManager.create(ctx.cwd, getDefaultSessionDir(ctx.cwd, agentDir))
-			: SessionManager.inMemory(ctx.cwd),
+		sessionManager: options.hidden
+			? SessionManager.create(ctx.cwd, getHiddenSessionDir(ctx.cwd, agentDir))
+			: persistChildSessions(settingsManager)
+				? SessionManager.create(ctx.cwd, getDefaultSessionDir(ctx.cwd, agentDir))
+				: SessionManager.inMemory(ctx.cwd),
 	});
 
 	// Every action is timed: tool spans and the model's thinking between them,
@@ -173,19 +245,26 @@ export async function spawnChildSession(options: ChildSpawnOptions, onFinish: Ch
 		currentAction: () => metrics.recent,
 		recentActions: () => metrics.recentActions,
 		tokens: () => {
-			let input = 0;
-			let output = 0;
-			let cost = 0;
+			const totals: ChildTokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 			for (const message of session.messages) {
 				const usage = (
-					message as { role?: unknown; usage?: { input?: number; output?: number; cost?: { total?: number } } }
+					message as {
+						role?: unknown;
+						usage?: {
+							input?: number;
+							output?: number;
+							cacheRead?: number;
+							cacheWrite?: number;
+						};
+					}
 				).usage;
 				if ((message as { role?: unknown }).role !== "assistant" || !usage) continue;
-				input += usage.input ?? 0;
-				output += usage.output ?? 0;
-				cost += usage.cost?.total ?? 0;
+				totals.input += usage.input ?? 0;
+				totals.output += usage.output ?? 0;
+				totals.cacheRead += usage.cacheRead ?? 0;
+				totals.cacheWrite += usage.cacheWrite ?? 0;
 			}
-			return { input, output, cost };
+			return totals;
 		},
 	};
 }

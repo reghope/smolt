@@ -454,7 +454,8 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 	});
 
 	smolt.registerCommand("review", {
-		description: "Review code changes: /review (pending work), /review <PR|branch|range|path>, /review setup",
+		description:
+			"Review code changes: /review (pending work), /review <PR|branch|range|path>, /review setup, /review autofix",
 		getArgumentCompletions: (argumentPrefix) => {
 			const items = [
 				{
@@ -463,6 +464,11 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 					description: "Connect GitHub, choose the review model and how reviews are posted",
 				},
 				{ value: "logout", label: "logout", description: "Disconnect the GitHub account reviews are posted from" },
+				{
+					value: "autofix",
+					label: "autofix",
+					description: "Fix what a review finds, in a hidden chat: toggle | on | off | status",
+				},
 			];
 			const prefix = argumentPrefix.trim().toLowerCase();
 			return items.filter((item) => item.value.startsWith(prefix));
@@ -475,6 +481,31 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 			// it (notices, auto-fix) pointed at the session that actually exists.
 			sessionCtx = ctx;
 			const trimmed = args.trim();
+
+			// Auto-fix is off until it is asked for, and this is where it is asked
+			// for: editing review.json by hand is not a setting anyone finds, and
+			// the question inside setup is answered once and then buried.
+			if (trimmed.toLowerCase().startsWith("autofix")) {
+				const current = loadReviewSettings(process.cwd()).autoFix === true;
+				const word = trimmed.slice("autofix".length).trim().toLowerCase();
+				if (word === "status") {
+					ctx.ui.notify(`Auto-fix is ${current ? "on" : "off"}.`, "info");
+					return;
+				}
+				if (word !== "" && word !== "on" && word !== "off" && word !== "toggle") {
+					ctx.ui.notify(`Say '/review autofix' with nothing, or on, off, or status — not '${word}'.`, "warning");
+					return;
+				}
+				const next = word === "on" ? true : word === "off" ? false : !current;
+				saveReviewSettings({ autoFix: next });
+				ctx.ui.notify(
+					next
+						? "Auto-fix is on: when a review records findings, a hidden chat fixes them in your working tree and reports back. It never commits or pushes."
+						: "Auto-fix is off: reviews report their findings and change nothing.",
+					"info",
+				);
+				return;
+			}
 
 			if (trimmed.toLowerCase() === "logout") {
 				clearToken();

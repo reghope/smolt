@@ -60,6 +60,24 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/changelog` | Display version history |
 | `/quit` | Quit Smolt |
 
+Built-in extensions register these commands as well:
+
+| Command | Description |
+|---------|-------------|
+| `/skills` | Authored skills and how often each was actually loaded |
+| `/embeddings` | Whether past sessions are searched by meaning, and how far the index has got |
+| `/hindsight` | Observed tool-usage breakdown; add a question to ask about the data |
+| `/goal` | Set a standing objective the session works toward on its own |
+| `/wayfinder` | Chart or work a wayfinder map: plan big work as decision tickets |
+| `/subagents` | Inspect, steer and stop background agent threads |
+| `/battletest` | Send simulated users through the app, described in plain language |
+| `/research` | Send a team of investigators after a subject and report back |
+| `/review` | Review code changes: pending work, or a named PR, branch, range, or path. `/review autofix` fixes what a review finds, in a hidden chat (off by default) |
+| `/cues` | Notes that arrive when their subject does; lists them and which are armed |
+| `/auto-thinking` | Auto thinking mode: classify thinking per task (`on`, `off`, `status`) |
+| `/pool` | Credential pools: failover keys per provider |
+| `/telegram` | Link Telegram: the agent can message you, and your replies reach the session |
+
 ## Message Queue
 
 You can submit messages while the agent is still working:
@@ -200,6 +218,7 @@ cat README.md | smolt -p "Summarize this text"
 | `-c`, `--continue` | Continue the most recent session |
 | `-r`, `--resume` | Browse and select a session |
 | `--session <path\|id>` | Use a specific session file or partial UUID |
+| `--session-id <id>` | Use an exact project session ID, creating the session if it does not exist |
 | `--fork <path\|id>` | Fork a session file or partial UUID into a new session |
 | `--session-dir <dir>` | Custom session storage directory |
 | `--no-session` | Ephemeral mode; do not save |
@@ -245,6 +264,7 @@ smolt --no-extensions -e ./my-extension.ts
 | `--tui-mode <mode>` | TUI mode: `regular` (default) or experimental `fullscreen` |
 | `--use-theme <name[/name]>` | Set the initial interactive theme for this run without changing settings |
 | `--verbose` | Force verbose startup |
+| `--offline` | Disable startup network operations, the same as `SMOLT_OFFLINE=1` |
 | `-a`, `--approve` | Trust project-local files for this run |
 | `-na`, `--no-approve` | Ignore project-local files for this run |
 | `--` | Stop option parsing; remaining arguments are prompts or `@file` inputs |

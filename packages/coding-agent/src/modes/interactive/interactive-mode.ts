@@ -100,6 +100,7 @@ import type { SourceInfo } from "../../core/source-info.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { getUsageCostBreakdown } from "../../core/usage-totals.ts";
+import { loadReviewSettings, saveReviewSettings } from "../../extensions/review/config.ts";
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
 import { spawnProcess } from "../../utils/child-process.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
@@ -4632,6 +4633,8 @@ export class InteractiveMode {
 					treeFilterMode: this.settingsManager.getTreeFilterMode(),
 					showHardwareCursor: this.settingsManager.getShowHardwareCursor(),
 					showCacheMissNotices: this.settingsManager.getShowCacheMissNotices(),
+					showHiddenChats: this.settingsManager.getShowHiddenChats(),
+					reviewAutoFix: loadReviewSettings(this.sessionManager.getCwd()).autoFix === true,
 					defaultProjectTrust: this.settingsManager.getDefaultProjectTrust(),
 					editorPaddingX: this.settingsManager.getEditorPaddingX(),
 					outputPad: this.settingsManager.getOutputPad(),
@@ -4730,6 +4733,15 @@ export class InteractiveMode {
 					onShowCacheMissNoticesChange: (shown) => {
 						this.settingsManager.setShowCacheMissNotices(shown);
 						this.rebuildChatFromMessages();
+					},
+					onShowHiddenChatsChange: (shown) => {
+						this.settingsManager.setShowHiddenChats(shown);
+					},
+					// Auto-fix belongs to the review extension, so it is stored in its own
+					// review.json rather than settings.json. It is offered here because
+					// this is where people look for a switch, not because it lives here.
+					onReviewAutoFixChange: (enabled) => {
+						saveReviewSettings({ autoFix: enabled });
 					},
 					onCollapseChangelogChange: (collapsed) => {
 						this.settingsManager.setCollapseChangelog(collapsed);

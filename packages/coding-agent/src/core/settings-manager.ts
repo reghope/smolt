@@ -977,6 +977,12 @@ export class SettingsManager {
 		this.save();
 	}
 
+	setShowHiddenChats(show: boolean): void {
+		this.globalSettings.showHiddenChats = show;
+		this.markModified("showHiddenChats");
+		this.save();
+	}
+
 	getShellPath(): string | undefined {
 		const shellPath = this.settings.shellPath;
 		return shellPath ? normalizePath(shellPath) : shellPath;

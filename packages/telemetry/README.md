@@ -1,6 +1,6 @@
 # @smolt/telemetry
 
-Vendor-neutral telemetry contracts and typed schema utilities for smolt packages.
+Vendor-neutral telemetry contracts and typed schema utilities for Smolt packages.
 
 This package provides:
 
@@ -129,7 +129,7 @@ An adapter implements `TelemetryContext` and bridges the generic API to its back
 - ignore calls made after settlement;
 - ignore a failed recording call atomically, suppress backend failures, and still execute the business callback exactly once.
 
-Adapters may activate backend-native ambient context internally for automatic instrumentation, but smolt code always propagates the parent through `TelemetryContext` arguments. Exporter buffering, flushing, sampling, backend IDs, and backend-specific context objects belong to the adapter. Use the [adapter conformance suite](#adapter-conformance) to check these observable semantics.
+Adapters may activate backend-native ambient context internally for automatic instrumentation, but Smolt code always propagates the parent through `TelemetryContext` arguments. Exporter buffering, flushing, sampling, backend IDs, and backend-specific context objects belong to the adapter. Use the [adapter conformance suite](#adapter-conformance) to check these observable semantics.
 
 ## No-op Context
 
@@ -368,7 +368,7 @@ Package ownership is intentionally split:
 
 - `@smolt/telemetry` owns the vendor-neutral contract, no-op and in-memory reference contexts, schema utilities, and adapter conformance suite;
 - `@smolt/ai` accepts and propagates `telemetryContext` in provider request options but owns no telemetry schema;
-- `@smolt/agent-core` owns and exports the smolt AI-request and harness schemas, their combined readonly schema tuple, and typed span helpers.
+- `@smolt/agent-core` owns and exports the Smolt AI-request and harness schemas, their combined readonly schema tuple, and typed span helpers.
 
 ```typescript
 import {
@@ -380,7 +380,7 @@ import {
 } from '@smolt/agent-core';
 ```
 
-The smolt schemas use smolt-owned `smolt.ai.*`, `smolt.harness.*`, and `smolt.session.*` names. Adapters may translate them to backend conventions without changing the emitted smolt vocabulary.
+The Smolt schemas use smolt-owned `smolt.ai.*`, `smolt.harness.*`, and `smolt.session.*` names. Adapters may translate them to backend conventions without changing the emitted Smolt vocabulary.
 
 ## Security and Portability
 

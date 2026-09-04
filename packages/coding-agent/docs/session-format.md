@@ -14,7 +14,7 @@ Where `<path>` is the working directory with `/` replaced by `-`.
 
 Sessions can be removed by deleting their `.jsonl` files under `~/.smolt/agent/sessions/`.
 
-Smolt also supports deleting sessions interactively from `/resume` (select a session and press `Ctrl+D`, then confirm). When available, smolt uses the `trash` CLI to avoid permanent deletion.
+Smolt also supports deleting sessions interactively from `/resume` (select a session and press `Ctrl+D`, then confirm). When available, Smolt uses the `trash` CLI to avoid permanent deletion.
 
 ## Session Version
 
@@ -117,7 +117,7 @@ interface Usage {
 }
 ```
 
-The exported smolt-ai `StopReason` type also includes `"pending"`, but that value is reserved for partial messages in streaming events. Terminal `done`/`error` messages replace it with a completion reason before smolt persists the assistant message, so `"pending"` should never appear in session JSONL.
+The exported smolt-ai `StopReason` type also includes `"pending"`, but that value is reserved for partial messages in streaming events. Terminal `done`/`error` messages replace it with a completion reason before Smolt persists the assistant message, so `"pending"` should never appear in session JSONL.
 
 ### Extended Message Types (from smolt-coding-agent)
 

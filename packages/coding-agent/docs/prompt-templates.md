@@ -1,4 +1,4 @@
-> smolt can create prompt templates. Ask it to build one for your workflow.
+> Smolt can create prompt templates. Ask it to build one for your workflow.
 
 # Prompt Templates
 

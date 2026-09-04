@@ -58,7 +58,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/reload` | Reload keybindings, extensions, skills, prompts, themes, and context files |
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
-| `/quit` | Quit smolt |
+| `/quit` | Quit Smolt |
 
 ## Message Queue
 
@@ -69,7 +69,7 @@ You can submit messages while the agent is still working:
 - **Escape** aborts and restores queued messages to the editor.
 - **Alt+Up** retrieves queued messages back to the editor.
 
-On Windows Terminal, Alt+Enter is fullscreen by default. Remap it as described in [Terminal setup](terminal-setup.md) if you want smolt to receive the shortcut.
+On Windows Terminal, Alt+Enter is fullscreen by default. Remap it as described in [Terminal setup](terminal-setup.md) if you want Smolt to receive the shortcut.
 
 Configure delivery in [Settings](settings.md) with `steeringMode` and `followUpMode`.
 
@@ -119,9 +119,9 @@ Append to the default prompt without replacing it with `APPEND_SYSTEM.md` in eit
 
 ### Project Trust
 
-On interactive startup, smolt asks before trusting a project folder that contains project-local settings, resources, or project `.agents/skills` and has no saved decision for the folder or a parent folder in `~/.smolt/agent/trust.json`. Trusting a project allows smolt to load `.smolt/settings.json` and `.smolt` resources, install missing project packages, and execute project extensions.
+On interactive startup, Smolt asks before trusting a project folder that contains project-local settings, resources, or project `.agents/skills` and has no saved decision for the folder or a parent folder in `~/.smolt/agent/trust.json`. Trusting a project allows Smolt to load `.smolt/settings.json` and `.smolt` resources, install missing project packages, and execute project extensions.
 
-Before the trust decision, smolt loads only context files, user/global extensions, and CLI `-e` extensions so they can handle the `project_trust` event. Project-local extensions, project package-managed extensions, and project settings are loaded only after the project is trusted. This split also applies when switching to a session from a different cwd whose trust has not been resolved in the current process.
+Before the trust decision, Smolt loads only context files, user/global extensions, and CLI `-e` extensions so they can handle the `project_trust` event. Project-local extensions, project package-managed extensions, and project settings are loaded only after the project is trusted. This split also applies when switching to a session from a different cwd whose trust has not been resolved in the current process.
 
 Non-interactive modes (`-p`, `--mode json`, and `--mode rpc`) do not show a trust prompt. Without an applicable saved trust decision, they use `defaultProjectTrust` from global settings: `ask` (default) and `never` ignore those project resources, while `always` trusts them. Pass `--approve`/`-a` or `--no-approve`/`-na` to override project trust for one run.
 
@@ -129,7 +129,7 @@ If no extension or saved decision applies, `defaultProjectTrust` controls the fa
 
 `smolt config` and package commands use the same project trust flow, except `smolt update` never prompts. Pass `--approve` to trust project-local settings for one command or `--no-approve` to ignore them.
 
-Use `/trust` in interactive mode to save a project trust decision for future sessions, including trust for the immediate parent folder. It writes `~/.smolt/agent/trust.json` only; the current session is not reloaded, so restart smolt for changes to take effect.
+Use `/trust` in interactive mode to save a project trust decision for future sessions, including trust for the immediate parent folder. It writes `~/.smolt/agent/trust.json` only; the current session is not reloaded, so restart Smolt for changes to take effect.
 
 
 ## Exporting and Sharing Sessions
@@ -138,7 +138,7 @@ Use `/export [file]` to write a session to HTML.
 
 Use `/share` to upload a private GitHub gist with a shareable HTML link.
 
-If you use smolt for open source work and want to publish sessions for model, prompt, tool, and evaluation research, see [`badlogic/pi-share-hf`](https://github.com/badlogic/pi-share-hf). It publishes sessions to Hugging Face datasets.
+If you use Smolt for open source work and want to publish sessions for model, prompt, tool, and evaluation research, see [`badlogic/pi-share-hf`](https://github.com/badlogic/pi-share-hf). It publishes sessions to Hugging Face datasets.
 
 ## CLI Reference
 
@@ -162,7 +162,7 @@ smolt list                      # List installed packages
 smolt config                    # Enable/disable package resources
 ```
 
-These commands manage smolt packages and `smolt update` can update the smolt CLI installation. To uninstall smolt itself, see [Quickstart](quickstart.md#uninstall). `smolt config` and project package commands accept `--approve`/`--no-approve` to trust or ignore project-local settings for one command. `smolt update` never prompts for project trust.
+These commands manage Smolt packages and `smolt update` can update the Smolt CLI installation. To uninstall Smolt itself, see [Quickstart](quickstart.md#uninstall). `smolt config` and project package commands accept `--approve`/`--no-approve` to trust or ignore project-local settings for one command. `smolt update` never prompts for project trust.
 
 See [Smolt Packages](packages.md) for package sources and security notes.
 
@@ -176,7 +176,7 @@ See [Smolt Packages](packages.md) for package sources and security notes.
 | `--mode rpc` | RPC mode over stdin/stdout; see [RPC mode](rpc.md) |
 | `--export <in> [out]` | Export a session to HTML |
 
-In print mode, smolt also reads piped stdin and merges it into the initial prompt:
+In print mode, Smolt also reads piped stdin and merges it into the initial prompt:
 
 ```bash
 cat README.md | smolt -p "Summarize this text"
@@ -251,7 +251,7 @@ smolt --no-extensions -e ./my-extension.ts
 | `-h`, `--help` | Show help |
 | `-v`, `--version` | Show version |
 
-In `fullscreen` mode, the transcript scrolls inside the terminal viewport while queued messages, working status, extension widgets, editor, and footer remain fixed at the bottom. Mouse/trackpad input scrolls the region under the pointer; keyboard viewport actions always remain available. Inline images work in terminals that support the Kitty graphics protocol, including Kitty and Ghostty. In iTerm2 they render as text placeholders because its inline-image protocol cannot delete or crop placements during application-owned scrolling. In `regular` mode, smolt uses the main screen and terminal-owned scrollback, and iTerm2 inline images continue to render normally. See [Terminal setup](terminal-setup.md) for terminal-specific settings and workarounds.
+In `fullscreen` mode, the transcript scrolls inside the terminal viewport while queued messages, working status, extension widgets, editor, and footer remain fixed at the bottom. Mouse/trackpad input scrolls the region under the pointer; keyboard viewport actions always remain available. Inline images work in terminals that support the Kitty graphics protocol, including Kitty and Ghostty. In iTerm2 they render as text placeholders because its inline-image protocol cannot delete or crop placements during application-owned scrolling. In `regular` mode, Smolt uses the main screen and terminal-owned scrollback, and iTerm2 inline images continue to render normally. See [Terminal setup](terminal-setup.md) for terminal-specific settings and workarounds.
 
 Set **TUI mode** in `/settings` to switch between `regular` and `fullscreen` immediately and choose the default for future sessions. **Fullscreen exit output** controls whether exiting fullscreen prints the final transcript or restores the previous screen and prints only the session resume hint.
 

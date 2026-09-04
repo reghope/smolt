@@ -19,9 +19,25 @@ function ghJson<T>(args: string[]): T | undefined {
 	}
 }
 
-/** owner/name of the repo in cwd, when there is one on GitHub. */
+/**
+ * owner/name of the repo in cwd, taken from the `origin` remote.
+ *
+ * Deliberately not `gh repo view`: in a fork that resolves to the upstream
+ * parent, so watching a fork reported needing admin on someone else's
+ * repository rather than on the one the reader actually pushes to.
+ */
 export function currentRepo(): string | undefined {
-	return ghJson<{ nameWithOwner?: string }>(["repo", "view", "--json", "nameWithOwner"])?.nameWithOwner;
+	let url: string;
+	try {
+		url = execFileSync("git", ["remote", "get-url", "origin"], {
+			encoding: "utf-8",
+			stdio: ["ignore", "pipe", "ignore"],
+		}).trim();
+	} catch {
+		return undefined;
+	}
+	// https://github.com/owner/name(.git) and git@github.com:owner/name(.git)
+	return /github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?\/?$/.exec(url)?.[1];
 }
 
 /**

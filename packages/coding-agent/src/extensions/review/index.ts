@@ -377,57 +377,40 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 						}
 					}
 				}
-				// Every model is on offer: the review runs here, on this machine,
-				// so a subscription login is as usable as an API key.
-				const providers = [...new Set(ctx.modelRegistry.getAll().map((model) => model.provider))].sort();
-				if (providers.length === 0) {
-					ctx.ui.notify("Smolt has no models available. Log in with /login first.", "error");
-					return;
-				}
-				const provider = await ctx.ui.select("Which provider should reviews run on?", providers);
-				if (provider === undefined) {
-					ctx.ui.notify("Setup cancelled — nothing changed.", "info");
-					return;
-				}
-				const models = ctx.modelRegistry
-					.getAll()
-					.filter((model) => model.provider === provider)
-					.map((model) => model.id)
-					.sort();
-				const model = await ctx.ui.select(`Which ${provider} model?`, models);
-				if (model === undefined) {
-					ctx.ui.notify("Setup cancelled — nothing changed.", "info");
-					return;
-				}
-
+				// No model question: reviews follow the chat model unless the reader
+				// changes it in settings. Asking here made setup longer without
+				// telling anyone anything they did not already have a default for.
 				// Watching only works where GitHub will accept a webhook, so a repo
 				// we cannot watch says so here rather than failing silently later.
 				const repo = currentRepo();
 				let watch = false;
-				if (repo !== undefined) {
-					if (!isAdmin(repo)) {
-						ctx.ui.notify(
-							`Reviewing pull requests as they arrive needs admin on ${repo}, which this account does not have. Run /review <number> by hand instead.`,
-							"info",
-						);
-					} else if (!forwardingAvailable()) {
-						ctx.ui.notify(
-							"Reviewing pull requests as they arrive needs the webhook extension: gh extension install cli/gh-webhook",
-							"info",
-						);
-					} else {
-						watch =
-							(await ctx.ui.confirm(
-								`Review pull requests on ${repo} as they arrive?`,
-								"Smolt holds an outbound connection to GitHub while it runs and reviews each pull request as it opens or gets new commits. It adds a webhook to the repo; nothing listens on your machine.",
-							)) === true;
-					}
+				if (repo === undefined) {
+					ctx.ui.notify(
+						"This folder has no GitHub 'origin' remote, so there are no pull requests to watch.",
+						"info",
+					);
+				} else if (!forwardingAvailable()) {
+					ctx.ui.notify(
+						"Reviewing pull requests as they arrive needs the webhook extension: gh extension install cli/gh-webhook",
+						"info",
+					);
+				} else if (!isAdmin(repo)) {
+					ctx.ui.notify(
+						`Reviewing pull requests as they arrive needs admin on ${repo}, which this account does not have. Run /review <number> by hand instead.`,
+						"info",
+					);
+				} else {
+					watch =
+						(await ctx.ui.confirm(
+							`Review pull requests on ${repo} as they arrive?`,
+							"Smolt holds an outbound connection to GitHub while it runs and reviews each pull request as it opens or gets new commits. It adds a webhook to the repo; nothing listens on your machine.",
+						)) === true;
 				}
-				saveReviewSettings({ model: `${provider}/${model}`, watch });
+				saveReviewSettings({ watch });
 				ctx.ui.notify(
-					`Reviews will run on ${provider}/${model}, and post to pull requests you review. ` +
-						`${watch ? "New pull requests are reviewed as they arrive, while smolt is open. " : ""}` +
-						`At most ${settings.maxFindings ?? DEFAULT_MAX_FINDINGS} findings per comment. Settings live in review.json.`,
+					`Reviews run on ${settings.model ?? "the chat model"} and post to pull requests you review. ` +
+						`${watch ? `New pull requests on ${repo} are reviewed as they arrive, while smolt is open. ` : ""}` +
+						`At most ${settings.maxFindings ?? DEFAULT_MAX_FINDINGS} findings per comment. Change any of it in Settings.`,
 					"info",
 				);
 				return;

@@ -4,6 +4,7 @@ import { Type } from "typebox";
 // tree switches this single line to `from "smolt"`.
 import type { ExtensionAPI, ExtensionContext } from "../../core/extensions/types.ts";
 import { projectStore } from "../../core/project-store.ts";
+import { openBrowser } from "../../utils/open-browser.ts";
 import { DEFAULT_MAX_FINDINGS, loadReviewSettings, type ReviewSettings, saveReviewSettings } from "./config.ts";
 import { clearToken, connectedAccount, logIn } from "./github-login.ts";
 import {
@@ -361,16 +362,22 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 					);
 					if (connect) {
 						try {
-							const login = await logIn(
-								(prompt) =>
-									ctx.ui.notify(
-										`Enter code ${prompt.userCode} at ${prompt.verificationUri} to connect GitHub.`,
-										"info",
-									),
-								new AbortController().signal,
-							);
+							const login = await logIn((prompt) => {
+								// GitHub has no way to prefill the code, so the reader has to
+								// type it: open the page for them and keep the code on screen
+								// in the status line, since a notification scrolls away while
+								// they are still looking at the browser.
+								openBrowser(prompt.verificationUri);
+								ctx.ui.setStatus("review-login", `GitHub code ${prompt.userCode}`);
+								ctx.ui.notify(
+									`Enter code ${prompt.userCode} at ${prompt.verificationUri} — the browser should have opened.`,
+									"info",
+								);
+							}, new AbortController().signal);
+							ctx.ui.setStatus("review-login", undefined);
 							ctx.ui.notify(`Connected to GitHub as ${login}.`, "info");
 						} catch (error) {
+							ctx.ui.setStatus("review-login", undefined);
 							ctx.ui.notify(`GitHub login failed: ${error instanceof Error ? error.message : error}`, "error");
 						}
 					}

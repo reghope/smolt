@@ -2,7 +2,7 @@ import type { Api, Model } from "@smolt/ai";
 import { Type } from "typebox";
 // Type-only import: a standalone install of this module outside the smolt
 // tree switches this single line to `from "smolt"`.
-import type { ExtensionAPI } from "../../core/extensions/types.ts";
+import type { ExtensionAPI, ExtensionContext } from "../../core/extensions/types.ts";
 import { projectStore } from "../../core/project-store.ts";
 import { DEFAULT_MAX_FINDINGS, loadReviewSettings, type ReviewSettings, saveReviewSettings } from "./config.ts";
 import {
@@ -106,6 +106,7 @@ Then show me the review here in chat: findings grouped by severity, each as file
 export default function reviewExtension(smolt: ExtensionAPI): void {
 	const store = new ReviewStore(reviewRoot());
 	let stopWatching: (() => void) | undefined;
+	let sessionCtx: ExtensionContext | undefined;
 
 	smolt.registerTool({
 		name: "review",
@@ -122,8 +123,13 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 			"the same problem open; 'update_finding' (finding, status open/fixed/wont-fix/stale, review?) — " +
 			"mark standing findings 'fixed' when the code shows them gone; 'complete' (summary, review?) " +
 			"closes the review.\n\n" +
+			"SETTINGS: 'settings' reports how reviews are configured here and whether this repo can be " +
+			"watched; 'configure' (model?, post?, watch?) changes it and starts or stops watching " +
+			"immediately.\n\n" +
 			"WHEN: driving a /review lap, when the user asks what past reviews found, or when fixing " +
-			"findings — mark them 'fixed' as they are dealt with.",
+			"findings — mark them 'fixed' as they are dealt with. Also when the user asks in plain words " +
+			"for automatic or CodeRabbit-style reviews on their pull requests: call 'settings' to see " +
+			"where things stand, then 'configure' to turn it on, rather than telling them to run a command.",
 		parameters: Type.Object({
 			action: Type.Union(
 				[
@@ -134,8 +140,29 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 					Type.Literal("add_finding"),
 					Type.Literal("update_finding"),
 					Type.Literal("complete"),
+					Type.Literal("settings"),
+					Type.Literal("configure"),
 				],
 				{ description: "Operation to perform" },
+			),
+			model: Type.Optional(
+				Type.String({
+					description:
+						"For 'configure': 'provider/id' of the model reviews run on, e.g. 'anthropic/claude-sonnet-4'. " +
+						"Omit to leave it as it is.",
+				}),
+			),
+			post: Type.Optional(
+				Type.Boolean({
+					description: "For 'configure': naming a pull request posts the review to it as a comment.",
+				}),
+			),
+			watch: Type.Optional(
+				Type.Boolean({
+					description:
+						"For 'configure': review pull requests on this repo as they arrive, while smolt runs. " +
+						"Needs admin on the repo.",
+				}),
 			),
 			review: Type.Optional(Type.String({ description: "Review slug. Omit to mean the latest review." })),
 			finding: Type.Optional(Type.String({ description: "Finding slug (view_finding, update_finding)" })),
@@ -174,8 +201,46 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 			),
 		}),
 		async execute(_toolCallId, params) {
+			const reply = (value: unknown) => ({
+				content: [{ type: "text" as const, text: JSON.stringify(value) }],
+				details: {},
+			});
+			if (params.action === "settings" || params.action === "configure") {
+				const repo = currentRepo();
+				if (params.action === "configure") {
+					const update: ReviewSettings = {};
+					if (typeof params.model === "string") {
+						const slash = params.model.indexOf("/");
+						const found =
+							slash > 0
+								? sessionCtx?.modelRegistry.find(params.model.slice(0, slash), params.model.slice(slash + 1))
+								: undefined;
+						if (found === undefined) return reply({ error: `No such model: ${params.model}` });
+						update.model = params.model;
+					}
+					if (typeof params.post === "boolean") update.post = params.post;
+					if (typeof params.watch === "boolean") update.watch = params.watch;
+					saveReviewSettings(update);
+					if (params.watch === false) {
+						stopWatching?.();
+						stopWatching = undefined;
+					}
+				}
+				const settings = loadReviewSettings(process.cwd());
+				const watching = sessionCtx ? beginWatching(sessionCtx) : "no session yet";
+				return reply({
+					model: settings.model ?? "the session's own model",
+					postsToPullRequests: settings.post !== false,
+					watch: settings.watch === true,
+					maxFindings: settings.maxFindings ?? DEFAULT_MAX_FINDINGS,
+					repo: repo ?? "not a GitHub repo",
+					admin: repo === undefined ? false : isAdmin(repo),
+					forwardingInstalled: forwardingAvailable(),
+					watching,
+				});
+			}
 			const result = reviewTool(store, params);
-			return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: {} };
+			return reply(result);
 		},
 	});
 
@@ -206,7 +271,29 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 		drain();
 	});
 
+	// Kept so the tool can start watching the moment it is configured, rather
+	// than making the reader restart to get what they just asked for.
+	const beginWatching = (ctx: ExtensionContext): string => {
+		if (stopWatching !== undefined) return "already watching";
+		if (loadReviewSettings(process.cwd()).watch !== true) return "watching is off";
+		const repo = currentRepo();
+		if (repo === undefined) return "this folder is not a GitHub repo";
+		if (!forwardingAvailable()) return "needs: gh extension install cli/gh-webhook";
+		if (!isAdmin(repo)) return `needs admin on ${repo}`;
+		stopWatching = startWatching(repo, {
+			review: (event) => {
+				ctx.ui.notify(`Reviewing pull request #${event.number}: ${event.title}`, "info");
+				pending.push(event.number);
+				drain();
+			},
+			notice: (message, kind) => ctx.ui.notify(message, kind),
+		});
+		ctx.ui.setStatus("review-watch", `watching ${repo}`);
+		return `watching ${repo}`;
+	};
+
 	smolt.on("session_start", async (_event, ctx) => {
+		sessionCtx = ctx;
 		if (loadReviewSettings(process.cwd()).watch !== true) return;
 		const repo = currentRepo();
 		if (repo === undefined) return;

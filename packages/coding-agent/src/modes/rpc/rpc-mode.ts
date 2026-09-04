@@ -756,6 +756,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					...(settings.model ? { model: settings.model } : {}),
 					maxFindings: settings.maxFindings ?? DEFAULT_MAX_FINDINGS,
 					watchRepos: settings.watchRepos ?? [],
+					watch: settings.watch === true,
 					autoFix: settings.autoFix === true,
 				});
 			}
@@ -792,6 +793,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					update.maxFindings = max;
 				}
 				if (command.settings.watchRepos !== undefined) update.watchRepos = command.settings.watchRepos;
+				if (command.settings.watch !== undefined) update.watch = command.settings.watch;
 				if (command.settings.autoFix !== undefined) update.autoFix = command.settings.autoFix;
 				saveReviewSettings(update);
 				return success(id, "set_review_settings");

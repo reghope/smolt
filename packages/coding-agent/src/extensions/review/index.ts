@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import type { Api, Model } from "@smolt/ai";
 import { Type } from "typebox";
 // Type-only import: a standalone install of this module outside the smolt
@@ -6,7 +7,13 @@ import type { ExtensionAPI, ExtensionContext } from "../../core/extensions/types
 import { projectStore } from "../../core/project-store.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
 import { spawnChildSession } from "../battletest/spawn.ts";
-import { DEFAULT_MAX_FINDINGS, loadReviewSettings, type ReviewSettings, saveReviewSettings } from "./config.ts";
+import {
+	DEFAULT_MAX_FINDINGS,
+	loadReviewSettings,
+	type ReviewSettings,
+	reviewSettingsFile,
+	saveReviewSettings,
+} from "./config.ts";
 import { ACCESS_URL, awaitApproval, clearToken, connectedAccount, requestDeviceCode } from "./github-login.ts";
 import {
 	FINDING_CATEGORIES,
@@ -184,7 +191,7 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 			"mark standing findings 'fixed' when the code shows them gone; 'complete' (summary, review?) " +
 			"closes the review.\n\n" +
 			"SETTINGS: 'settings' reports how reviews are configured here and whether this repo can be " +
-			"watched; 'configure' (model?, watchRepos?, autoFix?) changes it and starts or stops watching " +
+			"watched; 'configure' (model?, watchRepos?, watch?, autoFix?) changes it and starts or stops watching " +
 			"immediately. autoFix is off unless the user asks for it: with it on, a finished review hands its " +
 			"findings to a hidden background session that fixes them in the working tree.\n\n" +
 			"WHEN: driving a /review lap, when the user asks what past reviews found, or when fixing " +
@@ -216,8 +223,15 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 			watchRepos: Type.Optional(
 				Type.Array(Type.String(), {
 					description:
-						"For 'configure': repos as 'owner/name' whose pull requests are reviewed as they arrive while " +
+						"For 'configure': repos as 'owner/name' that may be watched. Watching also needs 'watch' on. " +
 						"smolt runs. Needs admin on each. Pass [] to stop watching.",
+				}),
+			),
+			watch: Type.Optional(
+				Type.Boolean({
+					description:
+						"For 'configure': whether pull requests on the watched repos are reviewed as they arrive " +
+						"while smolt runs. Off by default.",
 				}),
 			),
 			autoFix: Type.Optional(
@@ -282,6 +296,7 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 						update.model = params.model;
 					}
 					if (Array.isArray(params.watchRepos)) update.watchRepos = params.watchRepos;
+					if (typeof params.watch === "boolean") update.watch = params.watch;
 					if (typeof params.autoFix === "boolean") update.autoFix = params.autoFix;
 					saveReviewSettings(update);
 				}
@@ -295,6 +310,7 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 					githubAccount: (await connectedAccount()) ?? "not connected — tell the user to run /review setup",
 					model: settings.model ?? "the session's own model",
 					watchRepos: settings.watchRepos ?? [],
+					watch: settings.watch === true,
 					maxFindings: settings.maxFindings ?? DEFAULT_MAX_FINDINGS,
 					autoFix: settings.autoFix === true,
 					repo: repo ?? "not a GitHub repo",
@@ -363,13 +379,21 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 		});
 	};
 
-	smolt.on("agent_settled", async () => {
+	smolt.on("agent_settled", async (_event, ctx) => {
+		// Every event carries the live context, and the captured one goes stale the
+		// moment the session is replaced or reloaded — after which using it throws.
+		// The watcher reaches for this context minutes or hours after session_start,
+		// so it is refreshed here rather than only in the command handler.
+		sessionCtx = ctx;
 		const previous = restoreModel;
 		restoreModel = undefined;
 		if (previous) await smolt.setModel(previous);
 		const startedAt = reviewing;
 		reviewing = undefined;
-		if (startedAt !== undefined) await autoFix(startedAt);
+		// Not awaited: the fixer is a background chat, and agent_settled is awaited
+		// before the session counts as settled, so waiting here kept the session
+		// visibly busy for the whole fix and held a headless run open.
+		if (startedAt !== undefined) void autoFix(startedAt);
 		await drain();
 	});
 
@@ -380,6 +404,7 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 	/** What watching is doing right now, said without disturbing it. */
 	const describeWatching = (settings: ReviewSettings): string => {
 		const repos = settings.watchRepos ?? [];
+		if (settings.watch !== true) return "off";
 		if (repos.length === 0) return "not watching anything";
 		if (stopWatching === undefined) return `configured to watch ${repos.join(", ")}, not started yet`;
 		return `watching ${repos.join(", ")}`;
@@ -427,30 +452,68 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 		stopWatching?.();
 		stopWatching = undefined;
 		ctx.ui.setStatus("review-watch", undefined);
-		const repos = loadReviewSettings(process.cwd()).watchRepos ?? [];
+		const settings = loadReviewSettings(process.cwd());
+		const repos = settings.watchRepos ?? [];
+		if (settings.watch !== true) return "off";
 		if (repos.length === 0) return "not watching anything";
 		if (!forwardingAvailable()) return "needs: gh extension install cli/gh-webhook";
+		// These run inside the forwarder's stdout listener, where a throw is an
+		// uncaught exception that takes the session with it. They speak through
+		// whichever context is current rather than the one captured here, because
+		// this one is stale as soon as the session is replaced or reloaded.
+		const say = (message: string, kind: "info" | "warning"): void => {
+			try {
+				sessionCtx?.ui.notify(message, kind);
+			} catch {
+				// a context that has outlived its session says nothing; the review still runs
+			}
+		};
 		stopWatching = watchAll(repos, {
 			review: (event) => {
-				ctx.ui.notify(`Reviewing ${event.repo} #${event.number}: ${event.title}`, "info");
+				say(`Reviewing ${event.repo} #${event.number}: ${event.title}`, "info");
 				pending.push({ number: event.number, repo: event.repo });
-				drain();
+				void drain().catch(() => undefined);
 			},
-			notice: (message, kind) => ctx.ui.notify(message, kind),
+			notice: (message, kind) => say(message, kind),
 		});
 		const label = repos.length === 1 ? repos[0] : `${repos.length} repos`;
 		ctx.ui.setStatus("review-watch", `watching ${label}`);
 		return `watching ${repos.join(", ")}`;
 	};
 
+	// The settings file is watched so the toggle in the desktop settings page
+	// takes effect at once. That page writes review.json from the RPC process
+	// and has no way to reach into this extension, so without this a reader who
+	// turned watching on would see nothing happen until the next launch.
+	let stopSettingsWatch: (() => void) | undefined;
+	const followSettings = (ctx: ExtensionContext): void => {
+		let last =
+			JSON.stringify(loadReviewSettings(process.cwd()).watchRepos ?? []) + loadReviewSettings(process.cwd()).watch;
+		try {
+			const watcher = fs.watch(reviewSettingsFile(), () => {
+				const settings = loadReviewSettings(process.cwd());
+				const next = JSON.stringify(settings.watchRepos ?? []) + settings.watch;
+				if (next === last) return;
+				last = next;
+				beginWatching(ctx);
+			});
+			stopSettingsWatch = () => watcher.close();
+		} catch {
+			// no settings file yet: nothing to follow, and setup restarts watching itself
+		}
+	};
+
 	smolt.on("session_start", async (_event, ctx) => {
 		sessionCtx = ctx;
 		beginWatching(ctx);
+		followSettings(ctx);
 	});
 
 	smolt.on("session_shutdown", async () => {
 		stopWatching?.();
 		stopWatching = undefined;
+		stopSettingsWatch?.();
+		stopSettingsWatch = undefined;
 	});
 
 	smolt.registerCommand("review", {
@@ -580,14 +643,12 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 				// Only repos GitHub will accept a webhook on are offered, so nobody
 				// picks one that then silently never works. The repo open here sorts
 				// first, since it is what the reader is almost always after.
-				// Asked before the repo list, not after it: this is a question about
-				// what a review may do, and the answer holds whether anything is watched.
-				saveReviewSettings({
-					autoFix: await ctx.ui.confirm(
-						"Fix what a review finds?",
-						"Off by default. With it on, a finished review hands its findings to a hidden background session that fixes them in your working tree and reports what it changed. It never commits or pushes.",
-					),
-				});
+				// Asked before the repo list, but written after it: cancelling the picker
+				// says nothing changed, and nothing may change.
+				const autoFixAnswer = await ctx.ui.confirm(
+					"Fix what a review finds?",
+					"Off by default. With it on, a finished review hands its findings to a hidden background session that fixes them in your working tree and reports what it changed. It never commits or pushes.",
+				);
 				const here = currentRepo();
 				const candidates = adminRepos().sort((a, b) => (a === here ? -1 : b === here ? 1 : 0));
 				if (candidates.length === 0) {
@@ -623,11 +684,12 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 					ctx.ui.notify("Setup cancelled — nothing changed.", "info");
 					return;
 				}
-				saveReviewSettings({ watchRepos: chosen });
+				saveReviewSettings({ watchRepos: chosen, watch: chosen.length > 0, autoFix: autoFixAnswer });
 				const state = sessionCtx ? beginWatching(sessionCtx) : "not watching yet";
 				ctx.ui.notify(
 					`Reviews run on ${settings.model ?? "the chat model"}, post to the pull request, and list at most ` +
 						`${settings.maxFindings ?? DEFAULT_MAX_FINDINGS} findings. Now ${state}. ` +
+						"Commenting '@smolt review' on a pull request asks for one by hand. " +
 						"A pull request on a repo you do not have open here is cloned to a temporary folder, so its review still reads the code around the diff.",
 					"info",
 				);

@@ -130,6 +130,8 @@ export interface RpcReviewSettings {
 	maxFindings: number;
 	/** Repos, as "owner/name", whose pull requests are reviewed as they arrive. */
 	watchRepos: string[];
+	/** Whether those repos are watched at all. Off until setup turns it on. */
+	watch: boolean;
 	/** Whether a finished review hands its findings to a hidden chat that fixes them. */
 	autoFix: boolean;
 }
@@ -140,6 +142,7 @@ export interface RpcReviewSettingsUpdate {
 	model?: string | null;
 	maxFindings?: number;
 	watchRepos?: string[];
+	watch?: boolean;
 	autoFix?: boolean;
 }
 

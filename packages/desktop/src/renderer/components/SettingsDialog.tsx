@@ -58,6 +58,7 @@ interface ReviewSettingsView {
 	model?: string;
 	maxFindings: number;
 	watchRepos: string[];
+	watch: boolean;
 	autoFix: boolean;
 }
 
@@ -367,7 +368,7 @@ export function SettingsDialog() {
 	const [modelFilter, setModelFilter] = useState("");
 	const [extensions, setExtensions] = useState<ExtensionInfo[]>([]);
 	const [advisorModel, setAdvisorModel] = useState<string>(ADVISOR_FOLLOWS_CHAT);
-	const [review, setReview] = useState<ReviewSettingsView>({ maxFindings: 15, watchRepos: [], autoFix: false });
+	const [review, setReview] = useState<ReviewSettingsView>({ maxFindings: 15, watchRepos: [], watch: false, autoFix: false });
 	const [name, setName] = useState(state.sessionName);
 	const activeModelRef = useRef<HTMLButtonElement | null>(null);
 
@@ -710,6 +711,20 @@ export function SettingsDialog() {
 												))}
 											</SelectContent>
 										</Select>
+									</Row>
+								)}
+								{matches(query, "review watch pull requests arrive automatic github enable") && (
+									<Row
+										label="Review pull requests automatically"
+										hint="While smolt is running, pull requests opened or updated on the watched repositories are reviewed as they arrive. Commenting @smolt review on one asks for a review by hand."
+									>
+										<Switch
+											checked={review.watch}
+											onCheckedChange={async (next) => {
+												setReview((current) => ({ ...current, watch: next }));
+												await call("setReviewSettings", { watch: next });
+											}}
+										/>
 									</Row>
 								)}
 								{matches(query, "review watch pull requests arrive automatic github repos") && (

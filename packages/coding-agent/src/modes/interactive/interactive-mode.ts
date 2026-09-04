@@ -4635,6 +4635,7 @@ export class InteractiveMode {
 					showCacheMissNotices: this.settingsManager.getShowCacheMissNotices(),
 					showHiddenChats: this.settingsManager.getShowHiddenChats(),
 					reviewAutoFix: loadReviewSettings(this.sessionManager.getCwd()).autoFix === true,
+					reviewWatch: loadReviewSettings(this.sessionManager.getCwd()).watch === true,
 					defaultProjectTrust: this.settingsManager.getDefaultProjectTrust(),
 					editorPaddingX: this.settingsManager.getEditorPaddingX(),
 					outputPad: this.settingsManager.getOutputPad(),
@@ -4742,6 +4743,9 @@ export class InteractiveMode {
 					// this is where people look for a switch, not because it lives here.
 					onReviewAutoFixChange: (enabled) => {
 						saveReviewSettings({ autoFix: enabled });
+					},
+					onReviewWatchChange: (enabled) => {
+						saveReviewSettings({ watch: enabled });
 					},
 					onCollapseChangelogChange: (collapsed) => {
 						this.settingsManager.setCollapseChangelog(collapsed);

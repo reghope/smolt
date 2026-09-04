@@ -71,6 +71,7 @@ export interface SettingsConfig {
 	showCacheMissNotices: boolean;
 	showHiddenChats: boolean;
 	reviewAutoFix: boolean;
+	reviewWatch: boolean;
 	collapseChangelog: boolean;
 	enableInstallTelemetry: boolean;
 	doubleEscapeAction: "fork" | "tree" | "none";
@@ -110,6 +111,7 @@ export interface SettingsCallbacks {
 	onShowCacheMissNoticesChange: (shown: boolean) => void;
 	onShowHiddenChatsChange: (shown: boolean) => void;
 	onReviewAutoFixChange: (enabled: boolean) => void;
+	onReviewWatchChange: (enabled: boolean) => void;
 	onCollapseChangelogChange: (collapsed: boolean) => void;
 	onEnableInstallTelemetryChange: (enabled: boolean) => void;
 	onDoubleEscapeActionChange: (action: "fork" | "tree" | "none") => void;
@@ -525,6 +527,14 @@ export class SettingsSelectorComponent extends Container {
 				values: ["true", "false"],
 			},
 			{
+				id: "review-watch",
+				label: "Review pull requests automatically",
+				description:
+					"While smolt runs, review pull requests as they arrive, or when someone comments @smolt review",
+				currentValue: config.reviewWatch ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
 				id: "review-autofix",
 				label: "Fix what a review finds",
 				description:
@@ -889,6 +899,9 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "show-hidden-chats":
 						callbacks.onShowHiddenChatsChange(newValue === "true");
+						break;
+					case "review-watch":
+						callbacks.onReviewWatchChange(newValue === "true");
 						break;
 					case "review-autofix":
 						callbacks.onReviewAutoFixChange(newValue === "true");

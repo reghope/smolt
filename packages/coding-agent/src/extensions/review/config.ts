@@ -26,6 +26,11 @@ export interface ReviewSettings {
 	 */
 	watchRepos?: string[];
 	/**
+	 * Whether those repos are actually watched. Off until setup turns it on, so
+	 * a leftover repo list never starts a forwarder the reader did not ask for.
+	 */
+	watch?: boolean;
+	/**
 	 * Whether a finished review hands its findings to a hidden session that
 	 * fixes them. Off unless the reader turns it on: a review that edits code
 	 * on its own is a bigger promise than a review that reports.
@@ -70,6 +75,7 @@ export function loadReviewSettings(cwd: string): ReviewSettings {
 			}
 			if (file !== userFile) continue;
 			if (typeof parsed.autoFix === "boolean") settings.autoFix = parsed.autoFix;
+			if (typeof parsed.watch === "boolean") settings.watch = parsed.watch;
 			if (Array.isArray(parsed.watchRepos)) {
 				settings.watchRepos = parsed.watchRepos.filter((repo): repo is string => typeof repo === "string");
 			}

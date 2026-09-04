@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api } from "../lib/api.ts";
+import { api, type WebServerState } from "../lib/api.ts";
 import { cn } from "../lib/cn.ts";
 import {
 	afterWorktreeChange,
@@ -16,7 +16,10 @@ import {
 	ensureThinkingLevels,
 	installUpdate,
 	refreshState,
+	setEnterSendsQueued,
 	setSidebarShowAll,
+	setSidebarDots,
+	setLanguage,
 	requestConfirm,
 	requestInput,
 	setDefaultThinking,
@@ -27,20 +30,36 @@ import {
 import { AUTO_THINKING_ENTRY, thinkingLabel } from "../thinking.ts";
 import { useApp } from "../state/useApp.ts";
 import { Button } from "./ui/button.tsx";
+import { Tip } from "./ui/tooltip.tsx";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog.tsx";
 import { Icon } from "./ui/icon.tsx";
 import { Input } from "./ui/input.tsx";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select.tsx";
 import { Switch } from "./ui/switch.tsx";
+import { ProvidersSection } from "./ProvidersSection.tsx";
 
 const SECTIONS = [
-	{ id: "general", label: "General", group: "Session", icon: "settings" },
+	{ id: "general", label: "General", group: "Session", icon: "cog" },
+	{ id: "providers", label: "Providers", group: "Session", icon: "key" },
 	{ id: "model", label: "Model", group: "Session", icon: "model" },
 	{ id: "extensions", label: "Extensions", group: "App", icon: "extension" },
 	{ id: "appearance", label: "Appearance", group: "App", icon: "appearance" },
+	{ id: "customise", label: "Customise", group: "App", icon: "cog" },
 	{ id: "about", label: "About", group: "App", icon: "info" },
 ] as const;
 
 type SectionId = (typeof SECTIONS)[number]["id"];
+
+/** The advisor-model choice meaning "whatever answers in this chat"; Radix items cannot carry "". */
+const ADVISOR_FOLLOWS_CHAT = "__chat__";
+
+/** What the settings page shows for review.json, with its defaults filled in. */
+interface ReviewSettingsView {
+	model?: string;
+	maxFindings: number;
+	watchRepos: string[];
+	autoFix: boolean;
+}
 
 /**
  * One setting: what it is on the left, the control that changes it on the
@@ -172,6 +191,43 @@ function matches(query: string, haystack: string): boolean {
 	return query === "" || haystack.toLowerCase().includes(query.toLowerCase());
 }
 
+/**
+ * The app in a browser. The switch starts and stops the server in the main
+ * process; the hint says where to open it, or why it could not start.
+ */
+function WebServerSection() {
+	const [web, setWeb] = useState<WebServerState | null>(null);
+	const [busy, setBusy] = useState(false);
+	useEffect(() => {
+		api.webServer()
+			.then(setWeb)
+			.catch(() => setWeb(null));
+	}, []);
+	const idle = "Open this app in a browser on this machine and your Tailscale network";
+	const hint =
+		web === null
+			? idle
+			: web.running
+				? `Open ${web.urls.join(" or ")}${web.https ? "" : " — HTTP only (openssl not found), so dictation is off"}`
+				: (web.error ?? idle);
+	return (
+		<Row label="Local web server" hint={hint}>
+			<Switch
+				checked={web?.enabled ?? false}
+				disabled={busy || web === null}
+				onCheckedChange={async (next) => {
+					setBusy(true);
+					try {
+						setWeb(await api.setWebServer(next));
+					} finally {
+						setBusy(false);
+					}
+				}}
+			/>
+		</Row>
+	);
+}
+
 function WorktreeSection() {
 	const state = useApp();
 	const [info, setInfo] = useState<WorktreeInfo | null>(null);
@@ -187,75 +243,17 @@ function WorktreeSection() {
 		return <Row label="Worktrees" hint="This folder is not a git repository, so sessions cannot be isolated." />;
 	}
 	return (
-		<Block
-			label="Worktrees"
-			hint={
-				info.isolated
-					? "This session is running in its own worktree; the repository is untouched."
-					: "The agent is working directly in the repository."
-			}
-		>
-			{(info.worktrees ?? []).length > 0 && (
-				<div className="flex flex-col gap-0.5">
-					{(info.worktrees ?? []).map((worktree) => (
-						<div key={worktree.path} className="flex items-center gap-1">
-							<button
-								type="button"
-								className={cn(
-									"flex h-8 min-w-0 flex-1 items-center justify-between gap-2 rounded-lg px-3 text-sm transition-colors hover:bg-accent",
-									worktree.path === info.activeCwd && "bg-accent",
-								)}
-								onClick={async () => {
-									const result = await api.worktreeEnter(worktree.path);
-									if (!result.ok) {
-										toast(result.error ?? "Could not switch worktree", "error");
-										return;
-									}
-									await afterWorktreeChange();
-									await reload();
-								}}
-							>
-								<span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{worktree.name}</span>
-								<em className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-xs not-italic text-faint">
-									{worktree.branch}
-								</em>
-							</button>
-							<Button
-								variant="ghost"
-								size="icon"
-								className="size-7"
-								title="Remove this worktree"
-								onClick={async () => {
-									const sure = await requestConfirm({
-										title: "Remove worktree?",
-										message: `The worktree at ${worktree.path} will be removed. Its branch is kept.`,
-										actionLabel: "Remove",
-										destructive: true,
-									});
-									if (!sure) return;
-									let result = await api.worktreeRemove(worktree.path);
-									if (!result.ok && /uncommitted/i.test(result.error ?? "")) {
-										const discard = await requestConfirm({
-											title: "Discard changes?",
-											message: `${result.error} Discard those changes and remove it anyway?`,
-											actionLabel: "Discard and remove",
-											destructive: true,
-										});
-										if (!discard) return;
-										result = await api.worktreeRemove(worktree.path, true);
-									}
-									if (!result.ok) toast(result.error ?? "Could not remove the worktree", "error");
-									await afterWorktreeChange();
-									await reload();
-								}}
-							>
-								<Icon name="trash" />
-							</Button>
-						</div>
-					))}
+		<div className="flex flex-col gap-3 border-b border-border/50 py-4 last:border-b-0">
+			<div className="flex items-center justify-between gap-8">
+				<div className="flex min-w-0 flex-col gap-1">
+					<span className="text-sm leading-snug">Worktrees</span>
+					<span className="text-xs leading-relaxed text-faint">
+						{info.isolated
+							? "This session is running in its own worktree; the repository is untouched."
+							: "The agent is working directly in the repository."}
+					</span>
 				</div>
-			)}
-			<div className="flex flex-wrap gap-2">
+				<div className="flex flex-none flex-wrap justify-end gap-1.5">
 				<Button
 					variant="outline"
 					size="sm"
@@ -295,7 +293,70 @@ function WorktreeSection() {
 					</Button>
 				)}
 			</div>
-		</Block>
+			</div>
+			{(info.worktrees ?? []).length > 0 && (
+				<div className="flex flex-col gap-0.5">
+					{(info.worktrees ?? []).map((worktree) => (
+						<div key={worktree.path} className="flex items-center gap-1">
+							<button
+								type="button"
+								className={cn(
+									"flex h-8 min-w-0 flex-1 items-center justify-between gap-2 rounded-lg px-3 text-sm transition-colors hover:bg-accent",
+									worktree.path === info.activeCwd && "bg-accent",
+								)}
+								onClick={async () => {
+									const result = await api.worktreeEnter(worktree.path);
+									if (!result.ok) {
+										toast(result.error ?? "Could not switch worktree", "error");
+										return;
+									}
+									await afterWorktreeChange();
+									await reload();
+								}}
+							>
+								<span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{worktree.name}</span>
+								<em className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-xs not-italic text-faint">
+									{worktree.branch}
+								</em>
+							</button>
+							<Tip label="Remove this worktree">
+							<Button
+								variant="ghost"
+								size="icon"
+								className="size-7"
+								aria-label="Remove this worktree"
+								onClick={async () => {
+									const sure = await requestConfirm({
+										title: "Remove worktree?",
+										message: `The worktree at ${worktree.path} will be removed. Its branch is kept.`,
+										actionLabel: "Remove",
+										destructive: true,
+									});
+									if (!sure) return;
+									let result = await api.worktreeRemove(worktree.path);
+									if (!result.ok && /uncommitted/i.test(result.error ?? "")) {
+										const discard = await requestConfirm({
+											title: "Discard changes?",
+											message: `${result.error} Discard those changes and remove it anyway?`,
+											actionLabel: "Discard and remove",
+											destructive: true,
+										});
+										if (!discard) return;
+										result = await api.worktreeRemove(worktree.path, true);
+									}
+									if (!result.ok) toast(result.error ?? "Could not remove the worktree", "error");
+									await afterWorktreeChange();
+									await reload();
+								}}
+							>
+								<Icon name="trash" />
+							</Button>
+							</Tip>
+						</div>
+					))}
+				</div>
+			)}
+		</div>
 	);
 }
 
@@ -305,6 +366,8 @@ export function SettingsDialog() {
 	const [query, setQuery] = useState("");
 	const [modelFilter, setModelFilter] = useState("");
 	const [extensions, setExtensions] = useState<ExtensionInfo[]>([]);
+	const [advisorModel, setAdvisorModel] = useState<string>(ADVISOR_FOLLOWS_CHAT);
+	const [review, setReview] = useState<ReviewSettingsView>({ maxFindings: 15, watchRepos: [], autoFix: false });
 	const [name, setName] = useState(state.sessionName);
 	const activeModelRef = useRef<HTMLButtonElement | null>(null);
 
@@ -312,10 +375,21 @@ export function SettingsDialog() {
 		if (!state.settingsOpen) return;
 		setName(app.sessionName);
 		setQuery("");
+		// Somewhere else asked for a particular page (the model picker sending
+		// the reader to Providers, say): land there, then forget the request.
+		const requested = app.settingsSection;
+		if (requested !== null && SECTIONS.some((entry) => entry.id === requested)) setSection(requested as SectionId);
+		app.settingsSection = null;
 		void ensureModels();
 		void ensureThinkingLevels();
 		void call<{ extensions: ExtensionInfo[] }>("listExtensions").then((result) => {
 			if (result) setExtensions(result.extensions);
+		});
+		void call<{ model?: string }>("getAdvisorSettings").then((result) => {
+			setAdvisorModel(result?.model ?? ADVISOR_FOLLOWS_CHAT);
+		});
+		void call<ReviewSettingsView>("getReviewSettings").then((result) => {
+			if (result) setReview(result);
 		});
 	}, [state.settingsOpen]);
 
@@ -337,7 +411,7 @@ export function SettingsDialog() {
 	);
 
 	const modelKey = (option: { provider: string; id: string }): string => `${option.provider}/${option.id}`;
-	// The ten most-picked models lead the list. With a filter typed the reader
+	// The five most-picked models lead the list. With a filter typed the reader
 	// is looking for something specific, so the search beats habit and the list
 	// goes back to being one flat set of matches.
 	const frequentModels =
@@ -345,10 +419,36 @@ export function SettingsDialog() {
 			? [...state.availableModels]
 					.filter((option) => (state.modelUse[modelKey(option)] ?? 0) > 0)
 					.sort((a, b) => (state.modelUse[modelKey(b)] ?? 0) - (state.modelUse[modelKey(a)] ?? 0))
-					.slice(0, 10)
+					.slice(0, 5)
 			: [];
 	const frequentKeys = new Set(frequentModels.map(modelKey));
 	const otherModels = filteredModels.filter((option) => !frequentKeys.has(modelKey(option)));
+
+	// A model the advisor was set to on another machine, or from a provider
+	// since removed, still shows so the reader can see it and change it.
+	const advisorChoices =
+		advisorModel === ADVISOR_FOLLOWS_CHAT || state.availableModels.some((option) => modelKey(option) === advisorModel)
+			? state.availableModels
+			: [
+					...state.availableModels,
+					{
+						provider: advisorModel.slice(0, advisorModel.indexOf("/")),
+						id: advisorModel.slice(advisorModel.indexOf("/") + 1),
+					},
+				];
+
+	const reviewModel = review.model ?? ADVISOR_FOLLOWS_CHAT;
+	// As with the advisor: a model set elsewhere still shows, so it can be changed.
+	const reviewChoices =
+		reviewModel === ADVISOR_FOLLOWS_CHAT || state.availableModels.some((option) => modelKey(option) === reviewModel)
+			? state.availableModels
+			: [
+					...state.availableModels,
+					{
+						provider: reviewModel.slice(0, reviewModel.indexOf("/")),
+						id: reviewModel.slice(reviewModel.indexOf("/") + 1),
+					},
+				];
 
 	const renderModel = (option: (typeof state.availableModels)[number]) => (
 		<button
@@ -356,7 +456,7 @@ export function SettingsDialog() {
 			key={modelKey(option)}
 			ref={modelKey(option) === state.model ? activeModelRef : undefined}
 			className={cn(
-				"flex h-9 flex-none items-baseline justify-between gap-2.5 rounded-lg px-3 text-left text-sm transition-colors hover:bg-accent",
+				"flex h-9 flex-none items-center justify-between gap-2.5 rounded-lg px-3 text-left text-sm transition-colors hover:bg-accent",
 				modelKey(option) === state.model && "bg-accent font-medium",
 			)}
 			onClick={() => void chooseModel(option.provider, option.id)}
@@ -404,7 +504,7 @@ export function SettingsDialog() {
 										onClick={() => setSection(entry.id)}
 									>
 										<Icon name={entry.icon} className="text-faint" />
-										{entry.label}
+										{entry.id === "customise" && state.language === "us" ? "Customize" : entry.label}
 									</button>
 								</div>
 							))}
@@ -413,7 +513,11 @@ export function SettingsDialog() {
 				</div>
 				<div className="flex min-w-0 flex-1 flex-col overflow-y-auto px-8 py-7">
 					<DialogTitle className="mb-2 text-lg leading-none font-semibold">
-						{searching ? "Search" : (SECTIONS.find((s) => s.id === section)?.label ?? "Settings")}
+						{searching
+						? "Search"
+						: (SECTIONS.find((s) => s.id === section)?.id === "customise" && state.language === "us"
+							? "Customize"
+							: (SECTIONS.find((s) => s.id === section)?.label ?? "Settings"))}
 					</DialogTitle>
 					<div className="flex flex-col">
 						{show("general") && (
@@ -473,6 +577,7 @@ export function SettingsDialog() {
 										/>
 									</Row>
 								)}
+								{matches(query, "web server browser phone tailscale remote") && <WebServerSection />}
 								{matches(query, "worktree isolation git branch") && <WorktreeSection />}
 								{matches(query, "compact export html session") && (
 									<Row label="This session" hint="Shrink the context now, or save a copy of the transcript">
@@ -502,43 +607,10 @@ export function SettingsDialog() {
 										</Button>
 									</Row>
 								)}
-								{matches(query, "wipe erase delete reset local data privacy history") && (
-									<Row
-										label="Delete all local data"
-										hint="Every chat, the memory and skills the agent wrote, your cues, and the tool telemetry. Credentials and preferences are kept."
-									>
-										<Button
-											variant="destructive"
-											size="sm"
-											onClick={async () => {
-												const sure = await requestConfirm({
-													title: "Delete all local data?",
-													message:
-														"Every chat, the memory the agent curates, the skills it wrote, your cues, and the " +
-														"session index and tool telemetry will be permanently deleted from this machine. " +
-														"Provider credentials and your preferences are kept. This can't be undone.",
-													actionLabel: "Delete everything",
-													destructive: true,
-												});
-												if (!sure) return;
-												const result = await api.wipeLocalData();
-												if (!result.ok) {
-													toast(result.error ?? "Could not delete everything", "error");
-													return;
-												}
-												// The window's own memory of what you did is the last of it.
-												clearLocalAppData();
-												app.settingsOpen = false;
-												bump();
-												toast("Local data deleted.");
-												await refreshState();
-											}}
-										>
-											Delete everything…
-										</Button>
-									</Row>
-								)}
 							</>
+						)}
+						{show("providers") && matches(query, "provider api key credential login pool failover") && (
+							<ProvidersSection query={searching ? query : ""} />
 						)}
 						{show("model") && (
 							<>
@@ -556,13 +628,7 @@ export function SettingsDialog() {
 													<p className="text-sm leading-relaxed text-muted-foreground">
 														No models yet. Add a provider's API key and smolt will pick its models up.
 													</p>
-													<Button
-														size="sm"
-														onClick={() => {
-															app.providerDialogOpen = true;
-															bump();
-														}}
-													>
+													<Button size="sm" onClick={() => setSection("providers")}>
 														Add a provider
 													</Button>
 												</div>
@@ -572,10 +638,10 @@ export function SettingsDialog() {
 												<>
 													{frequentModels.length > 0 && (
 														<>
-															<span className="px-3 pt-1 pb-1.5 text-xs text-faint">Frequently used</span>
+															<span className="px-3 pt-1 pb-1.5 text-xs font-medium tracking-wide text-faint">Most used</span>
 															{frequentModels.map(renderModel)}
 															{otherModels.length > 0 && (
-																<span className="px-3 pt-3 pb-1.5 text-xs text-faint">All models</span>
+																<span className="px-3 pt-3 pb-1.5 text-xs font-medium tracking-wide text-faint">All models</span>
 															)}
 														</>
 													)}
@@ -583,25 +649,123 @@ export function SettingsDialog() {
 												</>
 											)}
 										</div>
-										{/* The provider flow must stay reachable after the first key
-										    exists — pool credentials and new providers are added here. */}
+										{/* Providers are managed on their own page; this is the signpost. */}
 										{state.availableModels.length > 0 && (
-											<Button
-												variant="outline"
-												size="sm"
-												className="self-start"
-												onClick={() => {
-													app.providerDialogOpen = true;
-													bump();
-												}}
-											>
+											<Button variant="outline" size="sm" className="self-start" onClick={() => setSection("providers")}>
 												Add provider
 											</Button>
 										)}
 									</Block>
 								)}
+								{matches(query, "advisor model reviewer cost") && (
+									<Row
+										label="Advisor model"
+										hint="What the advisor reviews with while it is on. It reads far more than it writes, so a cheaper model here cuts most of what it costs."
+									>
+										<Select
+											value={advisorModel}
+											onValueChange={(next) => {
+												setAdvisorModel(next);
+												void call("setAdvisorModel", next === ADVISOR_FOLLOWS_CHAT ? undefined : next);
+											}}
+										>
+											<SelectTrigger className="w-[18rem]">
+												<SelectValue />
+											</SelectTrigger>
+											<SelectContent>
+												<SelectItem value={ADVISOR_FOLLOWS_CHAT}>Same as the chat model</SelectItem>
+												{advisorChoices.map((option) => (
+													<SelectItem key={modelKey(option)} value={modelKey(option)}>
+														{option.id}
+														<span className="ml-1.5 text-xs text-faint">{option.provider}</span>
+													</SelectItem>
+												))}
+											</SelectContent>
+										</Select>
+									</Row>
+								)}
+								{matches(query, "review model code review pull request cost") && (
+									<Row
+										label="Review model"
+										hint="What reviews run on. A review reads a lot and writes a little, so a cheaper model here costs less."
+									>
+										<Select
+											value={reviewModel}
+											onValueChange={(next) => {
+												const model = next === ADVISOR_FOLLOWS_CHAT ? undefined : next;
+												setReview((current) => ({ ...current, model }));
+												void call("setReviewSettings", { model: model ?? null });
+											}}
+										>
+											<SelectTrigger className="w-[18rem]">
+												<SelectValue />
+											</SelectTrigger>
+											<SelectContent>
+												<SelectItem value={ADVISOR_FOLLOWS_CHAT}>Same as the chat model</SelectItem>
+												{reviewChoices.map((option) => (
+													<SelectItem key={modelKey(option)} value={modelKey(option)}>
+														{option.id}
+														<span className="ml-1.5 text-xs text-faint">{option.provider}</span>
+													</SelectItem>
+												))}
+											</SelectContent>
+										</Select>
+									</Row>
+								)}
+								{matches(query, "review watch pull requests arrive automatic github repos") && (
+									<Row
+										label="Watched repositories"
+										hint="Pull requests on these are reviewed as they arrive, while smolt is running. Choose them with /review setup."
+									>
+										<div className="flex max-w-[20rem] flex-col items-end gap-1 text-sm">
+											{review.watchRepos.length === 0 ? (
+												<span className="text-faint">None</span>
+											) : (
+												review.watchRepos.map((repo) => (
+													<span key={repo} className="font-mono text-xs">
+														{repo}
+													</span>
+												))
+											)}
+										</div>
+									</Row>
+								)}
+								{matches(query, "review autofix auto-fix fix findings repair") && (
+									<Row
+										label="Fix what a review finds"
+										hint="After a review, a hidden chat fixes its findings in your working tree and reports back. It never commits or pushes."
+									>
+										<Switch
+											checked={review.autoFix}
+											onCheckedChange={async (next) => {
+												setReview((current) => ({ ...current, autoFix: next }));
+												await call("setReviewSettings", { autoFix: next });
+											}}
+										/>
+									</Row>
+								)}
+								{matches(query, "review findings limit maximum comment") && (
+									<Row label="Maximum findings per comment" hint="How many findings a posted review lists at most">
+										<Input
+											type="number"
+											min={1}
+											className="w-20"
+											value={String(review.maxFindings)}
+											onChange={(event) => {
+												const next = Number.parseInt(event.target.value, 10);
+												setReview((current) => ({ ...current, maxFindings: Number.isNaN(next) ? 0 : next }));
+											}}
+											onBlur={() => {
+												const value = Math.max(1, Math.floor(review.maxFindings || 1));
+												setReview((current) => ({ ...current, maxFindings: value }));
+												void call("setReviewSettings", { maxFindings: value });
+											}}
+										/>
+									</Row>
+								)}
 								{matches(query, "effort thinking reasoning") && (
 									<Row label="Default effort" hint="Where new chats start. The composer changes this chat only.">
+										<div className="flex max-w-[26rem] flex-wrap justify-end gap-1.5">
 										{state.availableThinking.map((level) => (
 											<Button
 												key={level}
@@ -616,6 +780,7 @@ export function SettingsDialog() {
 												{thinkingLabel(level)}
 											</Button>
 										))}
+										</div>
 									</Row>
 								)}
 							</>
@@ -672,9 +837,49 @@ export function SettingsDialog() {
 										<Switch checked={state.serif} onCheckedChange={(next) => applySerif(next)} />
 									</Row>
 								)}
+								{matches(query, "enter send queue message turn ctrl") && (
+									<Row
+										label="Enter queues while a turn runs"
+										hint="Off: Enter sends at the next step, Ctrl+Enter queues. On: the other way round."
+									>
+										<Switch
+											checked={state.enterSendsQueued}
+											onCheckedChange={(next) => setEnterSendsQueued(next)}
+										/>
+									</Row>
+								)}
 								{matches(query, "sidebar chats history day collapse") && (
 									<Row label="Show every chat per day" hint="Sidebar days list all their chats instead of the latest 5">
 										<Switch checked={state.sidebarShowAll} onCheckedChange={(next) => setSidebarShowAll(next)} />
+									</Row>
+								)}
+							</>
+						)}
+						{show("customise") && (
+							<>
+								{matches(query, "language spelling us uk english dialect") && (
+									<Row label="Language" hint="How smolt spells labels: US or UK English">
+										<div className="flex gap-0.5 rounded-lg bg-background-deep p-0.5 [background:var(--background-deep)]">
+											{(["us", "uk"] as const).map((choice) => (
+												<Button
+													key={choice}
+													variant="ghost"
+													size="sm"
+													className={cn("uppercase", state.language === choice && "bg-card text-foreground")}
+													onClick={() => setLanguage(choice)}
+												>
+													{choice}
+												</Button>
+											))}
+										</div>
+									</Row>
+								)}
+								{matches(query, "bullet dot asterisk sidebar marker chats") && (
+									<Row
+										label="Dot bullets for chat markers"
+										hint="Show the sidebar chat markers as dot bullets instead of asterisks"
+									>
+										<Switch checked={state.sidebarDots} onCheckedChange={(next) => setSidebarDots(next)} />
 									</Row>
 								)}
 							</>
@@ -690,12 +895,11 @@ export function SettingsDialog() {
 											</span>
 										</Row>
 										<Row label="Working directory">
-											<span
-												className="max-w-80 overflow-hidden text-ellipsis whitespace-nowrap text-left font-mono text-xs text-faint [direction:rtl]"
-												title={state.appInfo.cwd}
-											>
-												{state.appInfo.cwd}
-											</span>
+											<Tip label={state.appInfo.cwd}>
+												<span className="max-w-80 overflow-hidden text-ellipsis whitespace-nowrap text-left font-mono text-xs text-faint [direction:rtl]">
+													{state.appInfo.cwd}
+												</span>
+											</Tip>
 										</Row>
 									</>
 								)}
@@ -712,6 +916,42 @@ export function SettingsDialog() {
 											}}
 										>
 											View shortcuts
+										</Button>
+									</Row>
+								)}
+								{matches(query, "wipe erase delete reset local data privacy history") && (
+									<Row
+										label="Delete all local data"
+										hint="Every chat, the memory and skills the agent wrote, your cues, and the tool telemetry. Credentials and preferences are kept."
+									>
+										<Button
+											variant="destructive"
+											size="sm"
+											onClick={async () => {
+												const sure = await requestConfirm({
+													title: "Delete all local data?",
+													message:
+														"Every chat, the memory the agent curates, the skills it wrote, your cues, and the " +
+														"session index and tool telemetry will be permanently deleted from this machine. " +
+														"Provider credentials and your preferences are kept. This can't be undone.",
+													actionLabel: "Delete everything",
+													destructive: true,
+												});
+												if (!sure) return;
+												const result = await api.wipeLocalData();
+												if (!result.ok) {
+													toast(result.error ?? "Could not delete everything", "error");
+													return;
+												}
+												// The window's own memory of what you did is the last of it.
+												clearLocalAppData();
+												app.settingsOpen = false;
+												bump();
+												toast("Local data deleted.");
+												await refreshState();
+											}}
+										>
+											Delete everything…
 										</Button>
 									</Row>
 								)}

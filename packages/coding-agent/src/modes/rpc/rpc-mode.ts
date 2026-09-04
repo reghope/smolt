@@ -26,7 +26,14 @@ import {
 	waitForRawStdoutBackpressure,
 	writeRawStdout,
 } from "../../core/output-guard.ts";
+import { loadAdvisorSettings, writeAdvisorModel } from "../../extensions/advisor/config.ts";
 import { builtInExtensions } from "../../extensions/index.ts";
+import {
+	DEFAULT_MAX_FINDINGS,
+	loadReviewSettings,
+	type ReviewSettings,
+	saveReviewSettings,
+} from "../../extensions/review/config.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
 import { toJsonEvent } from "../json-event.ts";
@@ -168,6 +175,14 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		select: (title, options, opts) =>
 			createDialogPromise(opts, undefined, { method: "select", title, options, timeout: opts?.timeout }, (r) =>
 				"cancelled" in r && r.cancelled ? undefined : "value" in r ? r.value : undefined,
+			),
+
+		multiselect: (title, options, selected, opts) =>
+			createDialogPromise(
+				opts,
+				undefined,
+				{ method: "multiselect", title, options, selected: selected ?? [], timeout: opts?.timeout },
+				(r) => ("cancelled" in r && r.cancelled ? undefined : "values" in r ? r.values : undefined),
 			),
 
 		confirm: (title, message, opts) =>
@@ -601,6 +616,60 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			}
 
 			// =================================================================
+			// Provider sign-in
+			// =================================================================
+
+			case "login": {
+				// The same login the TUI runs, with a client on the other end of
+				// the dialog channel instead of a terminal: selections and codes
+				// come back as dialog answers, the browser step goes out as an
+				// open_url request, and progress lines as notifications.
+				const ui = createExtensionUIContext();
+				const cancelled = (): Error => new Error("Login cancelled");
+				try {
+					const credential = await session.modelRuntime.login(command.provider, command.method, {
+						prompt: async (prompt) => {
+							const opts = { signal: prompt.signal, timeout: DEFAULT_DIALOG_TIMEOUT_MS };
+							if (prompt.type === "select") {
+								const labels = prompt.options.map((option) => option.label);
+								const picked = await ui.select(prompt.message, labels, opts);
+								if (picked === undefined) throw cancelled();
+								return prompt.options[labels.indexOf(picked)]?.id ?? picked;
+							}
+							const value = await ui.input(prompt.message, prompt.placeholder, opts);
+							if (value === undefined) throw cancelled();
+							return value;
+						},
+						notify: (event) => {
+							if (event.type === "auth_url") {
+								output({
+									type: "extension_ui_request",
+									id: crypto.randomUUID(),
+									method: "open_url",
+									url: event.url,
+									instructions: event.instructions,
+								} as RpcExtensionUIRequest);
+							} else if (event.type === "device_code") {
+								output({
+									type: "extension_ui_request",
+									id: crypto.randomUUID(),
+									method: "open_url",
+									url: event.verificationUri,
+									instructions: `Enter the code ${event.userCode} to finish signing in.`,
+								} as RpcExtensionUIRequest);
+								ui.notify(`Enter the code ${event.userCode} at ${event.verificationUri}`, "info");
+							} else if (event.type === "info") {
+								ui.notify(event.message, "info");
+							}
+						},
+					});
+					return success(id, "login", { type: credential.type });
+				} catch (err) {
+					return error(id, "login", err instanceof Error ? err.message : String(err));
+				}
+			}
+
+			// =================================================================
 			// Extensions
 			// =================================================================
 
@@ -643,6 +712,89 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			case "set_extension_enabled": {
 				session.settingsManager.setExtensionEnabled(command.extensionId, command.enabled);
 				return success(id, "set_extension_enabled");
+			}
+
+			// =================================================================
+			// Advisor
+			// =================================================================
+
+			case "get_advisor_settings": {
+				const settings = loadAdvisorSettings(session.sessionManager.getCwd());
+				return success(id, "get_advisor_settings", {
+					enabled: settings.enabled === true,
+					...(settings.model ? { model: settings.model } : {}),
+				});
+			}
+
+			case "set_advisor_model": {
+				const selector = command.model?.trim() || undefined;
+				if (selector !== undefined) {
+					const slash = selector.indexOf("/");
+					if (slash <= 0 || slash === selector.length - 1) {
+						return error(id, "set_advisor_model", `Expected provider/model-id, got: ${selector}`);
+					}
+					const provider = selector.slice(0, slash);
+					const modelId = selector.slice(slash + 1);
+					const known = session.modelRuntime
+						.getAvailableSnapshot()
+						.some((m) => m.provider === provider && m.id === modelId);
+					if (!known) {
+						return error(id, "set_advisor_model", `Model not found: ${selector}`);
+					}
+				}
+				writeAdvisorModel(selector);
+				return success(id, "set_advisor_model");
+			}
+
+			// =================================================================
+			// Review
+			// =================================================================
+
+			case "get_review_settings": {
+				const settings = loadReviewSettings(process.cwd());
+				return success(id, "get_review_settings", {
+					...(settings.model ? { model: settings.model } : {}),
+					maxFindings: settings.maxFindings ?? DEFAULT_MAX_FINDINGS,
+					watchRepos: settings.watchRepos ?? [],
+					autoFix: settings.autoFix === true,
+				});
+			}
+
+			case "set_review_settings": {
+				const update: ReviewSettings = {};
+				if (command.settings.model !== undefined) {
+					const selector = command.settings.model?.trim() || undefined;
+					if (selector !== undefined) {
+						const slash = selector.indexOf("/");
+						if (slash <= 0 || slash === selector.length - 1) {
+							return error(id, "set_review_settings", `Expected provider/model-id, got: ${selector}`);
+						}
+						const provider = selector.slice(0, slash);
+						const modelId = selector.slice(slash + 1);
+						const known = session.modelRuntime
+							.getAvailableSnapshot()
+							.some((m) => m.provider === provider && m.id === modelId);
+						if (!known) {
+							return error(id, "set_review_settings", `Model not found: ${selector}`);
+						}
+					}
+					update.model = selector;
+				}
+				if (command.settings.maxFindings !== undefined) {
+					const max = Math.floor(command.settings.maxFindings);
+					if (!Number.isFinite(max) || max < 1) {
+						return error(
+							id,
+							"set_review_settings",
+							`Expected a findings cap of 1 or more, got: ${command.settings.maxFindings}`,
+						);
+					}
+					update.maxFindings = max;
+				}
+				if (command.settings.watchRepos !== undefined) update.watchRepos = command.settings.watchRepos;
+				if (command.settings.autoFix !== undefined) update.autoFix = command.settings.autoFix;
+				saveReviewSettings(update);
+				return success(id, "set_review_settings");
 			}
 
 			case "abort_retry": {
@@ -689,6 +841,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			case "get_session_stats": {
 				const stats = session.getSessionStats();
 				return success(id, "get_session_stats", stats);
+			}
+
+			case "get_provider_usage": {
+				const usage = await session.getProviderUsage();
+				return success(id, "get_provider_usage", usage ?? null);
 			}
 
 			case "export_html": {

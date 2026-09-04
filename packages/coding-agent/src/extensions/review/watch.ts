@@ -53,20 +53,33 @@ export function isAdmin(repo: string): boolean {
 	return ghJson<{ permissions?: { admin?: boolean } }>(["api", `repos/${repo}`])?.permissions?.admin === true;
 }
 
-/** Repos the reader could watch: the ones GitHub will let them add a webhook to. */
+/**
+ * Repos the reader could watch: the ones GitHub will let them add a webhook to.
+ *
+ * Deliberately not `gh repo list`, which lists only what the reader OWNS: most
+ * people administer their team's repositories through an organisation, and the
+ * repo open in the session is very often one of those. `user/repos` with the
+ * affiliations spelled out returns those too, each carrying the permission
+ * bits, so admin is read rather than guessed.
+ */
 export function adminRepos(): string[] {
-	const repos = ghJson<{ nameWithOwner: string; viewerPermission?: string }[]>([
-		"repo",
-		"list",
-		"--limit",
-		"100",
-		"--json",
-		"nameWithOwner,viewerPermission",
+	const repos = ghJson<{ full_name?: string; permissions?: { admin?: boolean } }[]>([
+		"api",
+		"-H",
+		"accept: application/vnd.github+json",
+		"user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member",
 	]);
-	return (repos ?? [])
-		.filter((repo) => repo.viewerPermission === "ADMIN")
-		.map((repo) => repo.nameWithOwner)
-		.sort();
+	const names = new Set(
+		(repos ?? [])
+			.filter((repo) => repo.permissions?.admin === true)
+			.map((repo) => repo.full_name)
+			.filter((name): name is string => typeof name === "string"),
+	);
+	// The repo open here matters more than any of the others, and one page of
+	// results may not reach it, so it is asked about directly rather than hoped for.
+	const here = currentRepo();
+	if (here !== undefined && !names.has(here) && isAdmin(here)) names.add(here);
+	return [...names].sort();
 }
 
 /** Is the webhook-forwarding extension installed? */
@@ -98,24 +111,100 @@ interface Hooks {
  */
 export function watchAll(repos: string[], hooks: Hooks): () => void {
 	const stops = repos.map((repo) => startWatching(repo, hooks));
-	return () => {
+	const stopAll = (): void => {
 		for (const stop of stops) stop();
 	};
+	// A clean shutdown already calls this, but smolt does not always get one:
+	// an orphaned forwarder holds the relay connection and swallows deliveries,
+	// which looks exactly like a working webhook that never fires.
+	process.once("exit", stopAll);
+	process.once("SIGINT", stopAll);
+	process.once("SIGTERM", stopAll);
+	return () => {
+		process.off("exit", stopAll);
+		process.off("SIGINT", stopAll);
+		process.off("SIGTERM", stopAll);
+		stopAll();
+	};
 }
+
+/**
+ * How long total silence is allowed before the connection is presumed dead.
+ *
+ * A forwarder whose relay connection has dropped keeps running and keeps
+ * printing nothing, so judging health by "is the process alive" misses it
+ * completely: a pull request arrived, GitHub's relay answered OK, and the
+ * event went nowhere. The forwarder emits keep-alive chatter, so a gap this
+ * long with no bytes at all means the pipe is broken, not that the repo is
+ * quiet.
+ */
+const SILENCE_TIMEOUT_MS = 15 * 60 * 1000;
+
+/**
+ * How many times a forward may die almost immediately before we stop trying.
+ *
+ * Retrying for ever is how a revoked admin right or an expired `gh` login
+ * turns into a warning a minute for the rest of the session. A connection that
+ * survived a while and then dropped is a different thing — that is the network,
+ * and it is worth reconnecting for ever — so only short-lived attempts count.
+ */
+const MAX_FAILED_ATTEMPTS = 5;
+const SETTLED_MS = 60_000;
 
 function startWatching(repo: string, hooks: Hooks): () => void {
 	let stopped = false;
 	let child: ReturnType<typeof spawn> | undefined;
 	let retry: ReturnType<typeof setTimeout> | undefined;
+	let silence: ReturnType<typeof setTimeout> | undefined;
 	let backoffMs = 2000;
+	let failures = 0;
+	let connectedAt = 0;
+
+	const reconnect = (why: string): void => {
+		if (stopped) return;
+		if (silence) clearTimeout(silence);
+		child?.kill();
+		child = undefined;
+		failures = Date.now() - connectedAt > SETTLED_MS ? 0 : failures + 1;
+		if (failures >= MAX_FAILED_ATTEMPTS) {
+			stopped = true;
+			hooks.notice(
+				`Gave up watching ${repo}: the forwarder failed ${failures} times in a row. Check 'gh auth status' ` +
+					"and that you still have admin on it, then run /review setup again.",
+				"warning",
+			);
+			return;
+		}
+		hooks.notice(`${why} watching ${repo}; reconnecting.`, "warning");
+		retry = setTimeout(connect, backoffMs);
+		backoffMs = Math.min(backoffMs * 2, 60_000);
+	};
+
+	// Any output at all proves the pipe is alive, so the clock restarts on it.
+	const heardSomething = (): void => {
+		if (silence) clearTimeout(silence);
+		silence = setTimeout(() => reconnect("Heard nothing for fifteen minutes"), SILENCE_TIMEOUT_MS);
+	};
 
 	const connect = (): void => {
 		if (stopped) return;
 		child = spawn("gh", ["webhook", "forward", "--events=pull_request", `--repo=${repo}`], {
+			// Not detached: the forwarder must die with smolt. An orphan keeps the
+			// relay connection open and swallows every delivery into a stdout
+			// nobody reads, so the next session sees a healthy hook and no events.
+			detached: false,
 			stdio: ["ignore", "pipe", "pipe"],
 		});
+		connectedAt = Date.now();
+		heardSomething();
+		// Without this, a spawn that fails (gh upgraded out from under us, no file
+		// handles left) emits 'error' with no listener, which EventEmitter rethrows
+		// and nothing catches: the whole session dies for a background watcher.
+		child.on("error", (error: Error) => reconnect(`Could not start the forwarder (${error.message})`));
+		child.stderr?.on("data", heardSomething);
 		let buffer = "";
 		child.stdout?.on("data", (chunk: Buffer) => {
+			heardSomething();
 			buffer += chunk.toString("utf-8");
 			const lines = buffer.split("\n");
 			buffer = lines.pop() ?? "";
@@ -137,6 +226,7 @@ function startWatching(repo: string, hooks: Hooks): () => void {
 				if (!Number.isFinite(number)) continue;
 				// A live connection has proved itself; forget any earlier backoff.
 				backoffMs = 2000;
+				failures = 0;
 				hooks.review({
 					number,
 					title: typeof pr.title === "string" ? pr.title : `#${number}`,
@@ -145,18 +235,14 @@ function startWatching(repo: string, hooks: Hooks): () => void {
 				});
 			}
 		});
-		child.on("exit", () => {
-			if (stopped) return;
-			hooks.notice(`Lost the connection watching ${repo}; reconnecting.`, "warning");
-			retry = setTimeout(connect, backoffMs);
-			backoffMs = Math.min(backoffMs * 2, 60_000);
-		});
+		child.on("exit", () => reconnect("Lost the connection"));
 	};
 
 	connect();
 	return () => {
 		stopped = true;
 		if (retry) clearTimeout(retry);
+		if (silence) clearTimeout(silence);
 		child?.kill();
 	};
 }

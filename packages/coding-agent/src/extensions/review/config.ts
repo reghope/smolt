@@ -25,6 +25,12 @@ export interface ReviewSettings {
 	 * around the diff rather than judging the diff alone.
 	 */
 	watchRepos?: string[];
+	/**
+	 * Whether a finished review hands its findings to a hidden session that
+	 * fixes them. Off unless the reader turns it on: a review that edits code
+	 * on its own is a bigger promise than a review that reports.
+	 */
+	autoFix?: boolean;
 }
 
 export const DEFAULT_MAX_FINDINGS = 15;
@@ -42,10 +48,18 @@ function readIfExists(file: string): string | undefined {
 	}
 }
 
-/** Effective settings: the user-level review.json, then the project's overrides. */
+/**
+ * Effective settings: the user-level review.json, then the project's overrides.
+ *
+ * A project may only narrow what a review does, never widen it. `watchRepos`
+ * and `autoFix` are read from the user's own file alone: a cloned repository
+ * must not be able to point a webhook at someone's account, or turn on a mode
+ * that edits their code, just by shipping a `.smolt/review.json`.
+ */
 export function loadReviewSettings(cwd: string): ReviewSettings {
 	const settings: ReviewSettings = {};
-	for (const file of [reviewSettingsFile(), path.join(cwd, CONFIG_DIR_NAME, "review.json")]) {
+	const userFile = reviewSettingsFile();
+	for (const file of [userFile, path.join(cwd, CONFIG_DIR_NAME, "review.json")]) {
 		const raw = readIfExists(file);
 		if (!raw) continue;
 		try {
@@ -54,6 +68,8 @@ export function loadReviewSettings(cwd: string): ReviewSettings {
 			if (typeof parsed.maxFindings === "number" && parsed.maxFindings >= 1) {
 				settings.maxFindings = Math.floor(parsed.maxFindings);
 			}
+			if (file !== userFile) continue;
+			if (typeof parsed.autoFix === "boolean") settings.autoFix = parsed.autoFix;
 			if (Array.isArray(parsed.watchRepos)) {
 				settings.watchRepos = parsed.watchRepos.filter((repo): repo is string => typeof repo === "string");
 			}

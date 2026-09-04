@@ -106,6 +106,30 @@ Test with `--extension` (or `-e`) flag:
 smolt -e ./my-extension.ts
 ```
 
+## Built-in Extensions
+
+Smolt ships these extensions itself. Each one can be switched off by listing its name in `disabledExtensions` in the global `settings.json`, or from the desktop app; the interactive `/settings` dialog does not list extensions. The commands they register are listed in [Usage](usage.md#slash-commands).
+
+| Name | What it does |
+|------|--------------|
+| `llama.cpp` | Local models through a llama.cpp server, with downloads and loading |
+| `degeneration` | Catches a looping response mid-stream and resamples it once |
+| `tools` | Built-in tools with narrower habits: read only the part of a file needed, search with rg first |
+| `semantic-recall` | Finds past sessions by meaning with a small embedding model that runs on this machine |
+| `learning` | Curated memory, agent-written skills, and search over past sessions |
+| `screenshot` | Lets the agent capture and look at your screen |
+| `permissions` | Permission modes that limit what the agent may change unasked |
+| `auto-thinking` | Picks how much thinking each message needs, instead of one fixed level |
+| `goal` | Holds one objective and keeps the session working until it is met |
+| `wayfinder` | Maps work too big for one session into decision tickets |
+| `subagents` | Background agent threads that keep their own context |
+| `battletest` | Simulated users run the app and file what they find as tickets |
+| `research` | A team of investigators works a subject and stops at nothing short of the answer |
+| `review` | Reads the pending diff, or any target you name, for defects |
+| `pool` | Several credentials per provider, with failover when one hits a limit |
+| `telegram` | Two-way bridge between this session and your own Telegram bot |
+| `cues` | House notes that enter the prompt only when their subject comes up |
+
 ## Extension Locations
 
 > **Security:** Extensions run with your full system permissions and can execute arbitrary code. Only install from sources you trust.
@@ -1358,11 +1382,11 @@ export default function (smolt: ExtensionAPI) {
 
 ## ExtensionAPI Methods
 
-### Smolt.on(event, handler)
+### smolt.on(event, handler)
 
 Subscribe to events. See [Events](#events) for event types and return values.
 
-### Smolt.registerTool(definition)
+### smolt.registerTool(definition)
 
 Register a custom tool callable by the LLM. See [Custom Tools](#custom-tools) for full details.
 
@@ -1413,7 +1437,7 @@ smolt.registerTool({
 });
 ```
 
-### Smolt.sendMessage(message, options?)
+### smolt.sendMessage(message, options?)
 
 Inject a custom message into the session. Custom messages participate in LLM context. For durable TUI-only content that should not be sent to the LLM, use [`smolt.appendEntry()`](#piappendentrycustomtype-data) with [`smolt.registerEntryRenderer()`](#piregisterentryrenderercustomtype-renderer).
 
@@ -1436,7 +1460,7 @@ smolt.sendMessage({
   - `"nextTurn"` - Queued for next user prompt. Does not interrupt or trigger anything.
 - `triggerTurn: true` - If agent is idle, trigger an LLM response immediately. Only applies to `"steer"` and `"followUp"` modes (ignored for `"nextTurn"`).
 
-### Smolt.sendUserMessage(content, options?)
+### smolt.sendUserMessage(content, options?)
 
 Send a user message to the agent. Unlike `sendMessage()` which sends custom messages, this sends an actual user message that appears as if typed by the user. Always triggers a turn.
 
@@ -1468,7 +1492,7 @@ When not streaming, the message is sent immediately and triggers a new turn. Whe
 
 See [send-user-message.ts](../examples/extensions/send-user-message.ts) for a complete example.
 
-### Smolt.appendEntry(customType, data?)
+### smolt.appendEntry(customType, data?)
 
 Persist extension data. Custom entries do NOT participate in LLM context. In interactive mode, they can also render inside the chat transcript when paired with `smolt.registerEntryRenderer()`.
 
@@ -1486,7 +1510,7 @@ smolt.on("session_start", async (_event, ctx) => {
 });
 ```
 
-### Smolt.setSessionName(name)
+### smolt.setSessionName(name)
 
 Set the session display name (shown in session selector instead of first message).
 
@@ -1494,7 +1518,7 @@ Set the session display name (shown in session selector instead of first message
 smolt.setSessionName("Refactor auth module");
 ```
 
-### Smolt.getSessionName()
+### smolt.getSessionName()
 
 Get the current session name, if set.
 
@@ -1505,7 +1529,7 @@ if (name) {
 }
 ```
 
-### Smolt.setLabel(entryId, label)
+### smolt.setLabel(entryId, label)
 
 Set or clear a label on an entry. Labels are user-defined markers for bookmarking and navigation (shown in `/tree` selector).
 
@@ -1522,7 +1546,7 @@ const label = ctx.sessionManager.getLabel(entryId);
 
 Labels persist in the session and survive restarts. Use them to mark important points (turns, checkpoints) in the conversation tree.
 
-### Smolt.registerCommand(name, options)
+### smolt.registerCommand(name, options)
 
 Register a command.
 
@@ -1557,7 +1581,7 @@ smolt.registerCommand("deploy", {
 });
 ```
 
-### Smolt.getCommands()
+### smolt.getCommands()
 
 Get the slash commands available for invocation via `prompt` in the current session. Includes extension commands, prompt templates, and skill commands.
 The list matches the RPC `get_commands` ordering: extensions first, then templates, then skills.
@@ -1590,11 +1614,11 @@ Use `sourceInfo` as the canonical provenance field. Do not infer ownership from 
 Built-in interactive commands (like `/model` and `/settings`) are not included here. They are handled only in interactive
 mode and would not execute if sent via `prompt`.
 
-### Smolt.registerMessageRenderer(customType, renderer)
+### smolt.registerMessageRenderer(customType, renderer)
 
 Register a custom TUI renderer for custom messages with your `customType`. Custom messages are created with `smolt.sendMessage()` and participate in LLM context. See [Custom UI](#custom-ui).
 
-### Smolt.registerMarkdownTransformer(transformer)
+### smolt.registerMarkdownTransformer(transformer)
 
 Register a transformer for the Markdown in normal user text, assistant text, and thinking blocks. Transformers run in extension load order, and each transformer receives the Markdown returned by the previous transformer. After the chain finishes, Smolt renders the transformed content with its built-in renderer.
 
@@ -1615,7 +1639,7 @@ smolt.registerMarkdownTransformer((markdown, { messageType, isStreaming }) => {
 
 If a transformer throws, Smolt keeps the Markdown produced so far and continues with the next transformer. The hook is display-only: the original message remains unchanged in the session and model context. It runs for new user messages, assistant streaming updates, restored session messages, and terminal width changes, so transformers should remain synchronous and inexpensive.
 
-### Smolt.registerEntryRenderer(customType, renderer)
+### smolt.registerEntryRenderer(customType, renderer)
 
 Register a custom TUI renderer for custom entries with your `customType`. Custom entries are created with `smolt.appendEntry()` and do not participate in LLM context.
 
@@ -1635,7 +1659,7 @@ smolt.registerEntryRenderer("status-card", (entry, { expanded }, theme) => {
 smolt.appendEntry("status-card", { title: "Indexed files", count: 17 });
 ```
 
-### Smolt.registerShortcut(shortcut, options)
+### smolt.registerShortcut(shortcut, options)
 
 Register a keyboard shortcut. See [keybindings.md](keybindings.md) for the shortcut format and built-in keybindings.
 
@@ -1648,7 +1672,7 @@ smolt.registerShortcut("ctrl+shift+p", {
 });
 ```
 
-### Smolt.registerFlag(name, options)
+### smolt.registerFlag(name, options)
 
 Register a CLI flag.
 
@@ -1665,7 +1689,7 @@ if (smolt.getFlag("plan")) {
 }
 ```
 
-### Smolt.exec(command, args, options?)
+### smolt.exec(command, args, options?)
 
 Execute a shell command.
 
@@ -1674,7 +1698,7 @@ const result = await smolt.exec("git", ["status"], { signal, timeout: 5000 });
 // result.stdout, result.stderr, result.code, result.killed
 ```
 
-### Smolt.getActiveTools() / Smolt.getAllTools() / Smolt.setActiveTools(names)
+### smolt.getActiveTools() / Smolt.getAllTools() / Smolt.setActiveTools(names)
 
 Manage active tools. This works for both built-in tools and dynamically registered tools. `smolt.getActiveTools()` returns the active tool names as `string[]`; `smolt.getAllTools()` returns metadata for all configured tools.
 
@@ -1701,7 +1725,7 @@ Typical `sourceInfo.source` values:
 - `sdk` for tools passed via `createAgentSession({ customTools })`
 - extension source metadata for tools registered by extensions
 
-### Smolt.setModel(model)
+### smolt.setModel(model)
 
 Set the current model. Returns `false` if no API key is available for the model. See [models.md](models.md) for configuring custom models.
 
@@ -1715,7 +1739,7 @@ if (model) {
 }
 ```
 
-### Smolt.getThinkingLevel() / Smolt.setThinkingLevel(level)
+### smolt.getThinkingLevel() / Smolt.setThinkingLevel(level)
 
 Get or set the thinking level. Level is clamped to model capabilities (non-reasoning models always use "off"). Changes emit `thinking_level_select`.
 
@@ -1724,7 +1748,7 @@ const current = smolt.getThinkingLevel();  // "off" | "minimal" | "low" | "mediu
 smolt.setThinkingLevel("high");
 ```
 
-### Smolt.events
+### smolt.events
 
 Shared event bus for communication between extensions:
 
@@ -1733,7 +1757,7 @@ smolt.events.on("my:event", (data) => { ... });
 smolt.events.emit("my:event", { ... });
 ```
 
-### Smolt.registerProvider(name, config)
+### smolt.registerProvider(name, config)
 
 Register or override a model provider dynamically. Useful for proxies, custom endpoints, or team-wide model configurations.
 
@@ -1859,7 +1883,7 @@ The object form accepts a complete smolt-ai `Provider`, including native `auth`,
 
 See [custom-provider.md](custom-provider.md) for advanced topics: custom streaming APIs, OAuth details, model definition reference.
 
-### Smolt.unregisterProvider(name)
+### smolt.unregisterProvider(name)
 
 Remove a previously registered provider and its models. Built-in models that were overridden by the provider are restored. Has no effect if the provider was not registered.
 

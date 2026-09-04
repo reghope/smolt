@@ -5,6 +5,7 @@ import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "../../core/extensions/types.ts";
 import { projectStore } from "../../core/project-store.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
+import { spawnChildSession } from "../battletest/spawn.ts";
 import { DEFAULT_MAX_FINDINGS, loadReviewSettings, type ReviewSettings, saveReviewSettings } from "./config.ts";
 import { awaitApproval, clearToken, connectedAccount, requestDeviceCode } from "./github-login.ts";
 import {
@@ -12,6 +13,7 @@ import {
 	FINDING_CONFIDENCES,
 	FINDING_SEVERITIES,
 	FINDING_STATUSES,
+	type ReviewFinding,
 	ReviewStore,
 	reviewTool,
 } from "./store.ts";
@@ -70,6 +72,39 @@ function doctrine(): string {
 6. RECORD what survives: review tool action 'add_finding' (title, file, line, severity blocker/major/minor/polish, category, confidence certain/likely/possible, claim, failure_scenario, evidence, suggested_fix?). The tool rejects findings without a failure scenario and bounces ones an earlier review holds open — obey the bounce.
 7. CLOSE: action 'complete' with a short summary (what was reviewed, the shape of what was found, what is fine).
 QUALITY BAR: fewer, harder findings beat many soft ones. No praise padding, no restating the diff, no nitpicks the codebase's own style contradicts. If the change is good, a clean review with zero findings is the correct and complete result.`;
+}
+
+/**
+ * What the hidden fixing session is told.
+ *
+ * It is a child session: it has never seen the review, cannot call the review
+ * tool, and knows only what is written here — so each finding travels whole,
+ * with the failure scenario that justifies it and the fix if one was named.
+ */
+function fixBrief(findings: ReviewFinding[]): string {
+	const items = findings
+		.map((finding, index) => {
+			const where = finding.line === undefined ? finding.file : `${finding.file}:${finding.line}`;
+			return (
+				`${index + 1}. [${finding.severity}] ${where} — ${finding.title}\n` +
+				`   Claim: ${finding.claim}\n` +
+				`   Failure scenario: ${finding.failureScenario}\n` +
+				(finding.suggestedFix ? `   Suggested fix: ${finding.suggestedFix}\n` : "")
+			);
+		})
+		.join("\n");
+	return `A code review of this repository recorded the findings below. Fix them in the working tree.
+
+${items}
+HOW TO WORK
+- Read the code around each finding before changing it; the finding names a file and usually a line.
+- Fix the cause, not the symptom, and keep each fix as small as the problem.
+- Follow the conventions of the code you are editing.
+- If a finding turns out to be wrong, or the fix would need a decision that is not yours to make, leave the code alone and say so.
+- Do NOT commit, push, or run any git command that changes the working tree or history. Other work may be in progress in these files.
+- Do not touch anything the findings do not cover.
+
+Finish with a short report: what you changed, file by file, and what you left alone and why.`;
 }
 
 /** A target naming a pull request: 5, #5, or any .../pull/5 URL. */
@@ -139,8 +174,9 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 			"mark standing findings 'fixed' when the code shows them gone; 'complete' (summary, review?) " +
 			"closes the review.\n\n" +
 			"SETTINGS: 'settings' reports how reviews are configured here and whether this repo can be " +
-			"watched; 'configure' (model?, watch?) changes it and starts or stops watching " +
-			"immediately.\n\n" +
+			"watched; 'configure' (model?, watchRepos?, autoFix?) changes it and starts or stops watching " +
+			"immediately. autoFix is off unless the user asks for it: with it on, a finished review hands its " +
+			"findings to a hidden background session that fixes them in the working tree.\n\n" +
 			"WHEN: driving a /review lap, when the user asks what past reviews found, or when fixing " +
 			"findings — mark them 'fixed' as they are dealt with. Also when the user asks in plain words " +
 			"for automatic or CodeRabbit-style reviews on their pull requests: call 'settings' to see " +
@@ -172,6 +208,13 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 					description:
 						"For 'configure': repos as 'owner/name' whose pull requests are reviewed as they arrive while " +
 						"smolt runs. Needs admin on each. Pass [] to stop watching.",
+				}),
+			),
+			autoFix: Type.Optional(
+				Type.Boolean({
+					description:
+						"For 'configure': whether a finished review hands its findings to a hidden session that fixes " +
+						"them in the working tree. Off by default; turn it on only when the user asks.",
 				}),
 			),
 			review: Type.Optional(Type.String({ description: "Review slug. Omit to mean the latest review." })),
@@ -229,15 +272,21 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 						update.model = params.model;
 					}
 					if (Array.isArray(params.watchRepos)) update.watchRepos = params.watchRepos;
+					if (typeof params.autoFix === "boolean") update.autoFix = params.autoFix;
 					saveReviewSettings(update);
 				}
 				const settings = loadReviewSettings(process.cwd());
-				const watching = sessionCtx ? beginWatching(sessionCtx) : "no session yet";
+				// Only 'configure' restarts the watchers. Restarting them to answer a
+				// question about them drops the forwarder's connection, and a pull
+				// request opened during the gap is delivered to a process that has gone.
+				const watching =
+					params.action === "configure" && sessionCtx ? beginWatching(sessionCtx) : describeWatching(settings);
 				return reply({
 					githubAccount: (await connectedAccount()) ?? "not connected — tell the user to run /review setup",
 					model: settings.model ?? "the session's own model",
 					watchRepos: settings.watchRepos ?? [],
 					maxFindings: settings.maxFindings ?? DEFAULT_MAX_FINDINGS,
+					autoFix: settings.autoFix === true,
 					repo: repo ?? "not a GitHub repo",
 					admin: repo === undefined ? false : isAdmin(repo),
 					forwardingInstalled: forwardingAvailable(),
@@ -250,45 +299,118 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 	});
 
 	// A review that runs on a different model switches the session to it and
-	// hands it straight back when the turn settles, so choosing a cheap
-	// reviewer never leaves the reader's chat on the wrong model.
+	// hands it straight back when the run settles, so choosing a cheap reviewer
+	// never leaves the reader's chat on the wrong model. Not on turn_end: that
+	// fires after every assistant message, so restoring there handed the model
+	// back after the review's first reply and left the rest of the review — the
+	// reading, the verifying, the posting — on the model it was meant to avoid.
 	let restoreModel: Model<Api> | undefined;
 	// A pull request arriving mid-thought must not seize the session, so a
-	// review waits for the reader's turn to finish and goes one at a time.
-	let busy = false;
+	// review waits for the run to settle and goes one at a time. turn_end is not
+	// that moment either: the agent run is still active there, so a user message
+	// sent from it is refused outright ("Agent is already processing") and the
+	// review is lost without a word. agent_settled is the first moment the
+	// session is genuinely free.
 	const pending: { number: number; repo: string }[] = [];
+	// The target of the review the session is running, so auto-fix knows one
+	// just finished and which record holds its findings.
+	let reviewing: number | undefined;
 
-	const drain = (): void => {
-		if (busy || pending.length === 0) return;
+	/**
+	 * Switch to the configured review model, remembering what to hand back.
+	 * Returns what to tell the reader when the model they chose is not there.
+	 */
+	const useReviewModel = async (
+		settings: ReviewSettings,
+		current: Model<Api> | undefined,
+	): Promise<string | undefined> => {
+		const selector = settings.model ?? "";
+		const slash = selector.indexOf("/");
+		if (slash <= 0) return undefined;
+		const wanted = sessionCtx?.modelRegistry.find(selector.slice(0, slash), selector.slice(slash + 1));
+		if (wanted === undefined)
+			return `The review model ${selector} is not available; reviewing with the session's model.`;
+		if (current && wanted.id === current.id && wanted.provider === current.provider) return undefined;
+		if (await smolt.setModel(wanted)) restoreModel = current;
+		return undefined;
+	};
+
+	const drain = async (): Promise<void> => {
 		const next = pending.shift();
 		if (next === undefined) return;
+		const settings = loadReviewSettings(process.cwd());
 		// Only say "this is elsewhere" when it really is: a pull request on the
 		// repo open here is reviewed in place, with no clone.
 		const here = currentRepo();
-		smolt.sendUserMessage(
-			reviewPrompt(
-				String(next.number),
-				loadReviewSettings(process.cwd()),
-				next.repo === here ? undefined : next.repo,
-			),
-		);
+		const warning = await useReviewModel(settings, sessionCtx?.model);
+		if (warning !== undefined) sessionCtx?.ui.notify(warning, "warning");
+		reviewing = Date.now();
+		// followUp rather than an unqualified send: anything still in flight makes
+		// the session queue this behind it instead of refusing it.
+		smolt.sendUserMessage(reviewPrompt(String(next.number), settings, next.repo === here ? undefined : next.repo), {
+			deliverAs: "followUp",
+		});
 	};
 
-	smolt.on("turn_start", async () => {
-		busy = true;
-	});
-	smolt.on("turn_end", async () => {
-		busy = false;
+	smolt.on("agent_settled", async () => {
 		const previous = restoreModel;
 		restoreModel = undefined;
 		if (previous) await smolt.setModel(previous);
-		drain();
+		const startedAt = reviewing;
+		reviewing = undefined;
+		if (startedAt !== undefined) await autoFix(startedAt);
+		await drain();
 	});
 
 	// Kept so the tool can start watching the moment it is configured, rather
 	// than making the reader restart to get what they just asked for.
 	// Restartable, so choosing repos in setup or settings takes effect at once
 	// rather than at the next launch.
+	/** What watching is doing right now, said without disturbing it. */
+	const describeWatching = (settings: ReviewSettings): string => {
+		const repos = settings.watchRepos ?? [];
+		if (repos.length === 0) return "not watching anything";
+		if (stopWatching === undefined) return `configured to watch ${repos.join(", ")}, not started yet`;
+		return `watching ${repos.join(", ")}`;
+	};
+
+	/**
+	 * Hand a finished review's findings to a session that fixes them.
+	 *
+	 * It runs as a background child session, in memory and never written to
+	 * disk, so the reader's chat is not taken over by a stream of edits they did
+	 * not ask to watch: the review lands in chat, the fixing happens out of
+	 * sight, and a notice says what came of it. Off unless asked for — a review
+	 * that edits code on its own is a bigger promise than one that reports.
+	 */
+	const autoFix = async (startedAt: number): Promise<void> => {
+		if (loadReviewSettings(process.cwd()).autoFix !== true) return;
+		const ctx = sessionCtx;
+		if (ctx === undefined) return;
+		// The record the session just opened: the newest one, and only if this run
+		// is what created it. A review that recorded nothing leaves nothing to fix.
+		const review = store.listReviews().pop();
+		if (review === undefined || Date.parse(review.created) < startedAt) return;
+		const open = store.listFindings(review.slug).filter((finding) => finding.status === "open");
+		if (open.length === 0) return;
+		ctx.ui.notify(
+			`Auto-fix: working through ${open.length} finding${open.length === 1 ? "" : "s"} from ${review.slug} in a hidden session.`,
+			"info",
+		);
+		try {
+			await spawnChildSession(
+				{ task: fixBrief(open), customTools: [], ctx, defaultThinkingLevel: "medium" },
+				(status, detail) =>
+					ctx.ui.notify(
+						status === "completed" ? `Auto-fix finished: ${detail}` : `Auto-fix failed: ${detail}`,
+						status === "completed" ? "info" : "warning",
+					),
+			);
+		} catch (error) {
+			ctx.ui.notify(`Auto-fix could not start: ${error instanceof Error ? error.message : error}`, "warning");
+		}
+	};
+
 	const beginWatching = (ctx: ExtensionContext): string => {
 		stopWatching?.();
 		stopWatching = undefined;
@@ -362,14 +484,34 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 							// was never drawn.
 							openBrowser(prompt.verificationUri);
 							ctx.ui.setStatus("review-login", `GitHub code ${prompt.userCode}`);
-							const approval = awaitApproval(prompt, new AbortController().signal);
-							await ctx.ui.confirm(
+							const cancel = new AbortController();
+							// Settled rather than thrown: nothing awaits this promise while the
+							// dialog is up, and a rejection with no handler in the meantime — the
+							// reader denies the code, or leaves it until it expires — is an
+							// unhandled rejection, which Node raises as an uncaught exception and
+							// smolt exits on.
+							const approval = awaitApproval(prompt, cancel.signal).then(
+								(login) => ({ login }) as const,
+								(error: unknown) => ({ error }) as const,
+							);
+							const approved = await ctx.ui.confirm(
 								`GitHub code: ${prompt.userCode}`,
 								`Enter ${prompt.userCode} at ${prompt.verificationUri} to connect GitHub. The browser should have opened there already. Press OK once you have approved it.`,
 							);
-							const login = await approval;
+							// Cancelling stops the polling instead of leaving it to run for the
+							// fifteen minutes the code lives.
+							if (!approved) cancel.abort();
+							const outcome = await approval;
 							ctx.ui.setStatus("review-login", undefined);
-							ctx.ui.notify(`Connected to GitHub as ${login}.`, "info");
+							if ("error" in outcome) {
+								const message = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+								ctx.ui.notify(
+									approved ? `GitHub login failed: ${message}` : "GitHub login cancelled.",
+									approved ? "error" : "info",
+								);
+							} else {
+								ctx.ui.notify(`Connected to GitHub as ${outcome.login}.`, "info");
+							}
 						} catch (error) {
 							ctx.ui.setStatus("review-login", undefined);
 							ctx.ui.notify(`GitHub login failed: ${error instanceof Error ? error.message : error}`, "error");
@@ -389,6 +531,14 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 				// Only repos GitHub will accept a webhook on are offered, so nobody
 				// picks one that then silently never works. The repo open here sorts
 				// first, since it is what the reader is almost always after.
+				// Asked before the repo list, not after it: this is a question about
+				// what a review may do, and the answer holds whether anything is watched.
+				saveReviewSettings({
+					autoFix: await ctx.ui.confirm(
+						"Fix what a review finds?",
+						"Off by default. With it on, a finished review hands its findings to a hidden background session that fixes them in your working tree and reports what it changed. It never commits or pushes.",
+					),
+				});
 				const here = currentRepo();
 				const candidates = adminRepos().sort((a, b) => (a === here ? -1 : b === here ? 1 : 0));
 				if (candidates.length === 0) {
@@ -398,21 +548,16 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 					);
 					return;
 				}
-				// Repeated single picks rather than a checklist: the extension UI has
-				// no multi-select, and a toggling list makes changing your mind cheap.
-				const chosen = new Set(settings.watchRepos ?? []);
-				for (;;) {
-					const done = `Done — watch ${chosen.size} repo${chosen.size === 1 ? "" : "s"}`;
-					const pick = await ctx.ui.select("Which repos should smolt review pull requests on?", [
-						done,
-						...candidates.map((name) => `${chosen.has(name) ? "✓ " : "· "}${name}`),
-					]);
-					if (pick === undefined || pick === done) break;
-					const name = pick.slice(2);
-					if (chosen.has(name)) chosen.delete(name);
-					else chosen.add(name);
+				const chosen = await ctx.ui.multiselect(
+					"Which repos should smolt review pull requests on?",
+					candidates,
+					settings.watchRepos ?? [],
+				);
+				if (chosen === undefined) {
+					ctx.ui.notify("Setup cancelled — nothing changed.", "info");
+					return;
 				}
-				saveReviewSettings({ watchRepos: [...chosen] });
+				saveReviewSettings({ watchRepos: chosen });
 				const state = sessionCtx ? beginWatching(sessionCtx) : "not watching yet";
 				ctx.ui.notify(
 					`Reviews run on ${settings.model ?? "the chat model"}, post to the pull request, and list at most ` +
@@ -424,22 +569,10 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 			}
 
 			const settings = loadReviewSettings(process.cwd());
-			const selector = settings.model ?? "";
-			const slash = selector.indexOf("/");
-			if (slash > 0) {
-				const wanted = ctx.modelRegistry.find(selector.slice(0, slash), selector.slice(slash + 1));
-				if (wanted === undefined) {
-					ctx.ui.notify(
-						`The review model ${selector} is not available; reviewing with the session's model.`,
-						"warning",
-					);
-				} else if (ctx.model && wanted.id === ctx.model.id && wanted.provider === ctx.model.provider) {
-					// already on it
-				} else if (await smolt.setModel(wanted)) {
-					restoreModel = ctx.model;
-				}
-			}
-			smolt.sendUserMessage(reviewPrompt(trimmed, settings));
+			const warning = await useReviewModel(settings, ctx.model);
+			if (warning !== undefined) ctx.ui.notify(warning, "warning");
+			reviewing = Date.now();
+			smolt.sendUserMessage(reviewPrompt(trimmed, settings), { deliverAs: "followUp" });
 		},
 	});
 }

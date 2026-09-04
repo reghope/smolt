@@ -59,8 +59,13 @@ export function storedToken(): string | undefined {
 
 function storeToken(token: string, scope: string): void {
 	const file = credentialFile();
-	fs.mkdirSync(path.dirname(file), { recursive: true });
-	fs.writeFileSync(file, `${JSON.stringify({ token, scope, createdAt: Date.now() }, null, "\t")}\n`, "utf-8");
+	// Owner-only, like every other credential smolt stores (see core/auth-storage.ts):
+	// this token can read private repos, comment as the reader, and add webhooks.
+	fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+	fs.writeFileSync(file, `${JSON.stringify({ token, scope, createdAt: Date.now() }, null, "\t")}\n`, {
+		encoding: "utf-8",
+		mode: 0o600,
+	});
 }
 
 /** Forget the stored account. */

@@ -46,6 +46,9 @@ export function listSessions(root: string = sessionsDir(), limit = 50): SessionS
 }
 
 /** Every stored transcript file under the root, newest first. */
+/** Folder name holding hidden chats, kept in step with the coding agent's session store. */
+const HIDDEN_SESSION_DIR = "hidden";
+
 function collectSessionFiles(root: string): { path: string; mtime: number }[] {
 	const files: { path: string; mtime: number }[] = [];
 	const walk = (dir: string): void => {
@@ -59,8 +62,14 @@ function collectSessionFiles(root: string): { path: string; mtime: number }[] {
 			const full = join(dir, name);
 			try {
 				const st = statSync(full);
-				if (st.isDirectory()) walk(full);
-				else if (name.endsWith(".jsonl")) files.push({ path: full, mtime: st.mtimeMs });
+				// A `hidden` folder inside a project's session directory holds chats an
+				// extension ran on the reader's behalf — the one /review auto-fix uses.
+				// They are kept and readable, but they are not conversations the reader
+				// had, so they stay out of the sidebar. This walker recurses, so unlike
+				// the coding agent's listers it has to be told.
+				if (st.isDirectory()) {
+					if (name !== HIDDEN_SESSION_DIR) walk(full);
+				} else if (name.endsWith(".jsonl")) files.push({ path: full, mtime: st.mtimeMs });
 			} catch {
 				// unreadable entry
 			}
@@ -282,4 +291,21 @@ export function readSessionMessages(path: string, options: { limit?: number; bef
 		}
 	}
 	return { messages: held, start: before === undefined ? total - held.length : first, userStart };
+}
+
+/**
+ * The folder a stored chat ran in, from its own opening record.
+ *
+ * A chat belongs to the project it was started in, so opening one has to be
+ * able to ask where that was rather than assume the folder on screen. Reads
+ * through the same mtime-keyed cache as the listing, so asking on every
+ * switch costs nothing after the first.
+ */
+export function sessionCwd(path: string): string {
+	try {
+		return summarize(path, statSync(path).mtimeMs)?.cwd ?? "";
+	} catch {
+		// An unreadable or missing transcript names no folder of its own.
+		return "";
+	}
 }

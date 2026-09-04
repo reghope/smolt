@@ -58,6 +58,20 @@ describe("listSessions", () => {
 		expect(titles.slice().sort()).toEqual(["mine", "theirs"]);
 	});
 
+	test("leaves hidden chats out of the sidebar", () => {
+		writeSession(project, "mine", "an ordinary chat");
+		const hidden = join(root, projectDirName(project), "hidden");
+		mkdirSync(hidden, { recursive: true });
+		const lines = [
+			JSON.stringify({ type: "session", id: "id-autofix", cwd: project }),
+			JSON.stringify({ type: "session_info", name: "autofix" }),
+			JSON.stringify({ type: "message", message: { role: "user", content: "fixing what the review found" } }),
+		];
+		writeFileSync(join(hidden, "autofix.jsonl"), `${lines.join("\n")}\n`);
+
+		expect(listSessions(root, 50).map((row) => row.title)).toEqual(["mine"]);
+	});
+
 	test("carries the folder each chat ran in", () => {
 		writeSession(project, "mine", "hello");
 		expect(listSessions(root, 50)[0]?.cwd).toBe(project);

@@ -15,7 +15,7 @@ import {
 	ReviewStore,
 	reviewTool,
 } from "./store.ts";
-import { currentRepo, forwardingAvailable, isAdmin, startWatching } from "./watch.ts";
+import { adminRepos, currentRepo, forwardingAvailable, isAdmin, watchAll } from "./watch.ts";
 
 /**
  * Review: CodeRabbit-grade code review as a smolt extension.
@@ -94,7 +94,20 @@ Then POST the review to pull request #${pr} as ONE comment, using gh on this mac
 - Plain, specific, courteous wording. No praise padding, and no model or vendor attribution beyond the heading.`;
 }
 
-function reviewPrompt(target: string, settings: ReviewSettings): string {
+/**
+ * Reviewing a pull request in a repo that is not the one open here.
+ *
+ * The diff alone is not enough to judge a change, so rather than review it
+ * blind, clone the repo somewhere temporary and read the code around it. The
+ * clone is the price of reviewing a repo you do not happen to have open.
+ */
+function elsewhereInstructions(repo: string, pr: string): string {
+	return `
+
+This pull request is on ${repo}, which is NOT the repository open in this session. Before reviewing it: clone ${repo} into a temporary directory ('gh repo clone ${repo} <tmp> -- --filter=blob:none'), fetch the pull request there ('git -C <tmp> fetch origin pull/${pr}/head'), and do the whole review inside that clone so you can read the code around the diff. Delete the clone when you are done. Never touch the working tree of the repository open here.`;
+}
+
+function reviewPrompt(target: string, settings: ReviewSettings, elsewhere?: string): string {
 	const named = target === "" ? "No target was given: review the pending work." : `The target, as given: ${target}`;
 	const pr = pullRequestNumber(target);
 	const max = settings.maxFindings ?? DEFAULT_MAX_FINDINGS;
@@ -102,7 +115,7 @@ function reviewPrompt(target: string, settings: ReviewSettings): string {
 
 ${doctrine()}
 
-Then show me the review here in chat: findings grouped by severity, each as file:line, the claim, and the failure scenario in a sentence — plus the standing findings you re-verified and anything you marked fixed. I must be able to act on your message without opening the record (it lives in this project's review store, outside the repo).${pr === undefined ? "" : postingInstructions(pr, max)}`;
+Then show me the review here in chat: findings grouped by severity, each as file:line, the claim, and the failure scenario in a sentence — plus the standing findings you re-verified and anything you marked fixed. I must be able to act on your message without opening the record (it lives in this project's review store, outside the repo).${elsewhere !== undefined && pr !== undefined ? elsewhereInstructions(elsewhere, pr) : ""}${pr === undefined ? "" : postingInstructions(pr, max)}`;
 }
 
 export default function reviewExtension(smolt: ExtensionAPI): void {
@@ -154,11 +167,11 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 						"Omit to leave it as it is.",
 				}),
 			),
-			watch: Type.Optional(
-				Type.Boolean({
+			watchRepos: Type.Optional(
+				Type.Array(Type.String(), {
 					description:
-						"For 'configure': review pull requests on this repo as they arrive, while smolt runs. " +
-						"Needs admin on the repo.",
+						"For 'configure': repos as 'owner/name' whose pull requests are reviewed as they arrive while " +
+						"smolt runs. Needs admin on each. Pass [] to stop watching.",
 				}),
 			),
 			review: Type.Optional(Type.String({ description: "Review slug. Omit to mean the latest review." })),
@@ -215,19 +228,15 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 						if (found === undefined) return reply({ error: `No such model: ${params.model}` });
 						update.model = params.model;
 					}
-					if (typeof params.watch === "boolean") update.watch = params.watch;
+					if (Array.isArray(params.watchRepos)) update.watchRepos = params.watchRepos;
 					saveReviewSettings(update);
-					if (params.watch === false) {
-						stopWatching?.();
-						stopWatching = undefined;
-					}
 				}
 				const settings = loadReviewSettings(process.cwd());
 				const watching = sessionCtx ? beginWatching(sessionCtx) : "no session yet";
 				return reply({
 					githubAccount: (await connectedAccount()) ?? "not connected — tell the user to run /review setup",
 					model: settings.model ?? "the session's own model",
-					watch: settings.watch === true,
+					watchRepos: settings.watchRepos ?? [],
 					maxFindings: settings.maxFindings ?? DEFAULT_MAX_FINDINGS,
 					repo: repo ?? "not a GitHub repo",
 					admin: repo === undefined ? false : isAdmin(repo),
@@ -247,13 +256,22 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 	// A pull request arriving mid-thought must not seize the session, so a
 	// review waits for the reader's turn to finish and goes one at a time.
 	let busy = false;
-	const pending: number[] = [];
+	const pending: { number: number; repo: string }[] = [];
 
 	const drain = (): void => {
 		if (busy || pending.length === 0) return;
 		const next = pending.shift();
 		if (next === undefined) return;
-		smolt.sendUserMessage(reviewPrompt(String(next), loadReviewSettings(process.cwd())));
+		// Only say "this is elsewhere" when it really is: a pull request on the
+		// repo open here is reviewed in place, with no clone.
+		const here = currentRepo();
+		smolt.sendUserMessage(
+			reviewPrompt(
+				String(next.number),
+				loadReviewSettings(process.cwd()),
+				next.repo === here ? undefined : next.repo,
+			),
+		);
 	};
 
 	smolt.on("turn_start", async () => {
@@ -269,50 +287,31 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 
 	// Kept so the tool can start watching the moment it is configured, rather
 	// than making the reader restart to get what they just asked for.
+	// Restartable, so choosing repos in setup or settings takes effect at once
+	// rather than at the next launch.
 	const beginWatching = (ctx: ExtensionContext): string => {
-		if (stopWatching !== undefined) return "already watching";
-		if (loadReviewSettings(process.cwd()).watch !== true) return "watching is off";
-		const repo = currentRepo();
-		if (repo === undefined) return "this folder is not a GitHub repo";
+		stopWatching?.();
+		stopWatching = undefined;
+		ctx.ui.setStatus("review-watch", undefined);
+		const repos = loadReviewSettings(process.cwd()).watchRepos ?? [];
+		if (repos.length === 0) return "not watching anything";
 		if (!forwardingAvailable()) return "needs: gh extension install cli/gh-webhook";
-		if (!isAdmin(repo)) return `needs admin on ${repo}`;
-		stopWatching = startWatching(repo, {
+		stopWatching = watchAll(repos, {
 			review: (event) => {
-				ctx.ui.notify(`Reviewing pull request #${event.number}: ${event.title}`, "info");
-				pending.push(event.number);
+				ctx.ui.notify(`Reviewing ${event.repo} #${event.number}: ${event.title}`, "info");
+				pending.push({ number: event.number, repo: event.repo });
 				drain();
 			},
 			notice: (message, kind) => ctx.ui.notify(message, kind),
 		});
-		ctx.ui.setStatus("review-watch", `watching ${repo}`);
-		return `watching ${repo}`;
+		const label = repos.length === 1 ? repos[0] : `${repos.length} repos`;
+		ctx.ui.setStatus("review-watch", `watching ${label}`);
+		return `watching ${repos.join(", ")}`;
 	};
 
 	smolt.on("session_start", async (_event, ctx) => {
 		sessionCtx = ctx;
-		if (loadReviewSettings(process.cwd()).watch !== true) return;
-		const repo = currentRepo();
-		if (repo === undefined) return;
-		if (!forwardingAvailable()) {
-			ctx.ui.notify(
-				"Reviewing pull requests as they arrive needs the webhook extension: gh extension install cli/gh-webhook",
-				"warning",
-			);
-			return;
-		}
-		if (!isAdmin(repo)) {
-			ctx.ui.notify(`Watching ${repo} needs admin on it, which this account does not have.`, "warning");
-			return;
-		}
-		stopWatching = startWatching(repo, {
-			review: (event) => {
-				ctx.ui.notify(`Reviewing pull request #${event.number}: ${event.title}`, "info");
-				pending.push(event.number);
-				drain();
-			},
-			notice: (message, kind) => ctx.ui.notify(message, kind),
-		});
-		ctx.ui.setStatus("review-watch", `watching ${repo}`);
+		beginWatching(ctx);
 	});
 
 	smolt.on("session_shutdown", async () => {
@@ -380,37 +379,45 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 				// No model question: reviews follow the chat model unless the reader
 				// changes it in settings. Asking here made setup longer without
 				// telling anyone anything they did not already have a default for.
-				// Watching only works where GitHub will accept a webhook, so a repo
-				// we cannot watch says so here rather than failing silently later.
-				const repo = currentRepo();
-				let watch = false;
-				if (repo === undefined) {
-					ctx.ui.notify(
-						"This folder has no GitHub 'origin' remote, so there are no pull requests to watch.",
-						"info",
-					);
-				} else if (!forwardingAvailable()) {
+				if (!forwardingAvailable()) {
 					ctx.ui.notify(
 						"Reviewing pull requests as they arrive needs the webhook extension: gh extension install cli/gh-webhook",
 						"info",
 					);
-				} else if (!isAdmin(repo)) {
+					return;
+				}
+				// Only repos GitHub will accept a webhook on are offered, so nobody
+				// picks one that then silently never works. The repo open here sorts
+				// first, since it is what the reader is almost always after.
+				const here = currentRepo();
+				const candidates = adminRepos().sort((a, b) => (a === here ? -1 : b === here ? 1 : 0));
+				if (candidates.length === 0) {
 					ctx.ui.notify(
-						`Reviewing pull requests as they arrive needs admin on ${repo}, which this account does not have. Run /review <number> by hand instead.`,
+						"You are not an admin of any repo GitHub will let smolt watch, so pull requests need /review <number>.",
 						"info",
 					);
-				} else {
-					watch =
-						(await ctx.ui.confirm(
-							`Review pull requests on ${repo} as they arrive?`,
-							"Smolt holds an outbound connection to GitHub while it runs and reviews each pull request as it opens or gets new commits. It adds a webhook to the repo; nothing listens on your machine.",
-						)) === true;
+					return;
 				}
-				saveReviewSettings({ watch });
+				// Repeated single picks rather than a checklist: the extension UI has
+				// no multi-select, and a toggling list makes changing your mind cheap.
+				const chosen = new Set(settings.watchRepos ?? []);
+				for (;;) {
+					const done = `Done — watch ${chosen.size} repo${chosen.size === 1 ? "" : "s"}`;
+					const pick = await ctx.ui.select("Which repos should smolt review pull requests on?", [
+						done,
+						...candidates.map((name) => `${chosen.has(name) ? "✓ " : "· "}${name}`),
+					]);
+					if (pick === undefined || pick === done) break;
+					const name = pick.slice(2);
+					if (chosen.has(name)) chosen.delete(name);
+					else chosen.add(name);
+				}
+				saveReviewSettings({ watchRepos: [...chosen] });
+				const state = sessionCtx ? beginWatching(sessionCtx) : "not watching yet";
 				ctx.ui.notify(
-					`Reviews run on ${settings.model ?? "the chat model"} and post to pull requests you review. ` +
-						`${watch ? `New pull requests on ${repo} are reviewed as they arrive, while smolt is open. ` : ""}` +
-						`At most ${settings.maxFindings ?? DEFAULT_MAX_FINDINGS} findings per comment. Change any of it in Settings.`,
+					`Reviews run on ${settings.model ?? "the chat model"}, post to the pull request, and list at most ` +
+						`${settings.maxFindings ?? DEFAULT_MAX_FINDINGS} findings. Now ${state}. ` +
+						"A pull request on a repo you do not have open here is cloned to a temporary folder, so its review still reads the code around the diff.",
 					"info",
 				);
 				return;

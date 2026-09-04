@@ -5,6 +5,8 @@ export interface PullRequestEvent {
 	number: number;
 	title: string;
 	headSha: string;
+	/** "owner/name" of the repo the pull request is on. */
+	repo: string;
 }
 
 /** Actions that mean the code to review has changed. */
@@ -51,6 +53,22 @@ export function isAdmin(repo: string): boolean {
 	return ghJson<{ permissions?: { admin?: boolean } }>(["api", `repos/${repo}`])?.permissions?.admin === true;
 }
 
+/** Repos the reader could watch: the ones GitHub will let them add a webhook to. */
+export function adminRepos(): string[] {
+	const repos = ghJson<{ nameWithOwner: string; viewerPermission?: string }[]>([
+		"repo",
+		"list",
+		"--limit",
+		"100",
+		"--json",
+		"nameWithOwner,viewerPermission",
+	]);
+	return (repos ?? [])
+		.filter((repo) => repo.viewerPermission === "ADMIN")
+		.map((repo) => repo.nameWithOwner)
+		.sort();
+}
+
 /** Is the webhook-forwarding extension installed? */
 export function forwardingAvailable(): boolean {
 	try {
@@ -78,7 +96,14 @@ interface Hooks {
  * The cost is that GitHub must accept a webhook on the repo, which is why the
  * caller checks for admin first.
  */
-export function startWatching(repo: string, hooks: Hooks): () => void {
+export function watchAll(repos: string[], hooks: Hooks): () => void {
+	const stops = repos.map((repo) => startWatching(repo, hooks));
+	return () => {
+		for (const stop of stops) stop();
+	};
+}
+
+function startWatching(repo: string, hooks: Hooks): () => void {
 	let stopped = false;
 	let child: ReturnType<typeof spawn> | undefined;
 	let retry: ReturnType<typeof setTimeout> | undefined;
@@ -116,6 +141,7 @@ export function startWatching(repo: string, hooks: Hooks): () => void {
 					number,
 					title: typeof pr.title === "string" ? pr.title : `#${number}`,
 					headSha: head?.sha ?? "",
+					repo,
 				});
 			}
 		});

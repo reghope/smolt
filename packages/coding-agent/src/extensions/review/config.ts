@@ -18,8 +18,13 @@ export interface ReviewSettings {
 	model?: string;
 	/** Cap on findings in a posted comment. Default 15. */
 	maxFindings?: number;
-	/** While smolt is running, review pull requests on this repo as they arrive. */
-	watch?: boolean;
+	/**
+	 * Repos, as "owner/name", whose pull requests are reviewed as they arrive
+	 * while smolt runs. A repo that is not checked out here is cloned to a
+	 * temporary directory for the review, so a review anywhere reads the code
+	 * around the diff rather than judging the diff alone.
+	 */
+	watchRepos?: string[];
 }
 
 export const DEFAULT_MAX_FINDINGS = 15;
@@ -49,7 +54,9 @@ export function loadReviewSettings(cwd: string): ReviewSettings {
 			if (typeof parsed.maxFindings === "number" && parsed.maxFindings >= 1) {
 				settings.maxFindings = Math.floor(parsed.maxFindings);
 			}
-			if (typeof parsed.watch === "boolean") settings.watch = parsed.watch;
+			if (Array.isArray(parsed.watchRepos)) {
+				settings.watchRepos = parsed.watchRepos.filter((repo): repo is string => typeof repo === "string");
+			}
 		} catch {
 			// malformed settings file: ignore rather than break the session
 		}

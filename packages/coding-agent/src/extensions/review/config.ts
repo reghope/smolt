@@ -16,15 +16,13 @@ function getAgentDir(): string {
 export interface ReviewSettings {
 	/** "provider/id" of the model a review runs on. Unset means the session's own model. */
 	model?: string;
-	/** Cap on findings in a posted comment. Default 10. */
+	/** Cap on findings in a posted comment. Default 15. */
 	maxFindings?: number;
-	/** Naming a pull request posts the review to it. Default true. */
-	post?: boolean;
 	/** While smolt is running, review pull requests on this repo as they arrive. */
 	watch?: boolean;
 }
 
-export const DEFAULT_MAX_FINDINGS = 10;
+export const DEFAULT_MAX_FINDINGS = 15;
 
 /** The user-level review.json, where the settings page and /review setup write. */
 export function reviewSettingsFile(): string {
@@ -51,7 +49,6 @@ export function loadReviewSettings(cwd: string): ReviewSettings {
 			if (typeof parsed.maxFindings === "number" && parsed.maxFindings >= 1) {
 				settings.maxFindings = Math.floor(parsed.maxFindings);
 			}
-			if (typeof parsed.post === "boolean") settings.post = parsed.post;
 			if (typeof parsed.watch === "boolean") settings.watch = parsed.watch;
 		} catch {
 			// malformed settings file: ignore rather than break the session

@@ -96,7 +96,7 @@ Then POST the review to pull request #${pr} as ONE comment, using gh on this mac
 
 function reviewPrompt(target: string, settings: ReviewSettings): string {
 	const named = target === "" ? "No target was given: review the pending work." : `The target, as given: ${target}`;
-	const pr = settings.post === false ? undefined : pullRequestNumber(target);
+	const pr = pullRequestNumber(target);
 	const max = settings.maxFindings ?? DEFAULT_MAX_FINDINGS;
 	return `Review code changes for real defects. ${named}
 
@@ -126,7 +126,7 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 			"mark standing findings 'fixed' when the code shows them gone; 'complete' (summary, review?) " +
 			"closes the review.\n\n" +
 			"SETTINGS: 'settings' reports how reviews are configured here and whether this repo can be " +
-			"watched; 'configure' (model?, post?, watch?) changes it and starts or stops watching " +
+			"watched; 'configure' (model?, watch?) changes it and starts or stops watching " +
 			"immediately.\n\n" +
 			"WHEN: driving a /review lap, when the user asks what past reviews found, or when fixing " +
 			"findings — mark them 'fixed' as they are dealt with. Also when the user asks in plain words " +
@@ -152,11 +152,6 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 					description:
 						"For 'configure': 'provider/id' of the model reviews run on, e.g. 'anthropic/claude-sonnet-4'. " +
 						"Omit to leave it as it is.",
-				}),
-			),
-			post: Type.Optional(
-				Type.Boolean({
-					description: "For 'configure': naming a pull request posts the review to it as a comment.",
 				}),
 			),
 			watch: Type.Optional(
@@ -220,7 +215,6 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 						if (found === undefined) return reply({ error: `No such model: ${params.model}` });
 						update.model = params.model;
 					}
-					if (typeof params.post === "boolean") update.post = params.post;
 					if (typeof params.watch === "boolean") update.watch = params.watch;
 					saveReviewSettings(update);
 					if (params.watch === false) {
@@ -233,7 +227,6 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 				return reply({
 					githubAccount: (await connectedAccount()) ?? "not connected — tell the user to run /review setup",
 					model: settings.model ?? "the session's own model",
-					postsToPullRequests: settings.post !== false,
 					watch: settings.watch === true,
 					maxFindings: settings.maxFindings ?? DEFAULT_MAX_FINDINGS,
 					repo: repo ?? "not a GitHub repo",
@@ -404,15 +397,12 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 					ctx.ui.notify("Setup cancelled — nothing changed.", "info");
 					return;
 				}
-				const post = await ctx.ui.confirm(
-					"Post reviews to pull requests?",
-					"When you run /review on a pull request, smolt writes the review to it as a comment, from this machine, authored by your GitHub account.",
-				);
+
 				// Watching only works where GitHub will accept a webhook, so a repo
 				// we cannot watch says so here rather than failing silently later.
 				const repo = currentRepo();
 				let watch = false;
-				if (repo !== undefined && post) {
+				if (repo !== undefined) {
 					if (!isAdmin(repo)) {
 						ctx.ui.notify(
 							`Reviewing pull requests as they arrive needs admin on ${repo}, which this account does not have. Run /review <number> by hand instead.`,
@@ -431,9 +421,9 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 							)) === true;
 					}
 				}
-				saveReviewSettings({ model: `${provider}/${model}`, post, watch });
+				saveReviewSettings({ model: `${provider}/${model}`, watch });
 				ctx.ui.notify(
-					`Reviews will run on ${provider}/${model}, and ${post ? "post to" : "stay out of"} pull requests. ` +
+					`Reviews will run on ${provider}/${model}, and post to pull requests you review. ` +
 						`${watch ? "New pull requests are reviewed as they arrive, while smolt is open. " : ""}` +
 						`At most ${settings.maxFindings ?? DEFAULT_MAX_FINDINGS} findings per comment. Settings live in review.json.`,
 					"info",

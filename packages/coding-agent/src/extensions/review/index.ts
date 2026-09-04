@@ -13,6 +13,7 @@ import {
 	ReviewStore,
 	reviewTool,
 } from "./store.ts";
+import { currentRepo, forwardingAvailable, isAdmin, startWatching } from "./watch.ts";
 
 /**
  * Review: CodeRabbit-grade code review as a smolt extension.
@@ -104,6 +105,7 @@ Then show me the review here in chat: findings grouped by severity, each as file
 
 export default function reviewExtension(smolt: ExtensionAPI): void {
 	const store = new ReviewStore(reviewRoot());
+	let stopWatching: (() => void) | undefined;
 
 	smolt.registerTool({
 		name: "review",
@@ -181,10 +183,58 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 	// hands it straight back when the turn settles, so choosing a cheap
 	// reviewer never leaves the reader's chat on the wrong model.
 	let restoreModel: Model<Api> | undefined;
+	// A pull request arriving mid-thought must not seize the session, so a
+	// review waits for the reader's turn to finish and goes one at a time.
+	let busy = false;
+	const pending: number[] = [];
+
+	const drain = (): void => {
+		if (busy || pending.length === 0) return;
+		const next = pending.shift();
+		if (next === undefined) return;
+		smolt.sendUserMessage(reviewPrompt(String(next), loadReviewSettings(process.cwd())));
+	};
+
+	smolt.on("turn_start", async () => {
+		busy = true;
+	});
 	smolt.on("turn_end", async () => {
+		busy = false;
 		const previous = restoreModel;
 		restoreModel = undefined;
 		if (previous) await smolt.setModel(previous);
+		drain();
+	});
+
+	smolt.on("session_start", async (_event, ctx) => {
+		if (loadReviewSettings(process.cwd()).watch !== true) return;
+		const repo = currentRepo();
+		if (repo === undefined) return;
+		if (!forwardingAvailable()) {
+			ctx.ui.notify(
+				"Reviewing pull requests as they arrive needs the webhook extension: gh extension install cli/gh-webhook",
+				"warning",
+			);
+			return;
+		}
+		if (!isAdmin(repo)) {
+			ctx.ui.notify(`Watching ${repo} needs admin on it, which this account does not have.`, "warning");
+			return;
+		}
+		stopWatching = startWatching(repo, {
+			review: (event) => {
+				ctx.ui.notify(`Reviewing pull request #${event.number}: ${event.title}`, "info");
+				pending.push(event.number);
+				drain();
+			},
+			notice: (message, kind) => ctx.ui.notify(message, kind),
+		});
+		ctx.ui.setStatus("review-watch", `watching ${repo}`);
+	});
+
+	smolt.on("session_shutdown", async () => {
+		stopWatching?.();
+		stopWatching = undefined;
 	});
 
 	smolt.registerCommand("review", {
@@ -227,9 +277,33 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 					"Post reviews to pull requests?",
 					"When you run /review on a pull request, smolt writes the review to it as a comment, from this machine, authored by your GitHub account.",
 				);
-				saveReviewSettings({ model: `${provider}/${model}`, post });
+				// Watching only works where GitHub will accept a webhook, so a repo
+				// we cannot watch says so here rather than failing silently later.
+				const repo = currentRepo();
+				let watch = false;
+				if (repo !== undefined && post) {
+					if (!isAdmin(repo)) {
+						ctx.ui.notify(
+							`Reviewing pull requests as they arrive needs admin on ${repo}, which this account does not have. Run /review <number> by hand instead.`,
+							"info",
+						);
+					} else if (!forwardingAvailable()) {
+						ctx.ui.notify(
+							"Reviewing pull requests as they arrive needs the webhook extension: gh extension install cli/gh-webhook",
+							"info",
+						);
+					} else {
+						watch =
+							(await ctx.ui.confirm(
+								`Review pull requests on ${repo} as they arrive?`,
+								"Smolt holds an outbound connection to GitHub while it runs and reviews each pull request as it opens or gets new commits. It adds a webhook to the repo; nothing listens on your machine.",
+							)) === true;
+					}
+				}
+				saveReviewSettings({ model: `${provider}/${model}`, post, watch });
 				ctx.ui.notify(
 					`Reviews will run on ${provider}/${model}, and ${post ? "post to" : "stay out of"} pull requests. ` +
+						`${watch ? "New pull requests are reviewed as they arrive, while smolt is open. " : ""}` +
 						`At most ${settings.maxFindings ?? DEFAULT_MAX_FINDINGS} findings per comment. Settings live in review.json.`,
 					"info",
 				);

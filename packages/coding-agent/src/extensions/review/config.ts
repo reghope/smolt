@@ -20,14 +20,11 @@ export interface ReviewSettings {
 	maxFindings?: number;
 	/** Naming a pull request posts the review to it. Default true. */
 	post?: boolean;
-	/** While smolt is running, notice new and updated pull requests and review them. */
+	/** While smolt is running, review pull requests on this repo as they arrive. */
 	watch?: boolean;
-	/** Minutes between checks when watching. Default 10. */
-	watchMinutes?: number;
 }
 
 export const DEFAULT_MAX_FINDINGS = 10;
-export const DEFAULT_WATCH_MINUTES = 10;
 
 /** The user-level review.json, where the settings page and /review setup write. */
 export function reviewSettingsFile(): string {
@@ -56,9 +53,6 @@ export function loadReviewSettings(cwd: string): ReviewSettings {
 			}
 			if (typeof parsed.post === "boolean") settings.post = parsed.post;
 			if (typeof parsed.watch === "boolean") settings.watch = parsed.watch;
-			if (typeof parsed.watchMinutes === "number" && parsed.watchMinutes >= 1) {
-				settings.watchMinutes = Math.floor(parsed.watchMinutes);
-			}
 		} catch {
 			// malformed settings file: ignore rather than break the session
 		}

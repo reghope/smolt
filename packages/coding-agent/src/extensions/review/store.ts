@@ -3,9 +3,9 @@ import { join } from "node:path";
 import { parse, stringify } from "yaml";
 
 /**
- * Review: evidence-backed code-review findings, recorded as markdown under
- * the project's `.smolt/review/` directory so a review's record travels with
- * the repo the same way battletest runs and wayfinder maps do.
+ * Review: evidence-backed code-review findings, recorded as markdown in
+ * this project's review store — `~/.smolt/projects/<project>/review/`,
+ * outside the repo the same way battletest runs and wayfinder maps now are.
  *
  * A review holds the resolved target (what diff was looked at), the findings
  * that survived verification, and a closing summary. Findings follow the

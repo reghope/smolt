@@ -17,13 +17,13 @@ vulnerabilities unless they demonstrate how Smolt grants that write access or cr
 an operating-system privilege boundary.
 
 Smolt relies on users installing trustworthy extensions and loading trustworthy
-skills and only to use smolt within trusted repositories.  This is because files
+skills and only to use Smolt within trusted repositories.  This is because files
 like `AGENTS.md` or instructions in comments can be used to prompt inject the
 coding agent trivially and this cannot be protected against.
 
 ## Reporting a Vulnerability
 
-If you believe you found a security vulnerability in smolt or another package in
+If you believe you found a security vulnerability in Smolt or another package in
 this repository, please report it privately by either:
 
 - Emailing `security@earendil.com`, or
@@ -48,7 +48,7 @@ on `pi.dev`.
 ## Out Of Scope
 
 - Local code execution or sandboxing behavior (the Smolt coding agent intentionally does not have a sandbox)
-- Behavior of smolt extensions or skills installed by the user
+- Behavior of Smolt extensions or skills installed by the user
 - Risks from working in untrusted repositories
 - Risks from installing untrusted extensions, skills, packages, or tools
 - Isuses caused by non trustworthy MITM proxies
@@ -63,7 +63,7 @@ on `pi.dev`.
   profiles, or dotfile managers, unless the report shows how Smolt itself grants
   that access.
 - Issues caused by intentionally weakened user configuration.
-- Resource/DOS claims that require trusted local input/config against the smolt coding agent.
+- Resource/DOS claims that require trusted local input/config against the Smolt coding agent.
 - Reports about malicious model output.
 - User-approved or user-initiated local actions presented as vulnerabilities.
 

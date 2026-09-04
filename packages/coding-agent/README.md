@@ -12,9 +12,9 @@
 
 ---
 
-Smolt is a minimal terminal coding harness. Adapt smolt to your workflows, not the other way around, without having to fork and modify smolt internals. Extend it with TypeScript [Extensions](#extensions), [Skills](#skills), [Prompt Templates](#prompt-templates), and [Themes](#themes). Put your extensions, skills, prompt templates, and themes in [Smolt Packages](#smolt-packages) and share them with others via npm or git.
+Smolt is a minimal terminal coding harness. Adapt Smolt to your workflows, not the other way around, without having to fork and modify Smolt internals. Extend it with TypeScript [Extensions](#extensions), [Skills](#skills), [Prompt Templates](#prompt-templates), and [Themes](#themes). Put your extensions, skills, prompt templates, and themes in [Smolt Packages](#smolt-packages) and share them with others via npm or git.
 
-Smolt ships with powerful defaults but skips features like sub agents and plan mode. Instead, you can ask smolt to build what you want or install a third party smolt package that matches your workflow.
+Smolt ships with powerful defaults but skips features like sub agents and plan mode. Instead, you can ask Smolt to build what you want or install a third party Smolt package that matches your workflow.
 
 Smolt runs in four modes: interactive, print or JSON, RPC for process integration, and an SDK for embedding in your own apps.
 
@@ -64,7 +64,7 @@ smolt
 /login  # Then select provider
 ```
 
-Then just talk to smolt. By default, smolt gives the model four tools: `read`, `write`, `edit`, and `bash`. The model uses these to fulfill your requests. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [smolt packages](#smolt-packages).
+Then just talk to Smolt. By default, Smolt gives the model four tools: `read`, `write`, `edit`, and `bash`. The model uses these to fulfill your requests. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [Smolt packages](#smolt-packages).
 
 **Platform notes:** [Windows](docs/windows.md) | [Termux (Android)](docs/termux.md) | [tmux](docs/tmux.md) | [Terminal setup](docs/terminal-setup.md) | [Shell aliases](docs/shell-aliases.md)
 
@@ -72,7 +72,7 @@ Then just talk to smolt. By default, smolt gives the model four tools: `read`, `
 
 ## Providers & Models
 
-For each built-in provider, smolt maintains a list of tool-capable models. Configured provider catalogs refresh automatically; run `smolt update --models` to force an immediate refresh. Authenticate via subscription (`/login`) or API key, then select any model from that provider via `/model` (or Ctrl+L). Press Ctrl+S in the model picker to save the highlighted model as the startup default.
+For each built-in provider, Smolt maintains a list of tool-capable models. Configured provider catalogs refresh automatically; run `smolt update --models` to force an immediate refresh. Authenticate via subscription (`/login`) or API key, then select any model from that provider via `/model` (or Ctrl+L). Press Ctrl+S in the model picker to save the highlighted model as the startup default.
 
 **Subscriptions:**
 - Anthropic Claude Pro/Max
@@ -174,7 +174,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/reload` | Reload keybindings, extensions, skills, prompts, themes, and context files |
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
-| `/quit` | Quit smolt |
+| `/quit` | Quit Smolt |
 
 ### Keyboard Shortcuts
 
@@ -204,7 +204,7 @@ Submit messages while the agent is working:
 - **Escape** aborts and restores queued messages to editor
 - **Alt+Up** retrieves queued messages back to editor
 
-On Windows Terminal, `Alt+Enter` is fullscreen by default. Remap it in [docs/terminal-setup.md](docs/terminal-setup.md) so smolt can receive the follow-up shortcut.
+On Windows Terminal, `Alt+Enter` is fullscreen by default. Remap it in [docs/terminal-setup.md](docs/terminal-setup.md) so Smolt can receive the follow-up shortcut.
 
 Configure delivery in [settings](docs/settings.md): `steeringMode` and `followUpMode` can be `"one-at-a-time"` (default, waits for response) or `"all"` (delivers all queued at once). `transport` selects provider transport preference (`"sse"`, `"websocket"`, or `"auto"`) for providers that support multiple transports.
 
@@ -271,9 +271,9 @@ See [docs/settings.md](docs/settings.md) for all options.
 
 ### Project Trust
 
-On interactive startup, smolt asks before trusting a project folder that contains project-local settings, resources, or project `.agents/skills` and has no saved decision for the folder or a parent folder in `~/.smolt/agent/trust.json`. Trusting a project allows smolt to load `.smolt/settings.json` and `.smolt` resources, install missing project packages, and execute project extensions.
+On interactive startup, Smolt asks before trusting a project folder that contains project-local settings, resources, or project `.agents/skills` and has no saved decision for the folder or a parent folder in `~/.smolt/agent/trust.json`. Trusting a project allows Smolt to load `.smolt/settings.json` and `.smolt` resources, install missing project packages, and execute project extensions.
 
-Before the trust decision, smolt loads only context files, user/global extensions, and CLI `-e` extensions so they can handle the `project_trust` event. Project-local extensions, project package-managed extensions, and project settings are loaded only after the project is trusted. This split also applies when switching to a session from a different cwd whose trust has not been resolved in the current process.
+Before the trust decision, Smolt loads only context files, user/global extensions, and CLI `-e` extensions so they can handle the `project_trust` event. Project-local extensions, project package-managed extensions, and project settings are loaded only after the project is trusted. This split also applies when switching to a session from a different cwd whose trust has not been resolved in the current process.
 
 Non-interactive modes (`-p`, `--mode json`, and `--mode rpc`) do not show a trust prompt. Without an applicable saved trust decision, they use `defaultProjectTrust` from global settings: `ask` (default) and `never` ignore those project resources, while `always` trusts them. Pass `--approve`/`-a` or `--no-approve`/`-na` to override project trust for one run.
 
@@ -281,13 +281,13 @@ If no extension or saved decision applies, `defaultProjectTrust` controls the fa
 
 `smolt config` and package commands use the same project trust flow, except `smolt update` never prompts. Pass `--approve` to trust project-local settings for one command or `--no-approve` to ignore them.
 
-Use `/trust` in interactive mode to save a project trust decision for future sessions, including trust for the immediate parent folder. It writes `~/.smolt/agent/trust.json` only; the current session is not reloaded, so restart smolt for changes to take effect.
+Use `/trust` in interactive mode to save a project trust decision for future sessions, including trust for the immediate parent folder. It writes `~/.smolt/agent/trust.json` only; the current session is not reloaded, so restart Smolt for changes to take effect.
 
 ### Telemetry and update checks
 
 Smolt has two separate startup features:
 
-- **Update check:** disabled in this fork. There is no smolt release endpoint yet, and smolt never contacts the upstream project's servers. `SMOLT_SKIP_VERSION_CHECK=1` remains accepted for compatibility.
+- **Update check:** disabled in this fork. There is no Smolt release endpoint yet, and Smolt never contacts the upstream project's servers. `SMOLT_SKIP_VERSION_CHECK=1` remains accepted for compatibility.
 - **Install/update telemetry:** disabled in this fork; no version pings are sent anywhere. The `enableInstallTelemetry` setting now only controls optional provider attribution headers for OpenRouter, Cloudflare, and direct NVIDIA NIM requests.
 
 Use `--offline` or `SMOLT_OFFLINE=1` to disable all startup network operations described here, including update checks, package update checks, and install/update telemetry.
@@ -325,7 +325,7 @@ Review this code for bugs, security issues, and performance problems.
 Focus on: {{focus}}
 ```
 
-Place in `~/.smolt/agent/prompts/`, `.smolt/prompts/`, or a [smolt package](#smolt-packages) to share with others. See [docs/prompt-templates.md](docs/prompt-templates.md).
+Place in `~/.smolt/agent/prompts/`, `.smolt/prompts/`, or a [Smolt package](#smolt-packages) to share with others. See [docs/prompt-templates.md](docs/prompt-templates.md).
 
 ### Skills
 
@@ -341,13 +341,13 @@ Use this skill when the user asks about X.
 2. Then that
 ```
 
-Place in `~/.smolt/agent/skills/`, `~/.agents/skills/`, `.smolt/skills/`, or `.agents/skills/` (from `cwd` up through parent directories) or a [smolt package](#smolt-packages) to share with others. See [docs/skills.md](docs/skills.md).
+Place in `~/.smolt/agent/skills/`, `~/.agents/skills/`, `.smolt/skills/`, or `.agents/skills/` (from `cwd` up through parent directories) or a [Smolt package](#smolt-packages) to share with others. See [docs/skills.md](docs/skills.md).
 
 ### Extensions
 
 <p align="center"><img src="docs/images/doom-extension.png" alt="Doom Extension" width="600"></p>
 
-TypeScript modules that extend smolt with custom tools, commands, keyboard shortcuts, event handlers, and UI components.
+TypeScript modules that extend Smolt with custom tools, commands, keyboard shortcuts, event handlers, and UI components.
 
 ```typescript
 export default function (smolt: ExtensionAPI) {
@@ -357,7 +357,7 @@ export default function (smolt: ExtensionAPI) {
 }
 ```
 
-The default export can also be `async`. smolt waits for async extension factories before startup continues, which is useful for one-time initialization such as fetching remote model lists before calling `smolt.registerProvider()`.
+The default export can also be `async`. Smolt waits for async extension factories before startup continues, which is useful for one-time initialization such as fetching remote model lists before calling `smolt.registerProvider()`.
 
 **What's possible:**
 - Custom tools (or replace built-in tools entirely)
@@ -369,17 +369,17 @@ The default export can also be `async`. smolt waits for async extension factorie
 - Git checkpointing and auto-commit
 - SSH and sandbox execution
 - MCP server integration
-- Make smolt look like Claude Code
+- Make Smolt look like Claude Code
 - Games while waiting (yes, Doom runs)
 - ...anything you can dream up
 
-Place in `~/.smolt/agent/extensions/`, `.smolt/extensions/`, or a [smolt package](#smolt-packages) to share with others. See [docs/extensions.md](docs/extensions.md) and [examples/extensions/](examples/extensions/).
+Place in `~/.smolt/agent/extensions/`, `.smolt/extensions/`, or a [Smolt package](#smolt-packages) to share with others. See [docs/extensions.md](docs/extensions.md) and [examples/extensions/](examples/extensions/).
 
 ### Themes
 
-Built-in: `dark`, `light`. Themes hot-reload: modify the active theme file and smolt immediately applies changes.
+Built-in: `dark`, `light`. Themes hot-reload: modify the active theme file and Smolt immediately applies changes.
 
-Place in `~/.smolt/agent/themes/`, `.smolt/themes/`, or a [smolt package](#smolt-packages) to share with others. See [docs/themes.md](docs/themes.md).
+Place in `~/.smolt/agent/themes/`, `.smolt/themes/`, or a [Smolt package](#smolt-packages) to share with others. See [docs/themes.md](docs/themes.md).
 
 ### Smolt Packages
 
@@ -428,7 +428,7 @@ Create a package by adding a `smolt` key to `package.json`:
 }
 ```
 
-Without a `smolt` manifest, smolt auto-discovers from conventional directories (`extensions/`, `skills/`, `prompts/`, `themes/`).
+Without a `smolt` manifest, Smolt auto-discovers from conventional directories (`extensions/`, `skills/`, `prompts/`, `themes/`).
 
 See [docs/packages.md](docs/packages.md).
 
@@ -470,11 +470,11 @@ See [docs/rpc.md](docs/rpc.md) for the protocol.
 
 ## Philosophy
 
-Smolt is aggressively extensible so it doesn't have to dictate your workflow. Features that other tools bake in can be built with [extensions](#extensions), [skills](#skills), or installed from third-party [smolt packages](#smolt-packages). This keeps the core minimal while letting you shape smolt to fit how you work.
+Smolt is aggressively extensible so it doesn't have to dictate your workflow. Features that other tools bake in can be built with [extensions](#extensions), [skills](#skills), or installed from third-party [Smolt packages](#smolt-packages). This keeps the core minimal while letting you shape Smolt to fit how you work.
 
 **No MCP.** Build CLI tools with READMEs (see [Skills](#skills)), or build an extension that adds MCP support. [Why?](https://mariozechner.at/posts/2025-11-02-what-if-you-dont-need-mcp/)
 
-**No sub-agents.** There's many ways to do this. Spawn smolt instances via tmux, or build your own with [extensions](#extensions), or install a package that does it your way.
+**No sub-agents.** There's many ways to do this. Spawn Smolt instances via tmux, or build your own with [extensions](#extensions), or install a package that does it your way.
 
 **No permission popups.** Run in a container, or build your own confirmation flow with [extensions](#extensions) inline with your environment and security requirements.
 
@@ -523,7 +523,7 @@ smolt config                    # Enable/disable package resources
 | `--mode rpc` | RPC mode for process integration (see [docs/rpc.md](docs/rpc.md)) |
 | `--export <in> [out]` | Export session to HTML |
 
-In print mode, smolt also reads piped stdin and merges it into the initial prompt:
+In print mode, Smolt also reads piped stdin and merges it into the initial prompt:
 
 ```bash
 cat README.md | smolt -p "Summarize this text"
@@ -651,6 +651,7 @@ smolt --thinking high "Solve this complex problem"
 | `AI_AGENT` | Set to `smolt` by the CLI and RPC entry points so generic tooling can attribute child processes to Smolt |
 | `SMOLT_CODING_AGENT` | Set to `true` by the CLI and RPC entry points so child processes can detect that they run inside Smolt |
 | `SMOLT_CODING_AGENT_DIR` | Override config directory (default: `~/.smolt/agent`) |
+| `SMOLT_STORED_CREDENTIALS_ONLY` | Set to `1` to ignore provider keys in the environment and ambient config files; only credentials saved by `/login`, `/pool`, or the desktop app count. The desktop sets this for its agents. |
 | `SMOLT_CODING_AGENT_SESSION_DIR` | Override session storage directory (overridden by `--session-dir`) |
 | `SMOLT_PACKAGE_DIR` | Override package directory (useful for Nix/Guix where store paths tokenize poorly) |
 | `SMOLT_OFFLINE` | Disable startup network operations, including update checks, package update checks, and install/update telemetry |
@@ -683,5 +684,5 @@ MIT
 
 ## See Also
 
-- [smolt on GitHub](https://github.com/reghope/smolt) - the full workspace: agent runtime, LLM toolkit, TUI, and the self-learning module
+- [Smolt on GitHub](https://github.com/reghope/smolt) - the full workspace: agent runtime, LLM toolkit, TUI, and the self-learning module
 - [Pi agent harness](https://github.com/earendil-works/pi) - the upstream project this fork builds on

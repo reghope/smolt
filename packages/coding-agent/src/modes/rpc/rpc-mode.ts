@@ -26,7 +26,13 @@ import {
 	waitForRawStdoutBackpressure,
 	writeRawStdout,
 } from "../../core/output-guard.ts";
-import { loadAdvisorSettings, writeAdvisorModel } from "../../extensions/advisor/config.ts";
+import {
+	type AdvisorSettingsUpdate,
+	loadAdvisorSettings,
+	writeAdvisorModel,
+	writeAdvisorSettings,
+} from "../../extensions/advisor/config.ts";
+import { DEFAULT_THINKING as DEFAULT_ADVISOR_THINKING, DEFAULT_REVIEW_EVERY } from "../../extensions/advisor/index.ts";
 import { builtInExtensions } from "../../extensions/index.ts";
 import {
 	DEFAULT_MAX_FINDINGS,
@@ -478,7 +484,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			}
 
 			case "new_session": {
-				const options = command.parentSession ? { parentSession: command.parentSession } : undefined;
+				const options =
+					command.parentSession || command.temporary
+						? { parentSession: command.parentSession, temporary: command.temporary }
+						: undefined;
 				const result = await runtimeHost.newSession(options);
 				if (!result.cancelled) {
 					await rebindSession();
@@ -723,7 +732,95 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				return success(id, "get_advisor_settings", {
 					enabled: settings.enabled === true,
 					...(settings.model ? { model: settings.model } : {}),
+					mode: settings.mode ?? "deep",
+					reviewEvery: settings.reviewEvery ?? DEFAULT_REVIEW_EVERY,
+					thinking: settings.thinking ?? DEFAULT_ADVISOR_THINKING,
+					...(settings.tokenBudget !== undefined ? { tokenBudget: settings.tokenBudget } : {}),
+					immuneTurns: settings.immuneTurns ?? 3,
+					syncBacklog: settings.syncBacklog ?? "off",
 				});
+			}
+
+			case "set_advisor_settings": {
+				const requested = command.settings;
+				const update: AdvisorSettingsUpdate = {};
+				if (requested.model !== undefined) {
+					const selector = requested.model?.trim() || undefined;
+					if (selector !== undefined) {
+						const slash = selector.indexOf("/");
+						if (slash <= 0 || slash === selector.length - 1) {
+							return error(id, "set_advisor_settings", `Expected provider/model-id, got: ${selector}`);
+						}
+						const provider = selector.slice(0, slash);
+						const modelId = selector.slice(slash + 1);
+						const known = session.modelRuntime
+							.getAvailableSnapshot()
+							.some((m) => m.provider === provider && m.id === modelId);
+						if (!known) return error(id, "set_advisor_settings", `Model not found: ${selector}`);
+					}
+					update.model = selector ?? null;
+				}
+				if (requested.enabled !== undefined) update.enabled = requested.enabled === true;
+				if (requested.mode !== undefined) {
+					if (requested.mode !== "quick" && requested.mode !== "deep") {
+						return error(id, "set_advisor_settings", `Expected quick or deep, got: ${String(requested.mode)}`);
+					}
+					update.mode = requested.mode;
+				}
+				if (requested.reviewEvery !== undefined) {
+					const every = Math.floor(requested.reviewEvery);
+					if (!Number.isFinite(every) || every < 1) {
+						return error(
+							id,
+							"set_advisor_settings",
+							`Expected a step count of 1 or more, got: ${requested.reviewEvery}`,
+						);
+					}
+					update.reviewEvery = every;
+				}
+				if (requested.thinking !== undefined) {
+					const levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+					if (!levels.includes(requested.thinking)) {
+						return error(id, "set_advisor_settings", `Expected a thinking level, got: ${requested.thinking}`);
+					}
+					update.thinking = requested.thinking as AdvisorSettingsUpdate["thinking"];
+				}
+				if (requested.tokenBudget !== undefined) {
+					if (
+						requested.tokenBudget !== null &&
+						(!Number.isFinite(requested.tokenBudget) || requested.tokenBudget < 0)
+					) {
+						return error(
+							id,
+							"set_advisor_settings",
+							`Expected a token budget of 0 or more, got: ${requested.tokenBudget}`,
+						);
+					}
+					update.tokenBudget =
+						requested.tokenBudget === null || requested.tokenBudget === 0
+							? null
+							: Math.floor(requested.tokenBudget);
+				}
+				if (requested.immuneTurns !== undefined) {
+					const turns = Math.floor(requested.immuneTurns);
+					if (!Number.isFinite(turns) || turns < 0) {
+						return error(
+							id,
+							"set_advisor_settings",
+							`Expected a turn count of 0 or more, got: ${requested.immuneTurns}`,
+						);
+					}
+					update.immuneTurns = turns;
+				}
+				if (requested.syncBacklog !== undefined) {
+					const backlog = requested.syncBacklog;
+					if (backlog !== "off" && backlog !== 1 && backlog !== 3 && backlog !== 5) {
+						return error(id, "set_advisor_settings", `Expected off, 1, 3 or 5, got: ${String(backlog)}`);
+					}
+					update.syncBacklog = backlog;
+				}
+				writeAdvisorSettings(update);
+				return success(id, "set_advisor_settings");
 			}
 
 			case "set_advisor_model": {

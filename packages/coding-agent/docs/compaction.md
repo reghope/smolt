@@ -145,6 +145,18 @@ Extensions can store any JSON-serializable data in `details`. The default compac
 
 See [`prepareCompaction()`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/compaction/compaction.ts) and [`compact()`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/compaction/compaction.ts) for the implementation. For direct programmatic summarization, `generateSummary()` returns the summary text and `generateSummaryWithUsage()` returns `{ text, usage }`.
 
+### Sized to the model
+
+`reserveTokens` and `keepRecentTokens` are each capped at a quarter of the current model's context window. The defaults suit a 200k window; on a 32k local model they would hold back half the window and keep more than is left, so compaction fired late and kept nearly everything.
+
+### Between steps of a turn
+
+Auto-compaction also runs in the middle of a turn. When a step ends with tool calls (so the turn will go on) and its reported usage is already past the threshold, the turn stops there, compacts, and continues from the summary. The step that crossed the line stays in the session file for the summary and leaves the live context. Without this, a long agentic turn on a slow local model filled the window step by step and ended with a truncated reply, because the end-of-turn check never got its chance.
+
+### File contents are dropped
+
+The entries a compaction keeps are the recent ones, and the largest of them are usually whole files the agent read. Once a compaction has passed over a kept `read` result, its contents are replaced in the context with a one-line note saying they were dropped and the file can be read again. The read itself stays visible, with the path it asked for, so the agent knows what it looked at. Reads made after the compaction are untouched, and nothing in the session file changes: the stub is applied when the context is built.
+
 ## Branch Summarization
 
 ### When It Triggers

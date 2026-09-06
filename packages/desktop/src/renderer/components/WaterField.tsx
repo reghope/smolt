@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 
 /**
  * Ambient ASCII water, ported from the smolt.dev hero: two faint layers of
- * ripple characters — gray crests and sparse salmon glints — redrawn a few
+ * ripple characters — gray crests and sparse blue glints — redrawn a few
  * times a second by writing straight to the DOM nodes, so the shimmer costs
  * no React renders. The loop stops while off-screen or in a hidden window,
  * and reduced motion gets a single still frame.
@@ -44,7 +44,11 @@ function draw(cols: number, rows: number, t: number): { base: string; glint: str
 	return { base, glint };
 }
 
-const MASK = "linear-gradient(to bottom, black, rgba(0,0,0,0.5) 45%, transparent 92%)";
+// The site's hero curve, not a gentler one: strongest at the very top and
+// dead by 58% of the band. The port originally let the water live to 92%,
+// which put dotted crest runs straight through the greeting and across the
+// card borders below it — it read as corrupted text, not ambience.
+const MASK = "linear-gradient(to bottom, black, rgba(0,0,0,0.5) 28%, transparent 58%)";
 
 const preStyle: React.CSSProperties = {
 	position: "absolute",
@@ -145,7 +149,7 @@ export function WaterField({ className }: { className?: string }) {
 			style={{ pointerEvents: "none", maskImage: MASK, WebkitMaskImage: MASK }}
 		>
 			<pre ref={baseRef} style={{ ...preStyle, color: "var(--faint)", opacity: 0.45 }} />
-			<pre ref={glintRef} style={{ ...preStyle, color: "var(--salmon-text)", opacity: 0.6 }} />
+			<pre ref={glintRef} style={{ ...preStyle, color: "var(--tint-text)", opacity: 0.6 }} />
 		</div>
 	);
 }

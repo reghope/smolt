@@ -21,6 +21,7 @@ export type {
 export { ExtensionRunner } from "./runner.ts";
 export type {
 	AfterProviderResponseEvent,
+	AgentAbortEvent,
 	AgentEndEvent,
 	AgentSettledEvent,
 	AgentStartEvent,
@@ -42,6 +43,9 @@ export type {
 	BuildSystemPromptOptions,
 	// Context
 	CompactOptions,
+	ContextBreakdown,
+	ContextBreakdownItem,
+	ContextBreakdownPart,
 	// Events - Agent
 	ContextEvent,
 	// Event Results

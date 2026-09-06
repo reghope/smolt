@@ -1,12 +1,20 @@
 import { AlertDialog as AlertDialogPrimitive } from "radix-ui";
 import type * as React from "react";
+import { useEffect } from "react";
 import { cn } from "../../lib/cn.ts";
+import { setDialogOpen } from "../../state/app.ts";
 
 const AlertDialog = AlertDialogPrimitive.Root;
 const AlertDialogTrigger = AlertDialogPrimitive.Trigger;
 const AlertDialogPortal = AlertDialogPrimitive.Portal;
 
 function AlertDialogOverlay({ className, ...props }: React.ComponentProps<typeof AlertDialogPrimitive.Overlay>) {
+	// While this backdrop is up, the native window-controls strip dims with it.
+	useEffect(() => {
+		setDialogOpen(true);
+		return () => setDialogOpen(false);
+	}, []);
+
 	return (
 		<AlertDialogPrimitive.Overlay
 			data-slot="alert-dialog-overlay"

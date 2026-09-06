@@ -35,7 +35,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		}
 	});
 
-	async function createRuntimeHost(extensionFactory: ExtensionFactory) {
+	async function createRuntimeHost(extensionFactory: ExtensionFactory, options: { noSession?: boolean } = {}) {
 		const tempDir = join(tmpdir(), `smolt-runtime-events-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 
@@ -97,7 +97,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		const runtimeHost = await createAgentSessionRuntime(createRuntime, {
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.create(tempDir),
+			sessionManager: options.noSession ? SessionManager.inMemory(tempDir) : SessionManager.create(tempDir),
 		});
 		await runtimeHost.session.bindExtensions({});
 
@@ -154,6 +154,37 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			{ type: "session_shutdown", reason: "resume", targetSessionFile: originalSessionFile },
 			{ type: "session_start", reason: "resume", previousSessionFile: secondSessionFile },
 		]);
+	});
+
+	it("saves the plain new chat that follows a temporary one", async () => {
+		const { runtimeHost } = await createRuntimeHost(() => {});
+		const sessionDir = runtimeHost.session.sessionManager.getSessionDir();
+		expect(runtimeHost.session.sessionManager.isPersisted()).toBe(true);
+
+		await runtimeHost.newSession({ temporary: true });
+		expect(runtimeHost.session.sessionManager.isPersisted()).toBe(false);
+
+		// One temporary chat used to make every chat after it temporary too.
+		await runtimeHost.newSession();
+		expect(runtimeHost.session.sessionManager.isPersisted()).toBe(true);
+		expect(runtimeHost.session.sessionManager.getSessionDir()).toBe(sessionDir);
+
+		// Back-to-back temporary chats stay in memory, and still hand back to disk.
+		await runtimeHost.newSession({ temporary: true });
+		await runtimeHost.newSession({ temporary: true });
+		expect(runtimeHost.session.sessionManager.isPersisted()).toBe(false);
+		await runtimeHost.newSession();
+		expect(runtimeHost.session.sessionManager.isPersisted()).toBe(true);
+	});
+
+	it("keeps a process that runs without sessions in memory across new chats", async () => {
+		const { runtimeHost } = await createRuntimeHost(() => {}, { noSession: true });
+		expect(runtimeHost.session.sessionManager.isPersisted()).toBe(false);
+		await runtimeHost.newSession();
+		expect(runtimeHost.session.sessionManager.isPersisted()).toBe(false);
+		await runtimeHost.newSession({ temporary: true });
+		await runtimeHost.newSession();
+		expect(runtimeHost.session.sessionManager.isPersisted()).toBe(false);
 	});
 
 	it("honors session_before_switch cancellation", async () => {

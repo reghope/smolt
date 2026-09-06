@@ -54,6 +54,29 @@ type SectionId = (typeof SECTIONS)[number]["id"];
 const ADVISOR_FOLLOWS_CHAT = "__chat__";
 
 /** What the settings page shows for review.json, with its defaults filled in. */
+/** What advisor.json says, with defaults filled in, as this page shows it. */
+interface AdvisorSettingsView {
+	enabled: boolean;
+	model?: string;
+	mode: "quick" | "deep";
+	reviewEvery: number;
+	thinking: string;
+	tokenBudget?: number;
+	immuneTurns: number;
+	syncBacklog: "off" | 1 | 3 | 5;
+}
+
+const ADVISOR_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+const DEFAULT_ADVISOR: AdvisorSettingsView = {
+	enabled: false,
+	mode: "deep",
+	reviewEvery: 6,
+	thinking: "minimal",
+	immuneTurns: 3,
+	syncBacklog: "off",
+};
+
 interface ReviewSettingsView {
 	model?: string;
 	maxFindings: number;
@@ -368,6 +391,9 @@ export function SettingsDialog() {
 	const [modelFilter, setModelFilter] = useState("");
 	const [extensions, setExtensions] = useState<ExtensionInfo[]>([]);
 	const [advisorModel, setAdvisorModel] = useState<string>(ADVISOR_FOLLOWS_CHAT);
+	const [advisor, setAdvisor] = useState<AdvisorSettingsView>(DEFAULT_ADVISOR);
+	// The budget box is typed into; the number is sent when it is left.
+	const [advisorBudgetText, setAdvisorBudgetText] = useState("");
 	const [review, setReview] = useState<ReviewSettingsView>({ maxFindings: 15, watchRepos: [], watch: false, autoFix: false });
 	const [name, setName] = useState(state.sessionName);
 	const activeModelRef = useRef<HTMLButtonElement | null>(null);
@@ -386,8 +412,12 @@ export function SettingsDialog() {
 		void call<{ extensions: ExtensionInfo[] }>("listExtensions").then((result) => {
 			if (result) setExtensions(result.extensions);
 		});
-		void call<{ model?: string }>("getAdvisorSettings").then((result) => {
+		void call<AdvisorSettingsView>("getAdvisorSettings").then((result) => {
 			setAdvisorModel(result?.model ?? ADVISOR_FOLLOWS_CHAT);
+			if (result) {
+				setAdvisor({ ...DEFAULT_ADVISOR, ...result });
+				setAdvisorBudgetText(result.tokenBudget === undefined ? "" : String(result.tokenBudget));
+			}
 		});
 		void call<ReviewSettingsView>("getReviewSettings").then((result) => {
 			if (result) setReview(result);
@@ -681,6 +711,159 @@ export function SettingsDialog() {
 														<span className="ml-1.5 text-xs text-faint">{option.provider}</span>
 													</SelectItem>
 												))}
+											</SelectContent>
+										</Select>
+									</Row>
+								)}
+								{matches(query, "advisor enable on off review every chat watchdog") && (
+									<Row
+										label="Advisor reads along"
+										hint="A second model shadows every chat and speaks up when it sees a problem. A chat already running follows this from its next turn; /advisor on or off in a chat overrides it there."
+									>
+										<Switch
+											checked={advisor.enabled}
+											onCheckedChange={async (next) => {
+												setAdvisor((current) => ({ ...current, enabled: next }));
+												await call("setAdvisorSettings", { enabled: next });
+											}}
+										/>
+									</Row>
+								)}
+								{matches(query, "advisor depth mode quick deep cost") && (
+									<Row
+										label="Advisor depth"
+										hint="Deep is the usual review with thinking and any granted tools. Quick is a shallow pass with no thinking and a tiny reply, for a fraction of the cost."
+									>
+										<Select
+											value={advisor.mode}
+											onValueChange={(next) => {
+												const mode = next === "quick" ? "quick" : "deep";
+												setAdvisor((current) => ({ ...current, mode }));
+												void call("setAdvisorSettings", { mode });
+											}}
+										>
+											<SelectTrigger className="w-[10rem]">
+												<SelectValue />
+											</SelectTrigger>
+											<SelectContent>
+												<SelectItem value="deep">Deep</SelectItem>
+												<SelectItem value="quick">Quick</SelectItem>
+											</SelectContent>
+										</Select>
+									</Row>
+								)}
+								{matches(query, "advisor thinking effort reasoning cost") && (
+									<Row
+										label="Advisor thinking"
+										hint="How hard a review thinks. Thinking is output, and output is most of what an advisor costs; the usual review is the word ok. Quick depth never thinks."
+									>
+										<Select
+											value={advisor.thinking}
+											onValueChange={(next) => {
+												setAdvisor((current) => ({ ...current, thinking: next }));
+												void call("setAdvisorSettings", { thinking: next });
+											}}
+										>
+											<SelectTrigger className="w-[10rem]">
+												<SelectValue />
+											</SelectTrigger>
+											<SelectContent>
+												{ADVISOR_THINKING_LEVELS.map((level) => (
+													<SelectItem key={level} value={level} className="capitalize">
+														{level}
+													</SelectItem>
+												))}
+											</SelectContent>
+										</Select>
+									</Row>
+								)}
+								{matches(query, "advisor review every steps often cadence") && (
+									<Row
+										label="Review every N steps"
+										hint="While a run is in progress, how many of the chat model's steps pass between reviews. The review when the run settles always happens."
+									>
+										<Input
+											type="number"
+											min={1}
+											className="w-20"
+											value={String(advisor.reviewEvery)}
+											onChange={(event) => {
+												const next = Number.parseInt(event.target.value, 10);
+												setAdvisor((current) => ({ ...current, reviewEvery: Number.isNaN(next) ? 0 : next }));
+											}}
+											onBlur={() => {
+												const value = Math.max(1, Math.floor(advisor.reviewEvery || 1));
+												setAdvisor((current) => ({ ...current, reviewEvery: value }));
+												void call("setAdvisorSettings", { reviewEvery: value });
+											}}
+										/>
+									</Row>
+								)}
+								{matches(query, "advisor token budget limit cost spend") && (
+									<Row
+										label="Advisor token budget"
+										hint="Tokens the advisor may spend in one chat before it stops reviewing. Leave empty for no limit."
+									>
+										<Input
+											type="number"
+											min={0}
+											placeholder="No limit"
+											className="w-32"
+											value={advisorBudgetText}
+											onChange={(event) => setAdvisorBudgetText(event.target.value)}
+											onBlur={() => {
+												const parsed = Number.parseInt(advisorBudgetText, 10);
+												const budget = Number.isNaN(parsed) || parsed <= 0 ? undefined : parsed;
+												setAdvisorBudgetText(budget === undefined ? "" : String(budget));
+												setAdvisor((current) => ({ ...current, tokenBudget: budget }));
+												void call("setAdvisorSettings", { tokenBudget: budget ?? null });
+											}}
+										/>
+									</Row>
+								)}
+								{matches(query, "advisor interrupt cooldown immune turns concern blocker") && (
+									<Row
+										label="Interrupt cooldown"
+										hint="After the advisor interrupts with a concern or blocker, further interrupts are softened to asides for this many turns."
+									>
+										<Input
+											type="number"
+											min={0}
+											className="w-20"
+											value={String(advisor.immuneTurns)}
+											onChange={(event) => {
+												const next = Number.parseInt(event.target.value, 10);
+												setAdvisor((current) => ({ ...current, immuneTurns: Number.isNaN(next) ? 0 : next }));
+											}}
+											onBlur={() => {
+												const value = Math.max(0, Math.floor(advisor.immuneTurns || 0));
+												setAdvisor((current) => ({ ...current, immuneTurns: value }));
+												void call("setAdvisorSettings", { immuneTurns: value });
+											}}
+										/>
+									</Row>
+								)}
+								{matches(query, "advisor backlog hold wait sync turn") && (
+									<Row
+										label="Hold the chat for advisor backlog"
+										hint="Wait up to 30 seconds before a turn while this many advisor reviews are still pending, so their notes land first. Off never waits."
+									>
+										<Select
+											value={String(advisor.syncBacklog)}
+											onValueChange={(next) => {
+												const syncBacklog = next === "off" ? "off" : (Number.parseInt(next, 10) as 1 | 3 | 5);
+												setAdvisor((current) => ({ ...current, syncBacklog }));
+												void call("setAdvisorSettings", { syncBacklog });
+											}}
+										>
+											<SelectTrigger className="w-[10rem]">
+												<SelectValue />
+											</SelectTrigger>
+											<SelectContent>
+												<SelectItem value="off">Off</SelectItem>
+												<SelectItem value="1">1 review</SelectItem>
+												<SelectItem value="3">3 reviews</SelectItem>
+												<SelectItem value="5">5 reviews</SelectItem>
 											</SelectContent>
 										</Select>
 									</Row>

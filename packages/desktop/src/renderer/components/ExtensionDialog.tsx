@@ -3,6 +3,7 @@ import { answerUiRequest, app } from "../state/app.ts";
 import { useApp } from "../state/useApp.ts";
 import { Button } from "./ui/button.tsx";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog.tsx";
+import { Checkbox } from "./ui/checkbox.tsx";
 import { Input } from "./ui/input.tsx";
 
 /**
@@ -16,10 +17,12 @@ export function ExtensionDialog() {
 	const request = app.uiRequests[0];
 	const [value, setValue] = useState("");
 	const [copied, setCopied] = useState(false);
+	const [ticked, setTicked] = useState<string[]>([]);
 	// biome-ignore lint/correctness/useExhaustiveDependencies: reset the draft per request, not per keystroke
 	useEffect(() => {
 		setValue("");
 		setCopied(false);
+		setTicked(app.uiRequests[0]?.selected ?? []);
 	}, [request?.id]);
 	// The device-login code an extension puts in the title, e.g. "GitHub code: A4B0-B874".
 	const deviceCode = /\bcode: ([A-Z0-9]{4,}-[A-Z0-9]{4,})$/.exec(request?.title ?? "")?.[1];
@@ -55,6 +58,47 @@ export function ExtensionDialog() {
 							</Button>
 						))}
 					</div>
+				)}
+				{/* Unlike select, this answers once — the reader ticks what they want
+				    and confirms, instead of the dialog closing and reopening per click. */}
+				{request.method === "multiselect" && (
+					<>
+						<div className="flex max-h-[50vh] flex-col gap-1 overflow-y-auto pr-1">
+							{(request.options ?? []).map((option) => {
+								const on = ticked.includes(option);
+								return (
+									<button
+										key={option}
+										type="button"
+										className="flex items-center gap-3 rounded-md px-3 py-2 text-left text-sm hover:bg-accent"
+										onClick={() =>
+											setTicked((current) =>
+												current.includes(option)
+													? current.filter((entry) => entry !== option)
+													: [...current, option],
+											)
+										}
+									>
+										<Checkbox checked={on} tabIndex={-1} className="pointer-events-none" />
+										<span className="min-w-0 truncate">{option}</span>
+									</button>
+								);
+							})}
+						</div>
+						<div className="flex items-center justify-between gap-2">
+							<span className="text-faint text-sm">
+								{ticked.length} selected
+							</span>
+							<div className="flex gap-2">
+								<Button variant="outline" onClick={cancel}>
+									Cancel
+								</Button>
+								<Button autoFocus onClick={() => answerUiRequest({ id: request.id, values: ticked })}>
+									Confirm
+								</Button>
+							</div>
+						</div>
+					</>
 				)}
 				{request.method === "input" && (
 					<form

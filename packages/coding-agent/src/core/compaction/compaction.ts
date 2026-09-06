@@ -237,6 +237,44 @@ export function shouldCompact(contextTokens: number, contextWindow: number, sett
 	return contextTokens > contextWindow - settings.reserveTokens;
 }
 
+/**
+ * The settings as they apply to one model. The defaults are sized for a
+ * 200k window: 16k held back and 20k kept. On a local model with a 32k
+ * window that is half the window held back and more kept than is left, so
+ * compaction fires late and keeps nearly everything. Each figure is capped
+ * at a quarter of the window; a window of unknown size is left alone.
+ */
+export function compactionSettingsFor(settings: CompactionSettings, contextWindow: number): CompactionSettings {
+	if (!(contextWindow > 0)) return settings;
+	const quarter = Math.floor(contextWindow / 4);
+	return {
+		enabled: settings.enabled,
+		reserveTokens: Math.min(settings.reserveTokens, quarter),
+		keepRecentTokens: Math.min(settings.keepRecentTokens, quarter),
+	};
+}
+
+/**
+ * Whether to compact now, between two steps of one turn, rather than wait
+ * for the turn to end. The check at the end of a turn is enough when a turn
+ * is a few steps; an agentic turn of thirty tool calls on a slow local
+ * model runs for half an hour, fills the window on the way, and ends with
+ * the reply cut off. So a step that leaves the context past the threshold
+ * and is not the last one (it asked for tools, so the loop goes on) is
+ * where the turn stops for a compaction and picks up again.
+ */
+export function shouldCompactBeforeNextStep(
+	message: AssistantMessage,
+	contextWindow: number,
+	settings: CompactionSettings,
+): boolean {
+	if (!settings.enabled || !(contextWindow > 0)) return false;
+	if (message.stopReason !== "toolUse") return false;
+	const contextTokens = calculateContextTokens(message.usage);
+	if (contextTokens === 0) return false;
+	return shouldCompact(contextTokens, contextWindow, settings);
+}
+
 // ============================================================================
 // Cut point detection
 // ============================================================================
@@ -488,12 +526,20 @@ Use this EXACT format:
 ## Key Decisions
 - **[Decision]**: [Brief rationale]
 
+## Tried & Rejected
+- [Approach that did not work and why, so it is not attempted again]
+- [Or "(none)" if nothing was ruled out]
+
 ## Next Steps
 1. [Ordered list of what should happen next]
 
 ## Critical Context
 - [Any data, examples, or references needed to continue]
 - [Or "(none)" if not applicable]
+
+## Promises Made
+- [Anything committed to the user that is not yet delivered]
+- [Or "(none)"]
 
 Keep each section concise. Preserve exact file paths, function names, and error messages.`;
 
@@ -502,6 +548,7 @@ const UPDATE_SUMMARIZATION_INSTRUCTIONS = `Update the existing structured summar
 - ADD new progress, decisions, and context from the new messages
 - UPDATE the Progress section: move items from "In Progress" to "Done" when completed
 - UPDATE "Next Steps" based on what was accomplished
+- PRESERVE "Tried & Rejected" entries: a failed approach stays recorded so it is not retried
 - PRESERVE exact file paths, function names, and error messages
 - If something is no longer relevant, you may remove it
 
@@ -526,11 +573,17 @@ Use this EXACT format:
 ## Key Decisions
 - **[Decision]**: [Brief rationale] (preserve all previous, add new)
 
+## Tried & Rejected
+- [Preserve previously rejected approaches, add newly ruled-out ones and why]
+
 ## Next Steps
 1. [Update based on current state]
 
 ## Critical Context
 - [Preserve important context, add new if needed]
+
+## Promises Made
+- [Preserve undelivered commitments, remove once delivered]
 
 Keep each section concise. Preserve exact file paths, function names, and error messages.`;
 

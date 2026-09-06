@@ -30,6 +30,15 @@ export interface LlamaModelsResponse {
 
 export interface LlamaServerProps {
 	models_autoload?: boolean;
+	/** The context the loaded model was started with, from its own settings. */
+	n_ctx?: number;
+	/** The chat template the loaded model answers with. */
+	chat_template?: string;
+}
+
+/** Whether a chat template lets thinking be switched on through chat_template_kwargs. */
+export function templateSupportsThinking(chatTemplate: string | undefined): boolean {
+	return typeof chatTemplate === "string" && chatTemplate.includes("enable_thinking");
 }
 
 export interface LlamaModelEvent {
@@ -193,11 +202,26 @@ export class LlamaClient {
 		return data;
 	}
 
-	async props(options: { signal?: AbortSignal } = {}): Promise<LlamaServerProps> {
-		const payload = await this.request("/props", { signal: options.signal });
+	/**
+	 * Server properties. With a model, the router forwards the question to that
+	 * model's own process, which is the only place its real context size and
+	 * chat template are known. Only ask about a loaded model: a router with
+	 * autoload on would load an unloaded one just to answer.
+	 */
+	async props(options: { model?: string; signal?: AbortSignal } = {}): Promise<LlamaServerProps> {
+		const query = options.model === undefined ? "" : `?model=${encodeURIComponent(options.model)}`;
+		const payload = await this.request(`/props${query}`, { signal: options.signal });
 		if (typeof payload !== "object" || payload === null) return {};
-		const { models_autoload: modelsAutoload } = payload as Record<string, unknown>;
-		return typeof modelsAutoload === "boolean" ? { models_autoload: modelsAutoload } : {};
+		const record = payload as Record<string, unknown>;
+		const props: LlamaServerProps = {};
+		if (typeof record.models_autoload === "boolean") props.models_autoload = record.models_autoload;
+		const generation = record.default_generation_settings;
+		if (typeof generation === "object" && generation !== null) {
+			const nCtx = (generation as { n_ctx?: unknown }).n_ctx;
+			if (typeof nCtx === "number" && nCtx > 0) props.n_ctx = nCtx;
+		}
+		if (typeof record.chat_template === "string") props.chat_template = record.chat_template;
+		return props;
 	}
 
 	async load(model: string, signal?: AbortSignal): Promise<void> {

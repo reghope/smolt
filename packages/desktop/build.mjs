@@ -46,6 +46,17 @@ await build({
 	sourcemap: true,
 });
 
+// The browser's window.smolt, served ahead of renderer.js by the in-app
+// web server: the preload's API over fetch and server-sent events.
+await build({
+	entryPoints: ["src/web-shim.ts"],
+	bundle: true,
+	platform: "browser",
+	format: "iife",
+	outfile: "dist/webshim.js",
+	sourcemap: true,
+});
+
 await build({
 	entryPoints: ["src/renderer/main.tsx"],
 	bundle: true,

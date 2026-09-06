@@ -124,6 +124,45 @@ export async function listWorktrees(cwd: string): Promise<Worktree[]> {
 	return worktrees;
 }
 
+export interface BranchList {
+	/** The branch currently checked out, empty on a detached HEAD. */
+	current: string;
+	/** Local branches, most recently committed to first. */
+	branches: string[];
+}
+
+/** The repository's local branches and the one checked out. */
+export async function listBranches(cwd: string): Promise<BranchList> {
+	const root = await repoRoot(cwd);
+	if (!root) return { current: "", branches: [] };
+	const result = await run(["branch", "--sort=-committerdate"], root);
+	if (result.code !== 0) return { current: "", branches: [] };
+	const branches: string[] = [];
+	let current = "";
+	for (const line of result.out.split("\n")) {
+		if (line.trim() === "") continue;
+		if (line.startsWith("* ")) current = line.slice(2).trim();
+		branches.push(line.replace(/^\*\s*/, "").trim());
+	}
+	return { current, branches };
+}
+
+/** Check out an existing local branch, so the next chat works on it. */
+export async function checkoutBranch(cwd: string, branch: string): Promise<void> {
+	const root = await repoRoot(cwd);
+	if (!root) throw new Error("Not a git repository.");
+	// The name always comes from the renderer's own list, but the check costs
+	// nothing: a ref name can never read as a git option or a revision range.
+	if (!/^[A-Za-z0-9._/-]+$/.test(branch) || branch.startsWith("-")) {
+		throw new Error("That is not a branch name.");
+	}
+	const result = await run(["checkout", branch], root);
+	if (result.code !== 0) {
+		const detail = result.err.trim().split("\n")[0] ?? "";
+		throw new Error(detail === "" ? `Could not check out ${branch}.` : detail);
+	}
+}
+
 /** Remove a worktree; its branch is left alone so work is never silently lost. */
 export async function removeWorktree(cwd: string, path: string, force = false): Promise<void> {
 	const root = await repoRoot(cwd);

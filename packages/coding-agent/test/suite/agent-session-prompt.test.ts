@@ -257,7 +257,7 @@ describe("AgentSession prompt characterization", () => {
 		expect(expandedPrompt).toBe("Review this code: src/index.ts");
 	});
 
-	it("dispatches extension commands without consuming a provider response", async () => {
+	it("dispatches extension commands, then spends a turn saying what they did", async () => {
 		const commandRuns: string[] = [];
 		const harness = await createHarness({
 			extensionFactories: [
@@ -272,13 +272,18 @@ describe("AgentSession prompt characterization", () => {
 			],
 		});
 		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("should stay queued")]);
+		harness.setResponses([fauxAssistantMessage("Toggled it for you.")]);
 
 		await harness.session.prompt("/testcmd hello world");
 
 		expect(commandRuns).toEqual(["hello world"]);
-		expect(harness.session.messages).toEqual([]);
-		expect(harness.getPendingResponseCount()).toBe(1);
+		// The command writes nothing to the transcript itself, so the chat would
+		// sit on the reader's words and no reply at all. One cheap side call buys
+		// the line every other message gets: a note the reader never sees that
+		// tells the agent why it is speaking, and the sentence itself.
+		expect(harness.session.messages.map((message) => message.role)).toEqual(["custom", "assistant"]);
+		expect(getMessageText(harness.session.messages[1]!)).toBe("Toggled it for you.");
+		expect(harness.getPendingResponseCount()).toBe(0);
 	});
 
 	it("extension sendUserMessage can opt into extension command dispatch", async () => {

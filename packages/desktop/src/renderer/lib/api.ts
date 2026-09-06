@@ -10,6 +10,27 @@ export type UpdateState =
 	| { status: "installing"; version: string }
 	| { status: "error"; message: string };
 
+/** One failover credential in a provider's pool: what it is, never what it holds. */
+export interface PoolCredentialInfo {
+	id: string;
+	label?: string;
+	type: string;
+	addedAt: number;
+	plan?: string;
+}
+
+/** A provider with a credential, and the failover pool behind it. */
+export interface ConfiguredProvider {
+	id: string;
+	/** "api_key" or "oauth"; absent when only pool credentials exist. */
+	type?: string;
+	/** The name given to the primary credential, when one has been. */
+	primaryLabel?: string;
+	/** In the pool: instances fail over to each other and the allowance shows in usage. */
+	pooled: boolean;
+	pool: PoolCredentialInfo[];
+}
+
 export interface AgentCallResult {
 	ok: boolean;
 	value?: unknown;
@@ -29,6 +50,7 @@ export interface SmoltApi {
 		packaged?: boolean;
 	}>;
 	stats(): Promise<AgentCallResult>;
+	starters(): Promise<AgentCallResult>;
 	micAccess(): Promise<AgentCallResult>;
 	openMicSettings(): Promise<{ ok: boolean; error?: string }>;
 	speechStatus(): Promise<unknown>;
@@ -40,11 +62,12 @@ export interface SmoltApi {
 		options?: { limit?: number; before?: number },
 	): Promise<{ messages: Record<string, unknown>[]; start: number; userStart: number }>;
 	sessionDelete(path: string): Promise<{ ok: boolean; error?: string }>;
-	titlebar(theme: string): Promise<void>;
+	titlebar(theme: string, dimmed?: boolean): Promise<void>;
 	linkPreview(url: string): Promise<LinkPreview | null>;
 	pickFolder(): Promise<{ ok: boolean; value?: unknown; error?: string }>;
 	openProject(path: string): Promise<{ ok: boolean; value?: unknown; error?: string }>;
 	recentProjects(): Promise<string[]>;
+	repoUrl(dir?: string): Promise<string | undefined>;
 	closeProject(): Promise<{ ok: boolean; error?: string }>;
 	folders(): Promise<string[]>;
 	updateState(): Promise<UpdateState>;
@@ -54,6 +77,20 @@ export interface SmoltApi {
 	authList(): Promise<string[]>;
 	knownProviders(): Promise<{ id: string; name: string; apiKey: boolean; oauth: boolean }[]>;
 	authSet(provider: string, key: string): Promise<{ ok: boolean; error?: string }>;
+	authRemove(provider: string): Promise<{ ok: boolean; error?: string }>;
+	providersList(): Promise<ConfiguredProvider[]>;
+	llamaStatus(): Promise<{
+		binary?: string;
+		modelsDir?: string;
+		modelCount: number;
+		serverUrl?: string;
+		reachable: boolean;
+	}>;
+	llamaLaunch(): Promise<{ ok: boolean; already?: boolean; serverUrl?: string; error?: string }>;
+	poolRemove(provider: string, credentialId: string): Promise<{ ok: boolean; error?: string }>;
+	poolRelabel(provider: string, credentialId: string, label: string): Promise<{ ok: boolean; error?: string }>;
+	poolAddKey(provider: string, key: string, label: string): Promise<{ ok: boolean; error?: string }>;
+	poolSetPooled(provider: string, pooled: boolean): Promise<{ ok: boolean; error?: string }>;
 	openCli(): Promise<{ ok: boolean; error?: string }>;
 	addFolder(path: string): Promise<{ ok: boolean; value?: unknown; error?: string }>;
 	popupMenu(x: number, y: number): Promise<{ ok: boolean }>;
@@ -65,8 +102,13 @@ export interface SmoltApi {
 	onPermissionRequest(cb: (request: unknown) => void): void;
 	onPermissionRemoved(cb: (id: string) => void): void;
 	diff(): Promise<AgentCallResult>;
+	diffStats(): Promise<AgentCallResult>;
+	prReadiness(): Promise<AgentCallResult>;
+	prCreate(draft: boolean): Promise<AgentCallResult>;
 	permissionMode(mode?: string): Promise<AgentCallResult>;
 	worktrees(): Promise<AgentCallResult>;
+	branches(): Promise<AgentCallResult>;
+	branchCheckout(branch: string): Promise<AgentCallResult>;
 	worktreeCreate(label: string): Promise<AgentCallResult>;
 	worktreeEnter(path: string): Promise<AgentCallResult>;
 	worktreeRemove(path: string, force?: boolean): Promise<AgentCallResult>;
@@ -82,7 +124,25 @@ export interface SmoltApi {
 	onBusySessions(cb: (paths: string[]) => void): void;
 	onBackgroundSettled(cb: (info: { sessionPath: string }) => void): void;
 	onAgentExited(cb: (info: { slotId: number; wasActive: boolean; code: number | null }) => void): void;
+	/** A running turn was ended by a directory move the reader asked for. */
+	onTurnDropped(cb: (info: { sessionPath: string; cwd: string; to: string }) => void): void;
+	/** A credential change is waiting for the turn in flight to finish. */
+	onReloadDeferred(cb: (info: { sessionPath: string }) => void): void;
+	/** The app moved to another chat, from this window or any other on it. */
+	onSessionChanged(cb: (info: { slot: number; path: string }) => void): void;
+	/** The in-app web server: whether it is on, and where to open it. */
+	webServer(): Promise<WebServerState>;
+	setWebServer(enabled: boolean): Promise<WebServerState>;
 	ready(): void;
+}
+
+export interface WebServerState {
+	enabled: boolean;
+	running: boolean;
+	https: boolean;
+	/** Where to open it, best first. */
+	urls: string[];
+	error?: string;
 }
 
 export interface LinkPreview {

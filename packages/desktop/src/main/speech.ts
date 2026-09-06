@@ -6,9 +6,9 @@ import { join } from "node:path";
  * Speech to text, on this machine.
  *
  * The model is not shipped with the app: the first time dictation is used it
- * downloads a small quantised model (~64 MB) into the smolt directory and
- * caches it there for good. That keeps the installer light and means nothing is
- * fetched for someone who never dictates.
+ * downloads a quantised Whisper-small model (~250 MB) into the smolt
+ * directory and caches it there for good. That keeps the installer light and
+ * means nothing is fetched for someone who never dictates.
  *
  * Everything runs locally, so audio never leaves the machine — which is the
  * point, given a microphone is open.
@@ -19,7 +19,7 @@ import { join } from "node:path";
  */
 
 /** Kept in step with the worker, which is what actually loads it. */
-const MODEL_ID = "onnx-community/moonshine-base-ONNX";
+const MODEL_ID = "Xenova/whisper-small";
 
 export interface DownloadProgress {
 	/** 0–100 across the whole download. */
@@ -146,10 +146,53 @@ async function ask(request: { type: "prepare" } | { type: "transcribe"; samples:
 	const child = await ensureWorker();
 	const id = nextId++;
 	return new Promise<string>((resolve, reject) => {
-		pending.set(id, { resolve, reject });
+		// A pass that never comes back would hold dictation still for the
+		// rest of the sitting: the window waits on one pass at a time, and a
+		// wedged decode means no next pass ever. Give up on it instead, and
+		// let the next clip try; a download is the one request that may
+		// legitimately take a long time.
+		const budget = request.type === "prepare" ? PREPARE_TIMEOUT_MS : transcribeBudget(request.samples);
+		const timer = setTimeout(() => {
+			if (!pending.has(id)) return;
+			pending.delete(id);
+			reject(
+				new Error(
+					request.type === "prepare" ? "The speech model took too long to load." : "Transcription timed out.",
+				),
+			);
+		}, budget);
+		pending.set(id, {
+			resolve: (text) => {
+				clearTimeout(timer);
+				resolve(text);
+			},
+			reject: (error) => {
+				clearTimeout(timer);
+				reject(error);
+			},
+		});
 		child.postMessage({ ...request, id, cacheDir: modelCacheDir() });
 	});
 }
+
+/** The sample rate the renderer captures at and Whisper expects. */
+const SPEECH_RATE = 16000;
+
+/**
+ * How long one transcription may take before it is abandoned.
+ *
+ * This is a guard against a wedged worker, not a limit on how long anyone
+ * may talk: dictation arrives in segments of at most a minute or so, and a
+ * sitting of any length is simply more of them. The budget grows with the
+ * clip — twenty seconds of it for every second of audio, never under five
+ * minutes — so a slow machine decoding a long segment is never cut off
+ * part way, which would lose those words for good.
+ */
+function transcribeBudget(samples: Float32Array): number {
+	return Math.max(5 * 60 * 1000, (samples.length / SPEECH_RATE) * 20_000);
+}
+/** How long loading (and on the first run, downloading) the model may take. */
+const PREPARE_TIMEOUT_MS = 15 * 60 * 1000;
 
 /**
  * Load the model, downloading it the first time.
@@ -178,10 +221,8 @@ export async function ensureModel(onProgress?: (progress: DownloadProgress) => v
 /**
  * Transcribe 16 kHz mono samples.
  *
- * This is not a streaming model, so live text comes from re-reading the clip
- * so far rather than decoding a tail in isolation: at this size that costs
- * tens to hundreds of milliseconds and keeps the text coherent instead of
- * fragmenting at chunk boundaries.
+ * The window sends one segment of a sitting at a time, cut at a pause in
+ * speech, and waits for each before sending the next.
  */
 export async function transcribeSamples(samples: Float32Array): Promise<string> {
 	// Stopping before saying anything must not start a worker or fetch a

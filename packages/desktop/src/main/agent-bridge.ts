@@ -23,6 +23,11 @@ const ALLOWED_METHODS = new Set([
 	"getAvailableModels",
 	"listExtensions",
 	"setExtensionEnabled",
+	"getAdvisorSettings",
+	"setAdvisorModel",
+	"setAdvisorSettings",
+	"getReviewSettings",
+	"setReviewSettings",
 	"setThinkingLevel",
 	"cycleThinkingLevel",
 	"getAvailableThinkingLevels",
@@ -33,8 +38,10 @@ const ALLOWED_METHODS = new Set([
 	"compact",
 	"setAutoCompaction",
 	"setAutoRetry",
+	"login",
 	"abortRetry",
 	"getSessionStats",
+	"getProviderUsage",
 	"exportHtml",
 	"switchSession",
 	"getMessages",
@@ -86,7 +93,7 @@ export class AgentBridge {
 	async start(options: BridgeOptions, appDir: string): Promise<void> {
 		const cliPath = findCliPath(appDir, options.cliPath);
 		if (!cliPath) {
-			this.startError = "smolt CLI not found. Build the workspace (npm run build:offline) or set SMOLT_CLI_PATH.";
+			this.startError = "Smolt CLI not found. Build the workspace (npm run build:offline) or set SMOLT_CLI_PATH.";
 			return;
 		}
 		try {

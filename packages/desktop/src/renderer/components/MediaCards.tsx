@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, type LinkPreview } from "../lib/api.ts";
 import { cn } from "../lib/cn.ts";
 import { Dialog, DialogContent, DialogTitle } from "./ui/dialog.tsx";
+import { Tip } from "./ui/tooltip.tsx";
 
 /** An image in the transcript: a bounded card that opens full size on click. */
 export function ImageCard({
@@ -17,9 +18,10 @@ export function ImageCard({
 	const src = `data:${mimeType};base64,${data}`;
 	return (
 		<>
+			<Tip label="View full size">
 			<button
 				type="button"
-				title="View full size"
+				aria-label="View full size"
 				className={cn(
 					"my-1.5 block w-fit max-w-full cursor-zoom-in overflow-hidden rounded-xl border bg-background-deep transition-colors hover:border-border-strong",
 					className,
@@ -28,6 +30,7 @@ export function ImageCard({
 			>
 				<img src={src} alt="" className="block max-h-72 max-w-full object-contain" />
 			</button>
+			</Tip>
 			<Dialog open={open} onOpenChange={setOpen}>
 				<DialogContent className="w-fit max-w-[92vw] p-2" aria-describedby={undefined}>
 					<DialogTitle className="sr-only">Image</DialogTitle>

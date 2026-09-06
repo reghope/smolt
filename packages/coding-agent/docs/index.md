@@ -7,10 +7,8 @@ Smolt is a minimal terminal coding harness. It is designed to stay small at the 
 Install Smolt with npm:
 
 ```bash
-npm install -g --ignore-scripts smolt
+npm install -g smolt
 ```
-
-`--ignore-scripts` disables dependency lifecycle scripts during install. Smolt does not require install scripts for normal npm installs.
 
 On Linux or macOS, you can also use the installer:
 

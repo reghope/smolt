@@ -7,10 +7,8 @@ This page gets you from install to a useful first Smolt session.
 Smolt is distributed as an npm package:
 
 ```bash
-npm install -g --ignore-scripts smolt
+npm install -g smolt
 ```
-
-`--ignore-scripts` disables dependency lifecycle scripts during install. Smolt does not require install scripts for normal npm installs.
 
 ### Uninstall
 

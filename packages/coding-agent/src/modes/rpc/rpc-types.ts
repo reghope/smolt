@@ -24,7 +24,7 @@ export type RpcCommand =
 	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "abort" }
 	| { id?: string; type: "clear_queue" }
-	| { id?: string; type: "new_session"; parentSession?: string }
+	| { id?: string; type: "new_session"; parentSession?: string; temporary?: boolean }
 
 	// State
 	| { id?: string; type: "get_state" }
@@ -63,6 +63,7 @@ export type RpcCommand =
 	| { id?: string; type: "get_advisor_settings" }
 	/** `model` is "provider/model-id"; omitted or empty means follow the session model. */
 	| { id?: string; type: "set_advisor_model"; model?: string }
+	| { id?: string; type: "set_advisor_settings"; settings: RpcAdvisorSettingsUpdate }
 
 	// Review
 	| { id?: string; type: "get_review_settings" }
@@ -113,13 +114,37 @@ export interface RpcSlashCommand {
 // RPC State
 // ============================================================================
 
-/** One extension as the settings UI sees it: built-in or on disk, on or off. */
-/** What the advisor's settings file says, as the settings page shows it. */
+/** What the advisor's settings file says, with its defaults filled in, as the settings page shows it. */
 export interface RpcAdvisorSettings {
 	/** Whether advisor.json turns the advisor on for every session. */
 	enabled: boolean;
 	/** "provider/model-id" when set; undefined when the advisor follows the session model. */
 	model?: string;
+	/** "deep" is the usual review; "quick" is a shallow, cheap pass. */
+	mode: "quick" | "deep";
+	/** How many primary steps pass between in-progress reviews. */
+	reviewEvery: number;
+	/** How hard a review thinks. */
+	thinking: string;
+	/** Session token budget for the advisor; undefined when there is none. */
+	tokenBudget?: number;
+	/** Primary turns after a delivered interrupt during which further interrupts become asides. */
+	immuneTurns: number;
+	/** Hold the primary turn while advisor backlog is at or above this; "off" never holds. */
+	syncBacklog: "off" | 1 | 3 | 5;
+}
+
+/** A change to advisor.json: fields left out stay as they are; null clears. */
+export interface RpcAdvisorSettingsUpdate {
+	enabled?: boolean;
+	/** "provider/model-id", or null to follow the session model. */
+	model?: string | null;
+	mode?: "quick" | "deep";
+	reviewEvery?: number;
+	thinking?: string;
+	tokenBudget?: number | null;
+	immuneTurns?: number;
+	syncBacklog?: "off" | 1 | 3 | 5;
 }
 
 /** What review.json says, with its defaults filled in, as the settings page shows it. */
@@ -146,6 +171,7 @@ export interface RpcReviewSettingsUpdate {
 	autoFix?: boolean;
 }
 
+/** One extension as the settings UI sees it: built-in or on disk, on or off. */
 export interface RpcExtensionInfo {
 	/** Stable id used to switch it on and off. */
 	id: string;
@@ -271,6 +297,7 @@ export type RpcResponse =
 			data: RpcAdvisorSettings;
 	  }
 	| { id?: string; type: "response"; command: "set_advisor_model"; success: true }
+	| { id?: string; type: "response"; command: "set_advisor_settings"; success: true }
 
 	// Review
 	| {

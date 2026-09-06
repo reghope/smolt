@@ -1,16 +1,19 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { type ComponentType, memo, type PropsWithChildren, useEffect, useRef, useState } from "react";
 import { api, type SessionRow } from "../lib/api.ts";
 import { cn } from "../lib/cn.ts";
 import { storedPreference, storePreference } from "../lib/prefs.ts";
 import {
 	app,
 	archiveSession,
+
 	bump,
+	archiveSelectedSessions,
 	clearSessionSelection,
 	deleteSelectedSessions,
 	deleteSession,
 	forkSession,
 	newSession,
+	pinSelectedSessions,
 	renameSession,
 	selectSessionRange,
 	setSelectionAnchor,
@@ -34,6 +37,14 @@ import {
 	DropdownMenuShortcut,
 	DropdownMenuTrigger,
 } from "./ui/dropdown-menu.tsx";
+import {
+	ContextMenu,
+	ContextMenuContent,
+	ContextMenuItem,
+	ContextMenuSeparator,
+	ContextMenuShortcut,
+	ContextMenuTrigger,
+} from "./ui/context-menu.tsx";
 import { Icon } from "./ui/icon.tsx";
 import { Input } from "./ui/input.tsx";
 import { MoreMenu } from "./MoreMenu.tsx";
@@ -68,6 +79,76 @@ function ambiguousTitles(rows: SessionRow[]): Set<string> {
  * dropdown rows per paint was measurable engine churn for rows that had not
  * changed at all.
  */
+/**
+ * The one menu a chat row answers with, whichever way it is summoned: the
+ * ⋮ button anchors it to the button, a right-click anchors it at the cursor.
+ * Radix keeps dropdown and context menus as separate component families, so
+ * the caller passes in whichever family's Item/Separator/Shortcut it uses.
+ */
+function SessionMenuItems({
+	parts,
+	row,
+	pinned,
+	selected,
+	selectedCount,
+}: {
+	parts: {
+		Item: ComponentType<PropsWithChildren<{ onSelect?: (event: Event) => void; variant?: "default" | "destructive" }>>;
+		Separator: ComponentType;
+		Shortcut: ComponentType<PropsWithChildren>;
+	};
+	row: SessionRow;
+	pinned: boolean;
+	selected: boolean;
+	selectedCount: number;
+}) {
+	const { Item, Separator, Shortcut } = parts;
+	// Inside a multi-selection the menu speaks for the lot: per-chat actions
+	// (rename, fork, open) step aside for the bulk ones.
+	if (selected && selectedCount > 1) {
+		return (
+			<>
+				<Item onSelect={() => pinSelectedSessions()}>Pin {selectedCount} chats</Item>
+				<Item onSelect={() => archiveSelectedSessions()}>Archive {selectedCount} chats</Item>
+				<Separator />
+				<Item variant="destructive" onSelect={() => void deleteSelectedSessions()}>
+					Delete {selectedCount} chats
+					<Shortcut>D</Shortcut>
+				</Item>
+			</>
+		);
+	}
+	return (
+		<>
+			<Item onSelect={() => void api.reveal(row.path, "reveal")}>
+				Open in
+				<Shortcut>▸</Shortcut>
+			</Item>
+			<Item onSelect={() => togglePinned(row.path)}>
+				{pinned ? "Unpin" : "Pin"}
+				<Shortcut>P</Shortcut>
+			</Item>
+			<Item onSelect={() => void renameSession(row)}>
+				Rename
+				<Shortcut>R</Shortcut>
+			</Item>
+			<Item onSelect={() => void forkSession(row)}>
+				Fork
+				<Shortcut>F</Shortcut>
+			</Item>
+			<Item onSelect={() => archiveSession(row)}>
+				Archive
+				<Shortcut>A</Shortcut>
+			</Item>
+			<Separator />
+			<Item variant="destructive" onSelect={() => void deleteSession(row)}>
+				Delete
+				<Shortcut>D</Shortcut>
+			</Item>
+		</>
+	);
+}
+
 const SessionEntry = memo(function SessionEntry({
 	row,
 	active,
@@ -77,6 +158,8 @@ const SessionEntry = memo(function SessionEntry({
 	selectedCount,
 	busy,
 	waiting,
+	done,
+	dots,
 }: {
 	row: SessionRow;
 	active: boolean;
@@ -86,31 +169,34 @@ const SessionEntry = memo(function SessionEntry({
 	/** How many chats are selected in total, so the menu can act on the lot. */
 	selectedCount: number;
 	busy: boolean;
+	/** Render the row marker as a dot bullet instead of an asterisk. */
+	dots: boolean;
 	/** This chat's agent is waiting on an approval; the dot turns amber. */
 	waiting: boolean;
+	/** The chat finished a turn the reader has not opened yet; steady green. */
+	done: boolean;
 }) {
-	return (
-		<DropdownMenu>
+	const body = (
 			<div
+				data-session-row
 				className={cn(
-					"group/session flex items-center rounded-lg transition-colors hover:bg-accent/60",
+					"group/session flex items-center rounded-lg transition-colors",
+					// Active or selected rows are already told apart; hover must not repaint them.
+					!selected && !active && "hover:bg-accent/60",
 					active && "bg-primary/10",
 					selected && "bg-primary/20",
 				)}
-				onContextMenu={(event) => {
-					// Radix opens on the trigger; route a right-click to the same menu.
-					event.preventDefault();
-					// Right-clicking outside the selection is a fresh start on this row,
-					// the way every file list behaves — the menu must never act on chats
-					// the reader has stopped pointing at.
-					if (!selected) clearSessionSelection();
-					(event.currentTarget.querySelector("[data-session-menu]") as HTMLButtonElement | null)?.click();
-				}}
-			>
+						// Right-clicking outside the selection is a fresh start on this
+						// row, the way every file list behaves — the menu must never act
+						// on chats the reader has stopped pointing at. Radix's own
+						// trigger opens the menu at the cursor.
+						onContextMenu={() => {
+							if (!selected) clearSessionSelection();
+						}}
+					>
 				<button
 					type="button"
 					className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-lg px-3 text-left text-sm text-muted-foreground"
-					title={row.preview || row.title}
 					onClick={(event) => {
 						// Standard list selection: shift extends, ctrl/cmd picks one out,
 						// a plain click drops the selection and opens the chat.
@@ -122,27 +208,45 @@ const SessionEntry = memo(function SessionEntry({
 							toggleSessionSelected(row.path);
 							return;
 						}
-						clearSessionSelection();
+						// Clicking the chat already on screen goes nowhere, so it keeps
+						// the selection too; only an actual move drops it.
+						if (!active) clearSessionSelection();
 						setSelectionAnchor(row.path);
 						void switchToSession(row.path);
 					}}
 				>
-					{/* The dot sits in an icon-sized slot so chat titles start on the
-					    same column as the New button's label above them. */}
+					{/* The marker sits in an icon-sized slot so chat titles start on
+					    the same column as the New button's label above it. Bold when
+					    the chat is working or selected: at rest it is a quiet mark. */}
 					<span className="flex size-4 flex-none items-center justify-center">
-						<span
-							className={cn(
-								"size-1.5 rounded-full border border-faint",
-								active && "bg-faint",
-								busy && "animate-pulse-soft border-salmon bg-salmon",
-								waiting && "animate-pulse-soft border-warn bg-warn",
-							)}
-						/>
+						{dots ? (
+							<span
+								className={cn(
+									"size-1.5 rounded-full border border-faint",
+									active && "bg-faint",
+									(busy || waiting) && "animate-pulse-soft border-tint bg-tint",
+									waiting && "border-warn bg-warn",
+									done && !active && "border-ok bg-ok",
+								)}
+							/>
+						) : (
+							<span
+								className={cn(
+									"font-mono text-[13px] leading-none",
+								active && !dots && "text-[16px]",
+									(busy || waiting) && "animate-pulse-soft font-bold",
+									!busy && !waiting && active && "font-bold",
+									waiting ? "text-warn" : busy ? "text-tint" : active ? "text-foreground" : done ? "text-ok" : "text-faint",
+								)}
+							>
+								*
+							</span>
+						)}
 					</span>
 					<span
 						className={cn(
 							"block min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap",
-							active && "font-medium text-foreground",
+							active && "font-bold text-foreground",
 						)}
 					>
 						{row.title}
@@ -157,50 +261,84 @@ const SessionEntry = memo(function SessionEntry({
 					<button
 						type="button"
 						data-session-menu
-						title="More"
 						aria-label="Session menu"
 						className="mr-1 size-6 flex-none rounded-md text-sm leading-none text-faint opacity-0 transition-opacity hover:bg-accent hover:text-foreground focus-visible:opacity-100 group-hover/session:opacity-100 data-[state=open]:opacity-100"
 					>
 						⋮
 					</button>
 				</DropdownMenuTrigger>
-			</div>
-			<DropdownMenuContent align="start" className="min-w-44">
-				<DropdownMenuItem onSelect={() => void api.reveal(row.path, "reveal")}>
-					Open in
-					<DropdownMenuShortcut>▸</DropdownMenuShortcut>
-				</DropdownMenuItem>
-				<DropdownMenuItem onSelect={() => togglePinned(row.path)}>
-					{pinned ? "Unpin" : "Pin"}
-					<DropdownMenuShortcut>P</DropdownMenuShortcut>
-				</DropdownMenuItem>
-				<DropdownMenuItem onSelect={() => void renameSession(row)}>
-					Rename
-					<DropdownMenuShortcut>R</DropdownMenuShortcut>
-				</DropdownMenuItem>
-				<DropdownMenuItem onSelect={() => void forkSession(row)}>
-					Fork
-					<DropdownMenuShortcut>F</DropdownMenuShortcut>
-				</DropdownMenuItem>
-				<DropdownMenuItem onSelect={() => archiveSession(row)}>
-					Archive
-					<DropdownMenuShortcut>A</DropdownMenuShortcut>
-				</DropdownMenuItem>
-				<DropdownMenuSeparator />
-				<DropdownMenuItem
-					variant="destructive"
-					onSelect={() => (selected && selectedCount > 1 ? void deleteSelectedSessions() : void deleteSession(row))}
-				>
-					{selected && selectedCount > 1 ? `Delete ${selectedCount} chats` : "Delete"}
-					<DropdownMenuShortcut>D</DropdownMenuShortcut>
-				</DropdownMenuItem>
-			</DropdownMenuContent>
-		</DropdownMenu>
+					</div>
+	);
+	return (
+		<ContextMenu>
+			<DropdownMenu>
+				<ContextMenuTrigger asChild>{body}</ContextMenuTrigger>
+				<DropdownMenuContent align="start" className="min-w-44">
+					<SessionMenuItems
+						parts={{ Item: DropdownMenuItem, Separator: DropdownMenuSeparator, Shortcut: DropdownMenuShortcut }}
+						row={row}
+						pinned={pinned}
+						selected={selected}
+						selectedCount={selectedCount}
+					/>
+				</DropdownMenuContent>
+			</DropdownMenu>
+			<ContextMenuContent className="min-w-44">
+				<SessionMenuItems
+					parts={{ Item: ContextMenuItem, Separator: ContextMenuSeparator, Shortcut: ContextMenuShortcut }}
+					row={row}
+					pinned={pinned}
+					selected={selected}
+					selectedCount={selectedCount}
+				/>
+			</ContextMenuContent>
+		</ContextMenu>
 	);
 });
 
 /** How many chats a day's group shows before the rest fold behind a chevron. */
 const GROUP_PREVIEW_ROWS = 5;
+
+/**
+ * The pre-load stand-in for the session list, shaped exactly like the loaded
+ * list: a day label and rows with the real row metrics (h-8, px-3, dot slot),
+ * so the swap to content moves nothing and needs no entrance animation. Held
+ * back briefly because the list usually lands within a few frames; painting
+ * a skeleton for those frames made it pop in and instantly vanish.
+ */
+function SessionListSkeleton() {
+	const [slow, setSlow] = useState(false);
+	useEffect(() => {
+		const timer = setTimeout(() => setSlow(true), 400);
+		return () => clearTimeout(timer);
+	}, []);
+	if (!slow) return null;
+	return (
+		<div aria-hidden>
+			{/* Group label: same padding and 16px text-xs line as the day heading. */}
+			<div className="flex items-center gap-2 px-3 pt-7 pb-1">
+				<span className="flex size-4 flex-none items-center justify-center">
+					<span className="size-1.5 animate-pulse-soft rounded-full bg-muted-foreground/20" />
+				</span>
+				<span className="flex h-[16px] items-center">
+					<span className="h-[8px] w-[44px] animate-pulse-soft rounded-full bg-muted-foreground/20" />
+				</span>
+			</div>
+			{[0, 1, 2, 3, 4].map((i) => (
+				<div key={i} className="flex h-8 items-center gap-2 px-3">
+					{/* The marker slot, same as a real row's: a round placeholder rather
+					    than a glyph, so the list loads as shapes and not as text. */}
+					<span className="flex size-4 flex-none items-center justify-center">
+						<span className="size-1.5 animate-pulse-soft rounded-full bg-muted-foreground/20" />
+					</span>
+					<span className="flex h-[20px] min-w-0 flex-1 items-center">
+						<span className="h-[9px] w-[72%] animate-pulse-soft rounded-full bg-muted-foreground/20" />
+					</span>
+				</div>
+			))}
+		</div>
+	);
+}
 
 function Group({ label, rows, ambiguous }: { label: string; rows: SessionRow[]; ambiguous: Set<string> }) {
 	const collapsed = app.collapsedGroups.has(label);
@@ -220,7 +358,12 @@ function Group({ label, rows, ambiguous }: { label: string; rows: SessionRow[]; 
 				<DropdownMenuTrigger asChild>
 					<button
 						type="button"
-						className="flex cursor-pointer select-none items-center gap-2 rounded-lg px-3 pt-3.5 pb-1 text-xs tracking-wide text-faint transition-colors hover:text-muted-foreground"
+						className="flex cursor-pointer select-none items-center gap-2 rounded-lg px-3 pt-7 pb-1 text-xs tracking-wide text-faint transition-colors hover:text-muted-foreground"
+						// Radix opens the menu on pointerdown; swallowing it keeps
+						// left-click as collapse/expand, with the menu on right-click only.
+						onPointerDown={(event) => {
+							if (event.button === 0) event.preventDefault();
+						}}
 						onClick={() => toggleGroupCollapsed(label)}
 						onContextMenu={(event) => {
 							event.preventDefault();
@@ -249,8 +392,15 @@ function Group({ label, rows, ambiguous }: { label: string; rows: SessionRow[]; 
 						pinned={app.pinned.has(row.path)}
 						selected={app.selectedSessions.has(row.path)}
 						selectedCount={app.selectedSessions.size}
-						busy={app.busySessions.has(row.path)}
+						busy={
+							app.busySessions.has(row.path) ||
+							// The chat on screen is visibly streaming even before the main
+							// process has learned its freshly minted path.
+							(row.path === app.currentSessionPath && app.chat.streaming)
+						}
 						waiting={app.pendingApprovals.some((request) => request.session === row.path)}
+						done={app.finishedUnseen.has(row.path)}
+						dots={app.sidebarDots}
 					/>
 				))}
 			{!collapsed && hiddenCount > 0 && (
@@ -327,12 +477,13 @@ export function Sidebar() {
 			live = false;
 		};
 	}, [needle]);
-	const visible = needle
+	const rows = needle
 		? (contentRows ??
 			state.sessionRows.filter(
 				(row) => row.title.toLowerCase().includes(needle) || row.preview.toLowerCase().includes(needle),
 			))
 		: state.sessionRows;
+	const visible = rows;
 	const shown = visible.filter((row) => !state.archived.has(row.path));
 	const pinned = shown.filter((row) => state.pinned.has(row.path));
 	const ambiguous = ambiguousTitles(shown);
@@ -359,7 +510,8 @@ export function Sidebar() {
 	// Shift-click ranges run over what the sidebar shows, in the order it shows
 	// it: pinned first, then each day. Published here because only this render
 	// knows that order.
-	const orderedPaths = [...pinned, ...telegram, ...groups.flatMap((group) => group.rows)].map((row) => row.path);
+	const orderedPaths = [...pinned, ...telegram, ...groups.flatMap((group) => group.rows)]
+		.map((row) => row.path);
 	const orderKey = orderedPaths.join("|");
 	// biome-ignore lint/correctness/useExhaustiveDependencies: the joined key is the list
 	useEffect(() => {
@@ -405,8 +557,16 @@ export function Sidebar() {
 			<div
 				ref={contentRef}
 				inert={hidden || undefined}
+				// A selection lives until the reader points somewhere else: any press
+				// that is not on a chat row (headers, blank space, the New button)
+				// drops it, the way every file list behaves.
+				onPointerDownCapture={(event) => {
+					if (app.selectedSessions.size === 0) return;
+					if ((event.target as HTMLElement).closest("[data-session-row]")) return;
+					clearSessionSelection();
+				}}
 				className={cn(
-					"flex h-full flex-col gap-1 overflow-hidden px-2 pt-10 pb-2",
+					"flex h-full flex-col gap-1 overflow-hidden px-2 pt-13 pb-2",
 					// At width zero the wrapper's own padding still paints 16px wide
 					// (border-box cannot shrink below it), letting child borders peek
 					// past the closed edge, so the closed content does not paint.
@@ -415,10 +575,28 @@ export function Sidebar() {
 			>
 			{/* First thing under the window's own controls, so starting a chat
 			    never means hunting for the button. */}
-			<Button variant="ghost" className="justify-start gap-2 px-3 font-normal" onClick={() => void newSession()}>
-				<Icon name="plus" className="text-faint" />
-				New
-			</Button>
+			{/* A temporary chat is only ever asked for: Ctrl+click here, or the
+			    right-click menu. A plain click, Ctrl+N, and /new all save. */}
+			<ContextMenu>
+				<ContextMenuTrigger asChild>
+					<Button
+						variant="ghost"
+						title="New chat — Ctrl+click (Cmd+click on macOS) or right-click for a temporary chat: nothing is saved"
+						className="justify-start gap-2 px-3 font-normal"
+						onClick={(event) => void newSession(event.ctrlKey || event.metaKey ? { temporary: true } : {})}
+					>
+						<Icon name="plus" className="text-faint" />
+						New
+					</Button>
+				</ContextMenuTrigger>
+				<ContextMenuContent className="min-w-44">
+					<ContextMenuItem onSelect={() => void newSession()}>New chat</ContextMenuItem>
+					<ContextMenuItem onSelect={() => void newSession({ temporary: true })}>
+						New temporary chat
+						<ContextMenuShortcut>Ctrl+click</ContextMenuShortcut>
+					</ContextMenuItem>
+				</ContextMenuContent>
+			</ContextMenu>
 			{state.sessionSearchOpen && (
 				<Input
 					ref={searchRef}
@@ -436,7 +614,9 @@ export function Sidebar() {
 				/>
 			)}
 			<div className="flex min-h-0 flex-1 flex-col gap-px overflow-x-hidden overflow-y-auto">
-				{state.sessionRows.length === 0 ? (
+				{!state.sessionsLoaded ? (
+					<SessionListSkeleton />
+				) : state.sessionRows.length === 0 && !state.scratchChat ? (
 					<p className="px-2 py-2.5 text-sm leading-normal text-faint">No chats yet.</p>
 				) : shown.length === 0 ? (
 					<p className="px-2 py-2.5 text-sm leading-normal text-faint">

@@ -22,6 +22,7 @@
 		"class-variance-authority": "0.7.1",
 		"clsx": "2.1.1",
 		"electron-updater": "6.6.2",
+		"proper-lockfile": "4.1.2",
 		"radix-ui": "1.6.7",
 		"react": "19.2.8",
 		"react-dom": "19.2.8",
@@ -31,6 +32,7 @@
 	},
 	"devDependencies": {
 		"@tailwindcss/cli": "4.3.3",
+		"@types/proper-lockfile": "4.1.4",
 		"@types/react": "19.2.18",
 		"@types/react-dom": "19.2.5",
 		"electron": "40.10.2",

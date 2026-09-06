@@ -7,6 +7,7 @@ import type {
 	ModelsApiStreamOptions,
 	ModelsRefreshOptions,
 	ModelsRefreshResult,
+	ModelsSimpleStreamOptions,
 	Provider,
 	ProviderHeaders,
 } from "@smolt/ai";
@@ -106,6 +107,14 @@ export class ModelRegistry {
 		options?: ModelsApiStreamOptions<TApi>,
 	): Promise<AssistantMessage> {
 		return this.runtime.complete(model, context, options);
+	}
+
+	/**
+	 * One request with provider-neutral options: `reasoning` names a thinking
+	 * level, and leaving it out asks every adapter for no thinking at all.
+	 */
+	completeSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): Promise<AssistantMessage> {
+		return this.runtime.completeSimple(model, context, options);
 	}
 
 	getProviderDisplayName(provider: string): string {

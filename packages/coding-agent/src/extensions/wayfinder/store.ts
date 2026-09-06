@@ -3,9 +3,10 @@ import { join } from "node:path";
 import { parse, stringify } from "yaml";
 
 /**
- * Wayfinder: plan a chunk of work too big for one session as a shared map of
- * decision tickets, stored as markdown files under the project's
- * `.smolt/wayfinder/` directory so the map travels with the repo.
+ * Wayfinder: plan a chunk of work too big for one session as a map of
+ * decision tickets, stored as markdown files in this project's wayfinder
+ * store — `~/.smolt/projects/<project>/wayfinder/`, outside the repo, so a
+ * map in progress never sits in anyone's diff.
  *
  * The store is the tracker. Everything the original wayfinder practice left
  * to convention is enforced here in code:

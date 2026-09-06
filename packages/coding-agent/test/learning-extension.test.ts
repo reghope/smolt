@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -33,14 +33,20 @@ interface RegisteredCommand {
 }
 
 class FakeSmolt {
-	handlers = new Map<string, ((event: Record<string, unknown>) => Promise<unknown>)[]>();
+	handlers = new Map<
+		string,
+		((event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown>)[]
+	>();
 	tools = new Map<string, RegisteredTool>();
 	commands = new Map<string, RegisteredCommand>();
 	sentMessages: Record<string, unknown>[] = [];
 	sentOptions: (Record<string, unknown> | undefined)[] = [];
 	notifications: string[] = [];
 
-	on(event: string, handler: (event: Record<string, unknown>) => Promise<unknown>): void {
+	on(
+		event: string,
+		handler: (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown>,
+	): void {
 		const list = this.handlers.get(event) ?? [];
 		list.push(handler);
 		this.handlers.set(event, list);
@@ -67,10 +73,10 @@ class FakeSmolt {
 		await command.handler(args, { ui: { notify: (text: string) => this.notifications.push(text) } });
 	}
 
-	async fire(event: string, payload: Record<string, unknown> = {}): Promise<unknown> {
+	async fire(event: string, payload: Record<string, unknown> = {}, ctx?: Record<string, unknown>): Promise<unknown> {
 		let result: unknown;
 		for (const handler of this.handlers.get(event) ?? []) {
-			result = await handler({ type: event, ...payload });
+			result = await handler({ type: event, ...payload }, ctx);
 		}
 		return result;
 	}
@@ -79,10 +85,16 @@ class FakeSmolt {
 		name: string,
 		params: Record<string, unknown>,
 		sessionId = "current-session",
+		opts?: { temporary?: boolean },
 	): Promise<Record<string, unknown>> {
 		const tool = this.tools.get(name);
 		if (!tool) throw new Error(`tool not registered: ${name}`);
-		const ctx = { sessionManager: { getSessionId: () => sessionId } };
+		const ctx = {
+			sessionManager: {
+				getSessionId: () => sessionId,
+				...(opts?.temporary ? { isPersisted: () => false } : {}),
+			},
+		};
 		const result = await tool.execute("call-1", params, undefined, undefined, ctx);
 		return JSON.parse(result.content[0]!.text) as Record<string, unknown>;
 	}
@@ -222,6 +234,34 @@ describe("registered tools", () => {
 
 		const browse = await smolt.runTool("session_search", {});
 		expect(browse).toMatchObject({ mode: "browse", count: 1 });
+	});
+});
+
+describe("temporary sessions", () => {
+	test("memory and skill writes are refused and nothing is injected", async () => {
+		mkdirSync(join(dir, "memories"), { recursive: true });
+		writeFileSync(join(dir, "memories", "MEMORY.md"), "the deploy target is fly.io", "utf-8");
+		const ctx = { sessionManager: { isPersisted: () => false } };
+
+		await smolt.fire("session_start");
+		const prompt = (await smolt.fire("before_agent_start", { systemPrompt: "BASE" }, ctx)) as Record<string, unknown>;
+		// No memory block and no nudge: the handler declines to add anything.
+		expect(prompt).toEqual({});
+
+		const memory = await smolt.runTool("memory", { action: "add", content: "forget-me-not" }, "s", {
+			temporary: true,
+		});
+		expect(memory).toMatchObject({ error: expect.stringContaining("Temporary chat") });
+		expect(readFileSync(join(dir, "memories", "MEMORY.md"), "utf-8")).toBe("the deploy target is fly.io");
+
+		const skill = await smolt.runTool(
+			"skill_manage",
+			{ action: "create", name: "temp-skill", content: "---\nname: temp-skill\ndescription: T.\n---\nbody" },
+			"s",
+			{ temporary: true },
+		);
+		expect(skill).toMatchObject({ error: expect.stringContaining("Temporary chat") });
+		expect(existsSync(join(dir, "skills", "temp-skill"))).toBe(false);
 	});
 });
 

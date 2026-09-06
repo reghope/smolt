@@ -1,8 +1,8 @@
-import { join } from "node:path";
 import { Type } from "typebox";
 // Type-only import: a standalone install of this module outside the smolt
 // tree switches this single line to `from "smolt"`.
 import type { ExtensionAPI } from "../../core/extensions/types.ts";
+import { projectStore } from "../../core/project-store.ts";
 import { TICKET_TYPES, type WayfinderSession, WayfinderStore, wayfinderTool } from "./store.ts";
 
 /**
@@ -18,12 +18,13 @@ import { TICKET_TYPES, type WayfinderSession, WayfinderStore, wayfinderTool } fr
  * compact status block keeps every session oriented for the cost of a few
  * lines of prompt.
  *
- * The map lives in `<project>/.smolt/wayfinder/`, so it is shared the same
- * way the code is: through the repo.
+ * The map lives outside the repo, in this project's wayfinder store under
+ * the home directory, so planning a piece of work leaves the reader's diff
+ * alone.
  */
 
 function wayfinderRoot(): string {
-	return join(process.cwd(), ".smolt", "wayfinder");
+	return projectStore(process.cwd(), "wayfinder");
 }
 
 const DOCTRINE = `## Wayfinder
@@ -181,7 +182,7 @@ export function createWayfinderExtension(smolt: ExtensionAPI, paths: WayfinderPa
 		label: "Wayfinder",
 		description:
 			"Chart and work shared wayfinder maps: plans for work too big for one session, stored in the " +
-			"project's .smolt/wayfinder/ directory so they travel with the repo. A map holds a destination " +
+			"project's wayfinder store, outside the repo. A map holds a destination " +
 			"plus decision tickets (questions, not build slices); sessions resolve them one at a time until " +
 			"the way is clear.\n\n" +
 			"ACTIONS: 'list' all maps; 'chart' a new map (title, destination, notes?, fog?); 'view' a map's " +

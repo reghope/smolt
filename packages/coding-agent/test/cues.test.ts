@@ -53,6 +53,18 @@ describe("matching", () => {
 		expect(cueMatches(short, "make a space invaders clone")).toBe(false);
 	});
 
+	test("an entry wrapped in slashes is a pattern, not a phrase", () => {
+		const linked = cue({ with: ["/https?:\\/\\/\\S/"] });
+		expect(cueMatches(linked, "build one like https://example.com")).toBe(true);
+		expect(cueMatches(linked, "build one like the other")).toBe(false);
+	});
+
+	test("a malformed pattern never matches and never throws", () => {
+		const broken = cue({ with: ["/(unclosed/"] });
+		expect(() => cueMatches(broken, "build a thing")).not.toThrow();
+		expect(cueMatches(broken, "build a thing")).toBe(false);
+	});
+
 	test("an empty prompt arms nothing", () => {
 		expect(cueMatches(cue(), "")).toBe(false);
 		expect(cueMatches(cue(), "   ")).toBe(false);
@@ -76,10 +88,32 @@ describe("the shipped web-stack cue", () => {
 		expect(cueMatches(webStack, "can you make a landing page for the shop")).toBe(true);
 	});
 
+	test("arms on the web you read, not just the web you use", () => {
+		expect(cueMatches(webStack, "write a new docs site for the CLI")).toBe(true);
+		expect(cueMatches(webStack, "put together a blog for the team")).toBe(true);
+		expect(cueMatches(webStack, "make me a portfolio")).toBe(true);
+	});
+
+	test("arms when a page is held up as the thing to build", () => {
+		// The prompt that went out without this note and came back on Mintlify.
+		expect(
+			cueMatches(
+				webStack,
+				"Write a new repo smolt-docs which replicates essentially what " +
+					"https://docs.openclaw.ai/ has going on. we need to talk about everything " +
+					"smolt offers, and how to use it, for the current version.",
+			),
+		).toBe(true);
+		expect(cueMatches(webStack, "build me something like https://linear.app")).toBe(true);
+	});
+
 	test("stays out of everything else", () => {
 		expect(cueMatches(webStack, "build the parser")).toBe(false);
 		expect(cueMatches(webStack, "the dashboard is rendering the wrong totals")).toBe(false);
 		expect(cueMatches(webStack, "build a scraper for the pricing pages")).toBe(false);
+		expect(cueMatches(webStack, "write a new parser for the log format")).toBe(false);
+		// A link is not on its own a web build: plenty of prompts carry one.
+		expect(cueMatches(webStack, "write a script that downloads https://example.com/a.csv")).toBe(false);
 	});
 
 	test("stays out when a stack is already named, its own included", () => {

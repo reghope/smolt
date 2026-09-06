@@ -6,8 +6,9 @@ import type { Persona } from "./personas.ts";
 
 /**
  * Battletest: simulated users run the app and everything they experience is
- * recorded as markdown under the project's `.smolt/battletest/` directory, so
- * a run's evidence travels with the repo the same way code does.
+ * recorded as markdown in this project's battletest store —
+ * `~/.smolt/projects/<project>/battletest/`, outside the repo, since a run
+ * files hundreds of tickets and none of them are the reader's work.
  *
  * A run holds the team of personas, one notes file per tester (their raw
  * experience diary, written as they go), the tickets they filed, and the
@@ -78,7 +79,7 @@ export interface LedgerEntry {
 
 export type BattleTestResult = Record<string, unknown>;
 
-/** One tester's end-of-run record: who they were, what they found, what it cost. */
+/** One tester's end-of-run record: who they were, what they found, what they spent. */
 export interface TesterPerformance {
 	slug: string;
 	name: string;
@@ -91,6 +92,7 @@ export interface TesterPerformance {
 	/** Severity-weighted score of those tickets. */
 	points: number;
 	actions: number;
+	/** Every token billed, the re-read context included. */
 	tokens: number;
 	wallMs: number;
 	/** The full brief this tester ran under. */

@@ -1228,7 +1228,14 @@ export function convertMessages(
 					content: sanitizeSurrogates(msg.content),
 				});
 			} else {
-				const content: ChatCompletionContentPart[] = msg.content.map((item): ChatCompletionContentPart => {
+				// Upstream providers (e.g. GLM via OpenCode Go, error [1210]) reject
+				// empty text parts inside multimodal content. Drop them; if the
+				// message is then images with no text at all, give it a placeholder
+				// text part so the model knows why it received an image.
+				const parts = msg.content.filter(
+					(item) => item.type !== "text" || sanitizeSurrogates(item.text).length > 0 || msg.content.length === 1,
+				);
+				const content: ChatCompletionContentPart[] = parts.map((item): ChatCompletionContentPart => {
 					if (item.type === "text") {
 						return {
 							type: "text",
@@ -1244,6 +1251,9 @@ export function convertMessages(
 					}
 				});
 				if (content.length === 0) continue;
+				if (content.some((part) => part.type === "image_url") && !content.some((part) => part.type === "text")) {
+					content.unshift({ type: "text", text: "The user has provided an image with this message" });
+				}
 				params.push({
 					role: "user",
 					content,

@@ -36,6 +36,20 @@ This is intentional. Smolt is designed to operate on local source trees, invoke 
 
 Project trust is only an input-loading guard. It prevents a repository from silently changing Smolt's settings or extensions before you approve it. It does not make untrusted code, untrusted prompts, or untrusted model output safe. Prompt injection from repository files, comments, documentation, context files, or build output is expected local-agent risk and cannot be reliably prevented by Smolt.
 
+## Permission Modes
+
+A built-in permissions extension checks every tool call against the current mode, stored in `~/.smolt/agent/permission-mode` and written as `auto` on first run. The mode applies to the whole machine, not one session, and the desktop app is what switches it; the CLI has no command for it at present.
+
+| Mode | Behavior |
+|------|----------|
+| `auto` | Default. Everything runs unasked except shell commands judged destructive, which ask |
+| `acceptEdits` | File edits apply without asking. Shell commands ask unless they provably only read |
+| `manual` | Every mutating tool asks for approval |
+| `plan` | Mutating tools are blocked outright; read, grep, find, and ls stay available |
+| `bypass` | Nothing is checked |
+
+Approving a tool for the rest of the process is possible, but an approval never covers a command judged destructive: approving one `rm -rf` does not approve the next one.
+
 ## Running Untrusted or Unmonitored Work
 
 For untrusted repositories, generated code you do not intend to monitor closely, or unattended automation, run Smolt in a contained environment. Use a container, VM, micro-VM, remote sandbox, or policy-controlled sandbox with only the files and credentials required for the task.

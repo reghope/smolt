@@ -625,9 +625,7 @@ if (process.platform !== "win32") fs.chmodSync(smoltPath, 0o755);
 		expect(existsSync(join(managedRoot, "releases", targetVersion))).toBe(true);
 		expect(existsSync(join(managedRoot, "releases", VERSION, "active.txt"))).toBe(true);
 		expect(readdirSync(join(managedRoot, "staging"))).toEqual([]);
-		expect(JSON.parse(readFileSync(npmRecordPath, "utf8")) as string[]).toEqual(
-			expect.arrayContaining(["ci", "--ignore-scripts"]),
-		);
+		expect(JSON.parse(readFileSync(npmRecordPath, "utf8")) as string[]).toEqual(expect.arrayContaining(["ci"]));
 		expect(logSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
 			`Updated smolt from ${VERSION} to ${targetVersion}`,
 		);

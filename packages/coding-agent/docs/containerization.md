@@ -26,7 +26,7 @@ Setup:
 ```bash
 cp -R packages/coding-agent/examples/extensions/gondolin ~/.smolt/agent/extensions/gondolin
 cd ~/.smolt/agent/extensions/gondolin
-npm install --ignore-scripts
+npm install
 ```
 
 Run from the project you want mounted:
@@ -54,7 +54,7 @@ FROM node:24-bookworm-slim
 RUN apt-get update \
   && apt-get install -y --no-install-recommends bash ca-certificates git ripgrep \
   && rm -rf /var/lib/apt/lists/*
-RUN npm install -g --ignore-scripts smolt
+RUN npm install -g smolt
 
 WORKDIR /workspace
 ENTRYPOINT ["smolt"]

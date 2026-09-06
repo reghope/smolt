@@ -88,6 +88,9 @@ export type BrowseDriverFactory = (options: BrowseLaunchOptions) => Promise<Brow
 const NAV_TIMEOUT_MS = 10_000;
 const SETTLE_MS = 400;
 
+/** Widest a screenshot is sent to the model, in pixels; a desktop viewport is scaled down to it. */
+export const MAX_SCREENSHOT_WIDTH = 1024;
+
 /** Common keys a user actually presses, mapped to Windows virtual key codes. */
 const KEY_CODES: Record<string, number> = {
 	Enter: 13,
@@ -417,10 +420,17 @@ class CdpDriver implements BrowseDriver {
 
 	async screenshot(): Promise<string> {
 		// JPEG at moderate quality: a fraction of a PNG's tokens, and layout
-		// problems survive compression just fine.
+		// problems survive compression just fine. The clip scales the capture
+		// back to CSS pixels, capped at MAX_SCREENSHOT_WIDTH: without it Chrome
+		// renders at the device pixel ratio, so a phone tester's 375x812 screen
+		// came back as 1125x2436 — three and a half thousand tokens a look,
+		// on every look — and a tablet's at 1536x2048.
+		const { width, height, deviceScaleFactor } = this.viewport;
+		const scale = Math.min(1, MAX_SCREENSHOT_WIDTH / width) / Math.max(1, deviceScaleFactor);
 		const result = await this.send<{ data: string }>("Page.captureScreenshot", {
 			format: "jpeg",
 			quality: 60,
+			clip: { x: 0, y: 0, width, height, scale },
 		});
 		return result.data;
 	}

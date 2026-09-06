@@ -50,8 +50,8 @@ Markdown with frontmatter, the same shape as skills and prompts. Project (`.smol
 ---
 name: worker
 description: Implements a scoped change end to end
-model: anthropic/claude-sonnet-4-5   # optional; default is the parent's model
-thinking: high                        # optional; default is the parent's level
+model: anthropic/claude-sonnet-4-5   # optional; default is agents.defaultSubagentModel, else the parent's model
+thinking: high                        # optional; default is agents.defaultSubagentThinking, else medium
 tools: [read, write, edit, bash]      # optional; default is the built-in set
 ---
 
@@ -61,7 +61,7 @@ Everything below the frontmatter becomes this agent's instructions.
 Three are built in so the feature works before anyone writes a definition:
 
 - **default** — a general-purpose hand with the parent's tools.
-- **explorer** — read, grep, find, ls. It cannot modify anything because it has no tool that could.
+- **explorer** — read, grep, find, ls, at low thinking. It cannot modify anything because it has no tool that could.
 - **worker** — builds, and is told it is not alone in the codebase: stay in scope, do not reformat around the edges, do not revert changes it did not make.
 
 ## Settings
@@ -73,6 +73,12 @@ Under `agents` in `settings.json` (global and project are deep-merged):
   "agents": {
     "enabled": true,
     "maxConcurrentThreadsPerSession": 4,
+    // What a thread runs on when its definition does not say. The model
+    // defaults to the parent's; thinking defaults to medium rather than the
+    // parent's level, which is often the user's ceiling for their own work
+    // and had threads spending most of their budget thinking.
+    "defaultSubagentModel": "anthropic/claude-sonnet-4-5",
+    "defaultSubagentThinking": "medium",
     // Child sessions are temporary (in-memory) by default, so threads never
     // clog the session list or session search. Set true to write them to
     // disk like any other session.
@@ -80,6 +86,10 @@ Under `agents` in `settings.json` (global and project are deep-merged):
   }
 }
 ```
+
+## What a thread spends
+
+A thread runs on the same lean child loader as battletest's testers and research's investigators (`battletest/spawn.ts`, `battletest/lean.ts`): no extensions, no skills catalogue (its whole task is in the brief), every tool result capped at 10,000 tokens, old results shed in batches with the calls that produced them. The project's context files (AGENTS.md and kin) ride only on a thread that can edit — `worker`, `default`, anything with `edit` or `write` in its tools — because they are conventions for whoever changes the repository; an `explorer` never does. Measured on this repository, the full loader had put six thousand tokens of skills and conventions on every turn of every thread, against about twelve hundred now for an explorer. `read` shows the tail of a transcript (the last dozen entries), not the whole of it, since everything it returns sits in the parent's context for good.
 
 ## Surfaces
 
@@ -94,7 +104,7 @@ Deliberate differences from Codex, all recorded during the research:
 
 - Codex has five model tools; this is one tool with actions, matching how `wayfinder` and `goal` are shaped here.
 - Codex caps recursion with `max_depth`. Here children load no extensions, so depth is fixed at one by construction.
-- Codex agents are TOML; these stay markdown-with-frontmatter, which is what the rest of smolt uses.
+- Codex agents are TOML; these stay markdown-with-frontmatter, which is what the rest of Smolt uses.
 - Codex's `interrupt_message` has no counterpart: steering writes a real message into the child's transcript, so the child already sees it.
 - Codex surfaces approvals from background threads. Smolt has no interactive tool-approval layer — the per-agent tool list is the permission surface.
 

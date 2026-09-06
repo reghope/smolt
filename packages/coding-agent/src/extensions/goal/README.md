@@ -30,7 +30,7 @@ The failure mode this guards against is not the model forgetting the objective. 
 
 ## Accounting
 
-A turn costs `(input − cacheRead) + output`. Cached input is free to the caller, so it is free to the goal. Reasoning tokens are inside `output` and do count — thinking hard toward the objective still spends the budget on it.
+A turn spends `(input − cacheRead) + output` tokens. Cached input is free to the caller, so it is free to the goal. Reasoning tokens are inside `output` and do count — thinking hard toward the objective still spends the budget on it.
 
 A spent budget gets exactly one closing turn, which is told to summarise where the goal got to and explicitly told that a spent budget is not a finish.
 

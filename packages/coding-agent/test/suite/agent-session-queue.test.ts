@@ -82,11 +82,16 @@ describe("AgentSession queue characterization", () => {
 		});
 		harnesses.push(harness);
 
+		harness.setResponses([fauxAssistantMessage("Done — that is switched on.")]);
+
 		await harness.session.prompt("/testcmd hello world");
 
 		expect(commandRuns).toEqual(["hello world"]);
+		// Dispatched here and now, and then said out loud: the command writes
+		// nothing to the transcript itself, so without the sentence the chat would
+		// show the reader's words and no reply.
+		expect(harness.session.messages.map((message) => message.role)).toEqual(["custom", "assistant"]);
 		expect(harness.getPendingResponseCount()).toBe(0);
-		expect(harness.session.messages).toEqual([]);
 	});
 
 	it("delivers extension-origin steering messages before the next LLM call", async () => {

@@ -193,6 +193,7 @@ export type ReadonlySessionManager = Pick<
 	| "getSessionDir"
 	| "getSessionId"
 	| "getSessionFile"
+	| "isPersisted"
 	| "getLeafId"
 	| "getLeafEntry"
 	| "getEntry"
@@ -458,6 +459,33 @@ export function buildContextEntries(
  * If leafId is provided, walks from that entry to root.
  * Handles compaction and branch summaries along the path.
  */
+/** Tools whose results are file contents: cheap to get back, dear to keep. */
+const FILE_CONTENT_TOOLS = new Set(["read"]);
+
+/** What stands in for a file's contents once a compaction has passed over them. */
+export const DROPPED_FILE_CONTENTS =
+	"[The contents of this file were dropped when the conversation was compacted. Read the file again if you need them.]";
+
+/**
+ * A message from before the latest compaction, with any file contents taken
+ * out. The entries a compaction keeps are the recent ones, and among them
+ * the biggest by far are whole files the agent read: they are what filled
+ * the context in the first place, and they are one tool call away if they
+ * are wanted again. The rest of the message stays, so the agent still sees
+ * that the read happened and what it asked for.
+ */
+function withoutFileContents(message: AgentMessage): AgentMessage {
+	if (message.role !== "toolResult" || !FILE_CONTENT_TOOLS.has(message.toolName)) return message;
+	if (
+		message.content.length === 1 &&
+		message.content[0]?.type === "text" &&
+		message.content[0].text === DROPPED_FILE_CONTENTS
+	) {
+		return message;
+	}
+	return { ...message, content: [{ type: "text", text: DROPPED_FILE_CONTENTS }] };
+}
+
 export function buildSessionContext(
 	entries: SessionEntry[],
 	leafId?: string | null,
@@ -465,7 +493,16 @@ export function buildSessionContext(
 ): SessionContext {
 	const path = buildSessionPath(entries, leafId, byId);
 	const { thinkingLevel, model } = getSessionContextSettings(path);
-	const messages = buildContextEntries(entries, leafId, byId).flatMap(sessionEntryToContextMessages);
+	const contextEntries = buildContextEntries(entries, leafId, byId);
+	// The entries a compaction kept sit before it on the path; everything
+	// since is live work. The kept ones lose their files, the live ones keep them.
+	const latestCompaction = contextEntries[0]?.type === "compaction" ? contextEntries[0] : undefined;
+	const compactionIndex = latestCompaction ? path.findIndex((entry) => entry.id === latestCompaction.id) : -1;
+	const keptBefore = new Set(compactionIndex < 0 ? [] : path.slice(0, compactionIndex).map((entry) => entry.id));
+	const messages = contextEntries.flatMap((entry) => {
+		const entryMessages = sessionEntryToContextMessages(entry);
+		return keptBefore.has(entry.id) ? entryMessages.map(withoutFileContents) : entryMessages;
+	});
 	return { messages, thinkingLevel, model };
 }
 

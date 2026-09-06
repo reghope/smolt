@@ -12,6 +12,7 @@ import {
 import {
 	chargeSeconds,
 	chargeTokens,
+	closeAccounting,
 	createGoal,
 	formatTokens,
 	type Goal,
@@ -157,6 +158,9 @@ export function createGoalExtension(smolt: ExtensionAPI): GoalHandle {
 				if (entry.type !== "custom" || entry.customType !== GOAL_ENTRY) continue;
 				goal = (entry.data as Goal | null) ?? null;
 			}
+			// A restored goal that is already complete is finished with; its
+			// accounting stays closed so no future turn charges to it.
+			if (goal !== null && goal.status === "complete" && !goal.accountingClosed) goal = closeAccounting(goal);
 		} catch {
 			// A session without readable entries simply starts without a goal.
 		}
@@ -173,20 +177,33 @@ export function createGoalExtension(smolt: ExtensionAPI): GoalHandle {
 		return { systemPrompt: `${event.systemPrompt}\n\n${objectiveBlock(goal)}` };
 	});
 
+	smolt.on("turn_end", async (event, ctx) => {
+		if (goal === null) return;
+		// Charge per turn, not once at run end: the model can mark the goal
+		// complete with a tool call mid-run, and a boundary charge after that
+		// would throw away everything the run spent before the call.
+		const charged = chargeTokens(goal, turnCost([event.message]));
+		if (charged.goal !== goal) {
+			goal = charged.goal;
+			if (charged.limitReached && budgetLimitReported !== goal.id) {
+				budgetLimitReported = goal.id;
+				ctx.ui.notify(`Goal reached its token budget (${formatTokens(goal.tokensUsed)}).`, "warning");
+			}
+			persist();
+			paint(ctx);
+		}
+	});
+
 	smolt.on("agent_end", async (event, ctx) => {
 		if (goal === null) return;
 		const messages = event.messages as { role?: string; usage?: MessageUsage; content?: unknown }[];
-		const charged = chargeTokens(goal, turnCost(messages));
-		goal = charged.goal;
 		if (turnStartedAt > 0) goal = chargeSeconds(goal, Math.round((Date.now() - turnStartedAt) / 1000));
 		// A turn that called no tool made no contact with the world; count it
 		// toward the blocked audit rather than as progress.
 		goal = recordTurn(goal, usedTools(messages));
 		if (runIsContinuation && !usedTools(messages)) deferNextContinuation = true;
-		if (charged.limitReached && budgetLimitReported !== goal.id) {
-			budgetLimitReported = goal.id;
-			ctx.ui.notify(`Goal reached its token budget (${formatTokens(goal.tokensUsed)}).`, "warning");
-		}
+		// The run that completed the goal has ended; nothing further charges.
+		goal = closeAccounting(goal);
 		persist();
 		paint(ctx);
 	});
@@ -270,7 +287,7 @@ export function createGoalExtension(smolt: ExtensionAPI): GoalHandle {
 					goal,
 					completion_budget_report:
 						goal.status === "complete"
-							? `Tell the user what this goal cost: ${formatTokens(goal.tokensUsed)} tokens over ${goal.secondsUsed}s.`
+							? `Tell the user what the goal spent: ${formatTokens(goal.tokensUsed)} tokens over ${goal.secondsUsed}s.`
 							: undefined,
 				}),
 			);
@@ -364,7 +381,14 @@ export function createGoalExtension(smolt: ExtensionAPI): GoalHandle {
 				// Editing a live objective replaces it rather than being refused:
 				// the user is the one who set it, and a refusal here would just
 				// make them clear and retype.
-				goal = { ...goal, objective: trimmed, status: "active", blockedRunLength: 0, updatedAt: Date.now() };
+				goal = {
+					...goal,
+					objective: trimmed,
+					status: "active",
+					blockedRunLength: 0,
+					accountingClosed: false,
+					updatedAt: Date.now(),
+				};
 				persist();
 				paint(ctx);
 				ctx.ui.notify("Goal updated.", "info");

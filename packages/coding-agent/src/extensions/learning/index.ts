@@ -179,6 +179,15 @@ function jsonResult(value: unknown) {
 	return textResult(JSON.stringify(value));
 }
 
+/**
+ * True when the session is temporary: in-memory, never written to disk.
+ * Session managers without the method (test fakes) count as persisted, so
+ * the firewall only ever narrows real in-memory sessions.
+ */
+function isTemporarySession(sm: { isPersisted?: () => boolean }): boolean {
+	return typeof sm.isPersisted === "function" ? !sm.isPersisted() : false;
+}
+
 export interface LearningPaths {
 	memoriesDir: string;
 	skillsRoot: string;
@@ -277,6 +286,9 @@ export function createLearningExtension(
 	});
 
 	smolt.on("before_agent_start", async (event, ctx) => {
+		// A temporary session remembers nothing: no memory or skill notes
+		// injected, no nudge to persist anything, no writes accepted below.
+		if (ctx && isTemporarySession(ctx.sessionManager)) return {};
 		if (frozen === undefined) {
 			memory.loadFromDisk();
 			const blocks = [memory.formatForSystemPrompt("memory"), memory.formatForSystemPrompt("user")].filter(
@@ -373,7 +385,14 @@ export function createLearningExtension(
 				),
 			),
 		}),
-		async execute(_toolCallId, params) {
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			if (ctx && isTemporarySession(ctx.sessionManager)) {
+				return textResult(
+					JSON.stringify({
+						error: "Temporary chat: nothing is saved or remembered. The memory tool is unavailable here.",
+					}),
+				);
+			}
 			return jsonResult(memoryTool(memory, params));
 		},
 	});
@@ -421,7 +440,14 @@ export function createLearningExtension(
 			),
 			file_content: Type.Optional(Type.String({ description: "File content (write_file)" })),
 		}),
-		async execute(_toolCallId, params) {
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			if (ctx && isTemporarySession(ctx.sessionManager)) {
+				return textResult(
+					JSON.stringify({
+						error: "Temporary chat: nothing is saved or remembered. The skill_manage tool is unavailable here.",
+					}),
+				);
+			}
 			return jsonResult(skillManageTool(skills, params));
 		},
 	});

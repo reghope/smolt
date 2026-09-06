@@ -49,3 +49,22 @@ export function formatElapsed(seconds: number): string {
 	const whole = Math.floor(seconds);
 	return whole >= 60 ? `${Math.floor(whole / 60)}m ${whole % 60}s` : `${whole}s`;
 }
+
+/**
+ * Where a file sits, kept to the two steps that say the most: the tree it is
+ * in and the folder it is in.
+ *
+ * The immediate parent alone is not enough. A list of forty rows all reading
+ * "ledger" says nothing about whether that ledger is in the repo or in
+ * `.smolt`, which is exactly the question a reader asks of files they did not
+ * expect to see. Keeping the first segment answers it in the same width.
+ */
+export function parentHint(path: string): string {
+	const parts = path.split("/");
+	if (parts.length < 2) return "";
+	const parent = parts[parts.length - 2];
+	if (parts.length === 2) return parent;
+	const root = parts[0];
+	// Adjacent already: nothing has been skipped, so say nothing about skipping.
+	return parts.length === 3 ? `${root}/${parent}` : `${root}/.../${parent}`;
+}

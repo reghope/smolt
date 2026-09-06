@@ -14,16 +14,18 @@
  */
 
 /**
- * Moonshine rather than Whisper, and base rather than tiny.
+ * Whisper rather than Moonshine, and small rather than base.
  *
- * Whisper pads every clip to a thirty-second window, so re-reading two
- * seconds of audio costs almost what re-reading thirty would — and this
- * re-reads a growing clip about once a second. Moonshine's cost follows the
- * audio instead, which on the short clips dictation actually sends is four
- * to five times quicker, at a size that is a step up in accuracy rather
- * than down.
+ * Transcription runs on whole segments of a sitting — half a minute of
+ * speech, cut at a pause — rather than continuously while the microphone is
+ * open, so a model too slow to follow a voice can be afforded and the
+ * accuracy step from moonshine-base to whisper-small is taken instead.
+ * Whisper pads every clip to a thirty-second window, which is why this
+ * pairing was wrong for the old streaming loop; a window per segment costs
+ * seconds nobody is waiting on interactively. The weights are ~4x moonshine's on disk (~250 MB q8),
+ * downloaded once and cached.
  */
-const MODEL_ID = "onnx-community/moonshine-base-ONNX";
+const MODEL_ID = "Xenova/whisper-small";
 
 type Transcriber = (audio: Float32Array, options?: Record<string, unknown>) => Promise<{ text?: unknown }>;
 
@@ -93,16 +95,37 @@ async function ensure(cacheDir: string): Promise<Transcriber> {
  *
  * A clip longer than the window is decoded in overlapping chunks — without
  * that a model reads the first window and silently discards the rest, which
- * is how the end of a long dictation used to vanish. Segments are cut well
- * below this, so it is a backstop rather than the usual path.
+ * is how the end of a long dictation used to vanish. Most segments arrive
+ * under the window; one from speech with no pause in it can run past, and
+ * this is what carries it.
  */
 async function transcribe(cacheDir: string, samples: Float32Array): Promise<string> {
 	if (samples.length === 0) return "";
 	const pipe = await ensure(cacheDir);
+	// Decoding limits, so a bad clip cannot become an endless repeat: a
+	// ceiling on tokens, a penalty on saying a token again, and a hard ban
+	// on the same four-token run twice.
+	//
+	// The ceiling is deliberately loose. Hitting it stops generation mid
+	// sentence, which reads as the last few words of the dictation going
+	// missing, and a fast talker with punctuation can pass six tokens a
+	// second. Ten a second, never below a short sentence's worth, leaves
+	// real speech untouched — the repeat rules are what actually stop a
+	// loop, and this is only the backstop behind them.
+	const seconds = samples.length / SPEECH_RATE;
+	const limits = {
+		// Stated rather than left to the model: whisper-small is multilingual and
+		// warns on every call when no language is given.
+		language: "en",
+		task: "transcribe",
+		max_new_tokens: Math.min(448, Math.max(96, Math.ceil(seconds * 10) + 16)),
+		repetition_penalty: 1.15,
+		no_repeat_ngram_size: 4,
+	};
 	const result =
 		samples.length > SPEECH_RATE * WINDOW_SECONDS
-			? await pipe(samples, { chunk_length_s: WINDOW_SECONDS, stride_length_s: 5 })
-			: await pipe(samples);
+			? await pipe(samples, { chunk_length_s: WINDOW_SECONDS, stride_length_s: 5, ...limits })
+			: await pipe(samples, limits);
 	return typeof result.text === "string" ? result.text.trim() : "";
 }
 

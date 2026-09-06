@@ -1,101 +1,37 @@
 import { describe, expect, test } from "vitest";
 import {
-	dropSamples,
-	freshWords,
-	isEcho,
+	collapseRepeats,
+	isRunaway,
 	isStockAnswer,
-	planRun,
 	renderRun,
-	type SampleBuffer,
-	tailWords,
-	UNSETTLED_TAIL,
+	SEGMENT_MAX_SECONDS,
+	SEGMENT_SECONDS,
+	shouldCutSegment,
 } from "../src/renderer/state/voice-core.ts";
 
 /**
- * The pure half of dictation: word settling and segment audio bookkeeping.
- *
- * These are the rules that keep live text from churning while it is being
- * spoken, and keep every transcription pass short no matter how long the
- * microphone has been open.
+ * The pure half of dictation: how a finished transcription is appended to
+ * the draft, and how a bad answer from the model is recognised.
  */
 
-describe("freshWords", () => {
-	test("holds back the tail still being spoken", () => {
-		expect(freshWords([], "the quick brown fox", false)).toEqual(["the", "quick"]);
+describe("shouldCutSegment", () => {
+	test("keeps a short segment whole, pause or no pause", () => {
+		expect(shouldCutSegment(5, 0)).toBe(false);
+		expect(shouldCutSegment(5, 3)).toBe(false);
+		expect(shouldCutSegment(SEGMENT_SECONDS - 1, 3)).toBe(false);
 	});
 
-	test("contributes only what a pass adds beyond the settled words", () => {
-		expect(freshWords(["the", "quick"], "the quick brown fox jumps", false)).toEqual(["brown"]);
+	test("cuts a grown segment at a pause in speech", () => {
+		expect(shouldCutSegment(SEGMENT_SECONDS, 0.5)).toBe(true);
+		// Mid-sentence it waits, however long the segment has grown.
+		expect(shouldCutSegment(SEGMENT_SECONDS + 20, 0)).toBe(false);
+		expect(shouldCutSegment(SEGMENT_SECONDS + 20, 0.1)).toBe(false);
 	});
 
-	test("a final pass commits everything, tail included", () => {
-		expect(freshWords(["the", "quick"], "the quick brown fox", true)).toEqual(["brown", "fox"]);
-	});
-
-	test("never takes words back when a pass hears less than before", () => {
-		// A later pass sometimes rephrases into fewer words; the words already
-		// on screen must stay put.
-		expect(freshWords(["the", "quick", "brown"], "the quick", true)).toEqual([]);
-	});
-
-	test("a short clip settles nothing until it grows past the tail", () => {
-		expect(freshWords([], "hello there", false)).toEqual([]);
-		expect(UNSETTLED_TAIL).toBe(2);
-	});
-
-	test("ignores stray whitespace from the model", () => {
-		expect(freshWords([], "  one   two three  four ", false)).toEqual(["one", "two"]);
-	});
-});
-
-describe("tailWords", () => {
-	test("shows the words a pass has not settled, so text keeps up with the voice", () => {
-		expect(tailWords([], "the quick brown fox", false)).toEqual(["brown", "fox"]);
-	});
-
-	test("never repeats a word the caller has already settled", () => {
-		// freshWords contributes "brown"; the tail picks up strictly after it.
-		expect(tailWords(["the", "quick"], "the quick brown fox jumps", false)).toEqual(["fox", "jumps"]);
-	});
-
-	test("shows everything while the clip is still shorter than the tail", () => {
-		// freshWords settles nothing this early, so without a tail these two
-		// words would sit unseen until more audio arrived.
-		expect(freshWords([], "hello there", false)).toEqual([]);
-		expect(tailWords([], "hello there", false)).toEqual(["hello", "there"]);
-	});
-
-	test("a final pass has no tail, because every word settles", () => {
-		expect(tailWords(["the"], "the quick brown fox", true)).toEqual([]);
-	});
-
-	test("offers nothing back when a pass hears fewer words than are settled", () => {
-		expect(tailWords(["the", "quick", "brown"], "the quick", false)).toEqual([]);
-	});
-
-	test("ignores stray whitespace from the model", () => {
-		expect(tailWords([], "  one   two three  four ", false)).toEqual(["three", "four"]);
-	});
-});
-
-describe("isEcho", () => {
-	test("catches the model repeating the last word into trailing quiet", () => {
-		expect(isEcho(["one", "two", "three", "four"], ["four"])).toBe(true);
-		expect(isEcho(["one", "two", "three", "four"], ["four", "four", "four"])).toBe(true);
-	});
-
-	test("sees through punctuation and case on the repeated word", () => {
-		expect(isEcho(["testing", "four."], ["Four", "four!"])).toBe(true);
-	});
-
-	test("lets genuinely new words through", () => {
-		expect(isEcho(["one", "two"], ["three"])).toBe(false);
-		expect(isEcho(["one", "four"], ["four", "five"])).toBe(false);
-	});
-
-	test("never fires with nothing settled or nothing fresh", () => {
-		expect(isEcho([], ["four"])).toBe(false);
-		expect(isEcho(["four"], [])).toBe(false);
+	test("cuts unbroken speech at the ceiling, so nothing grows without bound", () => {
+		expect(shouldCutSegment(SEGMENT_MAX_SECONDS, 0)).toBe(true);
+		// An hour of it is just more segments: every one is cut at the ceiling.
+		expect(shouldCutSegment(3600, 0)).toBe(true);
 	});
 });
 
@@ -108,7 +44,7 @@ describe("isStockAnswer", () => {
 		expect(isStockAnswer("Thanks for watching!", [])).toBe(true);
 	});
 
-	test("treats an empty pass as one of them", () => {
+	test("treats an empty transcription as one of them", () => {
 		expect(isStockAnswer("", [])).toBe(true);
 		expect(isStockAnswer("  ", [])).toBe(true);
 	});
@@ -118,46 +54,11 @@ describe("isStockAnswer", () => {
 		expect(isStockAnswer("you should check the token", [])).toBe(false);
 	});
 
-	test("never second-guesses a segment that is already under way", () => {
-		// Mid sentence these are ordinary words, and someone answering a
-		// question with "okay" has to be heard.
+	test("never second-guesses a sitting that produced more than one answer", () => {
+		// Mid-text these are ordinary words, and someone answering a question
+		// with "okay" has to be heard.
 		expect(isStockAnswer("okay", ["and", "then"])).toBe(false);
 		expect(isStockAnswer("you", ["thank"])).toBe(false);
-	});
-});
-
-describe("planRun", () => {
-	test("a pass that only carries the run further just adds to the queue", () => {
-		expect(planRun(["the", "quick"], ["brown"], ["the", "quick", "brown", "fox"])).toEqual({
-			kind: "append",
-			words: ["fox"],
-		});
-	});
-
-	test("revising a word still waiting costs nothing, because nobody saw it", () => {
-		// "ther" was queued but not shown; the pass corrects it to "there".
-		expect(planRun(["hello"], ["ther"], ["hello", "there", "friend"])).toEqual({
-			kind: "requeue",
-			words: ["there", "friend"],
-		});
-	});
-
-	test("contradicting a word already on screen forces a redraw", () => {
-		expect(planRun(["hello", "ther"], [], ["hello", "there"])).toEqual({
-			kind: "rewrite",
-			words: ["hello", "there"],
-		});
-	});
-
-	test("a pass that says nothing new queues nothing", () => {
-		expect(planRun(["the", "quick"], [], ["the", "quick"])).toEqual({ kind: "append", words: [] });
-	});
-
-	test("a pass that hears fewer words than are shown redraws rather than truncating silently", () => {
-		expect(planRun(["the", "quick", "brown"], [], ["the", "quick"])).toEqual({
-			kind: "rewrite",
-			words: ["the", "quick"],
-		});
 	});
 });
 
@@ -225,46 +126,22 @@ describe("renderRun", () => {
 	});
 });
 
-function buffer(...lengths: number[]): SampleBuffer {
-	return {
-		samples: lengths.map((length, index) => new Float32Array(length).fill(index + 1)),
-		total: lengths.reduce((sum, length) => sum + length, 0),
-	};
-}
-
-describe("dropSamples", () => {
-	test("drops whole chunks that have been transcribed", () => {
-		const b = buffer(4, 4, 4);
-		dropSamples(b, 8);
-		expect(b.total).toBe(4);
-		expect(b.samples.length).toBe(1);
-		expect(b.samples[0][0]).toBe(3);
+describe("runaway repeats", () => {
+	test("folds a word said three or more times to one, and leaves a double alone", () => {
+		expect(collapseRepeats("the the the the cat")).toBe("the cat");
+		expect(collapseRepeats("no, no, never")).toBe("no, no, never");
+		expect(collapseRepeats("send send send send send")).toBe("send");
 	});
 
-	test("splits a chunk when the cut lands inside it", () => {
-		const b = buffer(4, 4);
-		dropSamples(b, 6);
-		expect(b.total).toBe(2);
-		expect(b.samples.length).toBe(1);
-		expect(b.samples[0].length).toBe(2);
-		expect(b.samples[0][0]).toBe(2);
+	test("folds a repeated phrase as a phrase", () => {
+		expect(collapseRepeats("and then and then and then we left")).toBe("and then we left");
+		expect(collapseRepeats("I think so. I think so. I think so.")).toBe("I think so.");
 	});
 
-	test("keeps audio that arrived while the pass was in flight", () => {
-		// The pass consumed 8 samples; 4 more landed meanwhile. Those 4 are the
-		// start of the next segment and must survive.
-		const b = buffer(4, 4);
-		dropSamples(b, 8);
-		b.samples.push(new Float32Array(4).fill(9));
-		b.total += 4;
-		expect(b.total).toBe(4);
-		expect(b.samples[0][0]).toBe(9);
-	});
-
-	test("dropping more than the buffer holds empties it and no further", () => {
-		const b = buffer(4);
-		dropSamples(b, 100);
-		expect(b.total).toBe(0);
-		expect(b.samples.length).toBe(0);
+	test("recognises a transcription that is mostly one word as the loop it is", () => {
+		expect(isRunaway("yes yes yes yes yes yes yes")).toBe(true);
+		expect(isRunaway("okay okay okay okay okay and then we")).toBe(true);
+		expect(isRunaway("please open the file and read it")).toBe(false);
+		expect(isRunaway("yes yes")).toBe(false);
 	});
 });

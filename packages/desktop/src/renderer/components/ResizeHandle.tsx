@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { cn } from "../lib/cn.ts";
+import { Tip } from "./ui/tooltip.tsx";
 
 /**
  * The pane divider: an invisible 11px grab zone on a panel's edge whose
@@ -84,11 +85,13 @@ export function ResizeHandle({
 	};
 
 	return (
+		// Radix closes a tooltip on pointer-down, so the hint shows on hover and
+		// gets out of the way the moment the drag starts.
+		<Tip label="Drag to resize; drag to the edge to close">
 		<div
 			role="separator"
 			aria-orientation="vertical"
 			aria-label={label}
-			title="Drag to resize; drag to the edge to close"
 			className={cn(
 				"group/handle absolute inset-y-0 z-30 cursor-col-resize touch-none",
 				flush ? "w-2.5" : "w-[11px]",
@@ -98,17 +101,18 @@ export function ResizeHandle({
 		>
 			<span
 				className={cn(
-					"absolute inset-y-2 left-[5px] w-px bg-transparent transition-colors [mask-image:linear-gradient(to_bottom,transparent,#000_24%,#000_76%,transparent)] group-hover/handle:bg-salmon",
-					dragging && "bg-salmon",
+					"absolute inset-y-2 left-[5px] w-px bg-transparent transition-colors [mask-image:linear-gradient(to_bottom,transparent,#000_24%,#000_76%,transparent)] group-hover/handle:bg-tint",
+					dragging && "bg-tint",
 				)}
 			/>
 			<span
 				className={cn(
-					"pointer-events-none absolute inset-y-2 left-1 z-[1] w-0.5 rounded-full bg-transparent transition-colors [mask-image:linear-gradient(to_bottom,transparent,#000_30%,#000_70%,transparent)] group-hover/handle:bg-salmon",
-					dragging && "bg-salmon",
+					"pointer-events-none absolute inset-y-2 left-1 z-[1] w-0.5 rounded-full bg-transparent transition-colors [mask-image:linear-gradient(to_bottom,transparent,#000_30%,#000_70%,transparent)] group-hover/handle:bg-tint",
+					dragging && "bg-tint",
 				)}
 			/>
 		</div>
+		</Tip>
 	);
 }
 

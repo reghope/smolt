@@ -30,6 +30,28 @@ export interface AgentDefinition {
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "max"]);
 
 /**
+ * What every thread is told, whatever its role.
+ *
+ * The load-bearing rule is the last one. A thread that writes its findings to
+ * a markdown file has thrown them away: the parent reads the thread's final
+ * message, not the filesystem, so the report has to be the reply itself.
+ */
+export const THREAD_NOTES =
+	"Notes:\n" +
+	"- Your cwd resets between bash calls, so use absolute file paths.\n" +
+	"- Report what actually happened, not what you intended. If a step failed, was skipped, or came " +
+	"back different from what you expected, say so in your first sentence, before anything else.\n" +
+	"- In your final response, share file paths (always absolute, never relative) that are relevant " +
+	"to the task. Include code snippets only when the exact text is load-bearing, such as a bug you " +
+	"found or a function signature the caller asked for. Do not recap code you merely read.\n" +
+	"- For clear communication you MUST avoid using emojis.\n" +
+	'- Do not use a colon before tool calls. Text like "Let me read the file:" followed by a read ' +
+	'should just be "Let me read the file." with a period.\n' +
+	"- Do NOT write report, summary, findings, or analysis .md files. Return findings directly as " +
+	"your final assistant message: the parent agent reads your text output, not files you create. " +
+	"(Files written as input to another tool are fine; this note is about report files.)";
+
+/**
  * The three that always exist, with the roles Codex defines.
  *
  * `default` is a plain hand; `explorer` reads and reports without touching
@@ -43,18 +65,22 @@ export const BUILT_IN_AGENTS: AgentDefinition[] = [
 		instructions:
 			"You are a subagent working on one delegated task. Do that task and report back. " +
 			"Your reply is read by another agent, not by a person: lead with the answer, keep it dense, " +
-			"and name files and symbols precisely.",
+			"and name files and symbols precisely.\n\n" +
+			THREAD_NOTES,
 		source: "built-in",
 	},
 	{
 		name: "explorer",
 		description: "Reads and searches the codebase to answer questions. Never modifies anything.",
 		tools: ["read", "grep", "find", "ls"],
+		// Finding things is a matter of looking, not deliberating.
+		thinking: "low",
 		instructions:
 			"You are an explorer. You investigate and report; you never modify anything, and you have no " +
 			"tools that could. Answer the question you were given with specifics — file paths with line " +
 			"numbers, exact symbol names, the actual text that matters. Say plainly when you could not " +
-			"find something rather than guessing at it.",
+			"find something rather than guessing at it.\n\n" +
+			THREAD_NOTES,
 		source: "built-in",
 	},
 	{
@@ -66,7 +92,8 @@ export const BUILT_IN_AGENTS: AgentDefinition[] = [
 			"You are not alone in this codebase. Other agents may be working in it at the same time. So: " +
 			"stay inside the scope you were given, do not refactor or reformat code outside it, do not " +
 			"revert or 'fix' changes you did not make, and if a file has moved under you, re-read it " +
-			"rather than writing over it from memory.",
+			"rather than writing over it from memory.\n\n" +
+			THREAD_NOTES,
 		source: "built-in",
 	},
 ];

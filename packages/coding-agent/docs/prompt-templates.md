@@ -28,7 +28,7 @@ Review the staged changes (`git diff --cached`). Focus on:
 - Error handling gaps
 ```
 
-- The filename becomes the command name. `review.md` becomes `/review`.
+- The filename becomes the command name. `staged-review.md` becomes `/staged-review`. Avoid names that a built-in command already uses, such as `/review`: extension commands are resolved first, so a template with the same name is never reached.
 - `description` is optional. If missing, the first non-empty line is used.
 - `argument-hint` is optional. When set, the hint is displayed before the description in the autocomplete dropdown.
 
@@ -57,7 +57,7 @@ This renders in the autocomplete dropdown as:
 Type `/` followed by the template name in the editor. Autocomplete shows available templates with descriptions.
 
 ```
-/review                           # Expands review.md
+/staged-review                    # Expands staged-review.md
 /component Button                 # Expands with argument
 /component Button "click handler" # Multiple arguments
 ```

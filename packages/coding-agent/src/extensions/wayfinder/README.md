@@ -14,12 +14,12 @@ This is a code-backed evolution of the wayfinder *skill* idea. A skill is prose:
 | Research after a decision | fire-and-forget subagents (host-dependent) | automatic: once the run settles, the extension compacts the session (skipped while context is small) and sends a continuation turn that works the takeable research tickets — no user input needed |
 | Map completion | judgment call | refused while open tickets or fog remain |
 | Instructions | loaded wholesale | tool description always available; full doctrine loads only via `/wayfinder`; a few-line status block is injected only when a map is active |
-| Tracker | external issue tracker required | markdown under `<project>/.smolt/wayfinder/`, shared through the repo like code |
+| Tracker | external issue tracker required | markdown under `~/.smolt/projects/<project>/wayfinder/`, kept out of the repo |
 
 ## Storage
 
 ```
-<project>/.smolt/wayfinder/<map-slug>/
+~/.smolt/projects/<project>/wayfinder/<map-slug>/
   map.md              # frontmatter: title, status, fog, outOfScope; body: ## Destination, ## Notes
   tickets/<slug>.md   # frontmatter: type, status, blockedBy, claim, gist; body: ## Question, ## Resolution
 ```

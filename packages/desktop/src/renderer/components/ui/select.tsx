@@ -64,7 +64,7 @@ function SelectItem({ className, children, ...props }: React.ComponentProps<type
 			{...props}
 		>
 			<SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
-			<SelectPrimitive.ItemIndicator className="ml-auto flex text-salmon-text">
+			<SelectPrimitive.ItemIndicator className="ml-auto flex text-tint-text">
 				<Icon name="check" />
 			</SelectPrimitive.ItemIndicator>
 		</SelectPrimitive.Item>

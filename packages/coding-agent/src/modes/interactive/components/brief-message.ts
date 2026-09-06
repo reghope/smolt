@@ -4,7 +4,7 @@ import { keyText } from "./keybinding-hints.ts";
 
 /**
  * A brief an extension sent on the harness's behalf — the instructions behind
- * `/review`, `/wayfinder`, a battletest kickoff, the taste gate.
+ * `/review`, `/wayfinder`, a battletest kickoff.
  *
  * These are ordinary user messages to the model, but they are not the reader
  * talking, and rendering them in full put a wall of command instructions into

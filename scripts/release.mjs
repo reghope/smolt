@@ -152,15 +152,15 @@ function bumpOrSetVersion(target) {
 		}
 
 		console.log(`Setting explicit version (${target})...`);
-		run(`npm version ${target} --workspaces --no-git-tag-version --no-workspaces-update && node scripts/sync-versions.js && npm install --package-lock-only --ignore-scripts`);
+		run(`npm version ${target} --workspaces --no-git-tag-version --no-workspaces-update && node scripts/sync-versions.js && npm install --package-lock-only`);
 	}
 
 	// npm version can temporarily install the previous workspace versions before
 	// sync-versions updates inter-package ranges. Remove those stale lock entries,
 	// refresh the lockfile, then hydrate from the final dependency graph.
 	removeStaleWorkspaceLockEntries();
-	run("npm install --package-lock-only --ignore-scripts");
-	run("npm ci --ignore-scripts");
+	run("npm install --package-lock-only");
+	run("npm ci");
 	return getVersion();
 }
 

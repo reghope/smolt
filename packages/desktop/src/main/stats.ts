@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { projectDirName, sessionsDir } from "./sessions.ts";
 
 /**
@@ -16,8 +16,10 @@ import { projectDirName, sessionsDir } from "./sessions.ts";
 export interface LearnedSummary {
 	/** Number of § entries in the global MEMORY.md; 0 when the file is absent. */
 	memoryEntries: number;
-	/** The most recent memory entry, verbatim. */
+	/** The quoted entry, verbatim: newest one about this project, else newest. */
 	latestMemory: string | null;
+	/** Whether the quoted entry names the open project. */
+	latestIsProject: boolean;
 	/** Absolute path of MEMORY.md, for the reveal affordance. */
 	memoryPath: string;
 	/** Epoch ms of the last MEMORY.md write; null when absent. */
@@ -194,11 +196,12 @@ function streaks(days: string[]): { current: number; longest: number } {
 /** The learning extension's stores, read the same way stats reads sessions:
  * straight from the files the agent itself writes. Entries in MEMORY.md are
  * separated by lines carrying a lone `§`. */
-export function collectLearned(): LearnedSummary {
+export function collectLearned(project = ""): LearnedSummary {
 	const memoryPath = join(homedir(), ".smolt", "memories", "MEMORY.md");
 	const summary: LearnedSummary = {
 		memoryEntries: 0,
 		latestMemory: null,
+		latestIsProject: false,
 		memoryPath,
 		memoryUpdatedAt: null,
 		skills: [],
@@ -210,7 +213,16 @@ export function collectLearned(): LearnedSummary {
 			.map((entry) => entry.trim())
 			.filter((entry) => entry !== "");
 		summary.memoryEntries = entries.length;
-		summary.latestMemory = entries.at(-1) ?? null;
+		// The newest note is often about the machine or a tool quirk, which says
+		// nothing to someone opening this project. Prefer the newest note that
+		// names the folder they are in; fall back to the newest of all.
+		const needle = project.toLowerCase();
+		let mine: string | undefined;
+		for (let i = entries.length - 1; needle !== "" && mine === undefined && i >= 0; i--) {
+			if (entries[i]!.toLowerCase().includes(needle)) mine = entries[i];
+		}
+		summary.latestMemory = mine ?? entries.at(-1) ?? null;
+		summary.latestIsProject = mine !== undefined;
 		summary.memoryUpdatedAt = statSync(memoryPath).mtimeMs;
 	} catch {
 		// no memory yet
@@ -230,7 +242,7 @@ export function collectLearned(): LearnedSummary {
 
 export function collectStats(cwd: string, root: string = sessionsDir()): UsageStats {
 	const empty: UsageStats = {
-		learned: collectLearned(),
+		learned: collectLearned(basename(cwd)),
 		sessions: 0,
 		messages: 0,
 		tokens: 0,

@@ -82,7 +82,7 @@ jobs:
         run: node .github/smolt-review-comment.mjs processing
       - name: Install smolt
         if: steps.pr.outputs.skip != 'true'
-        run: npm install -g smolt
+        run: npm install -g @smolt/cli
       - name: Review the pull request
         if: steps.pr.outputs.skip != 'true'
         env:

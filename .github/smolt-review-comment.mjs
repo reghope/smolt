@@ -44,8 +44,19 @@ function footer() {
 }
 
 function changedFiles() {
-	const raw = gh(["pr", "diff", pr, "--repo", repo, "--name-only"]).trim();
-	return raw === "" ? [] : raw.split("\n");
+	try {
+		const raw = gh(["pr", "diff", pr, "--repo", repo, "--name-only"]).trim();
+		return raw === "" ? [] : raw.split("\n");
+	} catch {
+		// GitHub's PR diff API rejects diffs over 20,000 lines with a 406.
+		// The checkout has full history (fetch-depth: 0), so diff locally.
+		const base = `origin/${baseRef || defaultBranch}`;
+		const raw = execFileSync("git", ["diff", "--name-only", `${base}...HEAD`], {
+			encoding: "utf8",
+			maxBuffer: 32 * 1024 * 1024,
+		}).trim();
+		return raw === "" ? [] : raw.split("\n");
+	}
 }
 
 function commits() {

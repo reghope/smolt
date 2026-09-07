@@ -237,6 +237,18 @@ export function watchAll(repos: string[], hooks: Hooks): () => void {
 const MAX_FAILED_ATTEMPTS = 5;
 const SETTLED_MS = 60_000;
 
+/**
+ * How often a session that stood down re-tries the claim.
+ *
+ * Standing down for ever meant that when the session holding the claim died
+ * badly — killed, crashed, machine slept — nobody took the repo over. The
+ * claim file pointed at a dead process, its orphaned forwarder went on
+ * swallowing deliveries, and every later session reported itself as watching
+ * while receiving nothing. Checking back means the first live session picks
+ * the repo up within a minute of the owner going.
+ */
+const STANDBY_RETRY_MS = 60_000;
+
 function startWatching(repo: string, hooks: Hooks): () => void {
 	let stopped = false;
 	let child: ReturnType<typeof spawn> | undefined;
@@ -244,6 +256,8 @@ function startWatching(repo: string, hooks: Hooks): () => void {
 	let backoffMs = 2000;
 	let failures = 0;
 	let connectedAt = 0;
+	/** Whether the reader has already been told this session is on standby. */
+	let announcedStandby = false;
 
 	const reconnect = (why: string): void => {
 		if (stopped) return;
@@ -270,12 +284,21 @@ function startWatching(repo: string, hooks: Hooks): () => void {
 		// session took the repo over after a crash left a stale claim) must end
 		// the watcher instead of silently deleting the new owner's hook.
 		if (!claimWebhook(repo)) {
-			stopped = true;
-			hooks.notice(
-				`Another smolt session is already watching ${repo}; this one stands down. Stop the other session's watch or run /review setup again after it exits.`,
-				"info",
-			);
+			// Standby, not stopped: the claim is re-tried until the session that
+			// holds it exits, and this one takes over the moment it does.
+			if (!announcedStandby) {
+				announcedStandby = true;
+				hooks.notice(
+					`Another smolt session is already watching ${repo}; this one is on standby and takes over when that session exits.`,
+					"info",
+				);
+			}
+			retry = setTimeout(connect, STANDBY_RETRY_MS);
 			return;
+		}
+		if (announcedStandby) {
+			announcedStandby = false;
+			hooks.notice(`Watching ${repo}: the session that held it has gone.`, "info");
 		}
 		removeStaleForwarderHook(repo);
 		child = spawn("gh", ["webhook", "forward", `--events=${FORWARDED_EVENTS.join(",")}`, `--repo=${repo}`], {

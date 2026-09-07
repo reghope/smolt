@@ -511,6 +511,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					sessionId: session.sessionId,
 					sessionName: session.sessionName,
 					autoCompactionEnabled: session.autoCompactionEnabled,
+					showThroughput: session.settingsManager.getShowThroughput(),
 					messageCount: session.messages.length,
 					pendingMessageCount: session.pendingMessageCount,
 					activeThinkingEntry: session.extensionRunner
@@ -613,6 +614,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			case "set_auto_compaction": {
 				session.setAutoCompactionEnabled(command.enabled);
 				return success(id, "set_auto_compaction");
+			}
+
+			case "set_show_throughput": {
+				session.settingsManager.setShowThroughput(command.enabled);
+				return success(id, "set_show_throughput");
 			}
 
 			// =================================================================

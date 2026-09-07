@@ -14,6 +14,7 @@ import { poolExtension } from "./pool/index.ts";
 import researchExtension from "./research/index.ts";
 import reviewExtension from "./review/index.ts";
 import screenshotExtension from "./screenshot/index.ts";
+import sessionNameExtension from "./session-name/index.ts";
 import subagentsExtension from "./subagents/index.ts";
 import telegramExtension from "./telegram/index.ts";
 import toolsExtension from "./tools/index.ts";
@@ -58,6 +59,12 @@ export const builtInExtensions: InlineExtension[] = [
 		factory: screenshotExtension,
 		hidden: true,
 		description: "Lets the agent capture and look at your screen",
+	},
+	{
+		name: "session-name",
+		factory: sessionNameExtension,
+		hidden: true,
+		description: "Names each chat after what it turned out to be about, once the first turn settles",
 	},
 	{
 		name: "permissions",

@@ -439,6 +439,11 @@ export class RpcClient {
 		await this.send({ type: "set_auto_compaction", enabled });
 	}
 
+	/** Show or hide the model's live tokens-per-second rate. */
+	async setShowThroughput(enabled: boolean): Promise<void> {
+		await this.send({ type: "set_show_throughput", enabled });
+	}
+
 	/**
 	 * Set auto-retry enabled/disabled.
 	 */

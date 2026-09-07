@@ -37,6 +37,7 @@ const ALLOWED_METHODS = new Set([
 	"abortBash",
 	"compact",
 	"setAutoCompaction",
+	"setShowThroughput",
 	"setAutoRetry",
 	"login",
 	"abortRetry",

@@ -179,6 +179,7 @@ import {
 	theme,
 } from "./theme/theme.ts";
 import { InteractiveThemeController } from "./theme/theme-controller.ts";
+import { estimateTokens, ThroughputMeter } from "./throughput.ts";
 
 /** Interface for components that can be expanded/collapsed */
 interface Expandable {
@@ -480,6 +481,8 @@ export class InteractiveMode {
 	// Streaming message tracking
 	private streamingComponent: AssistantMessageComponent | undefined = undefined;
 	private streamingMessage: AssistantMessage | undefined = undefined;
+	/** Measures how fast the model is writing, for the footer's tokens-per-second. */
+	private readonly throughputMeter = new ThroughputMeter();
 
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
@@ -2043,6 +2046,25 @@ export class InteractiveMode {
 		process.exit(1);
 	}
 
+	/**
+	 * Read the writing rate off the response in flight, for the footer.
+	 *
+	 * Counted from what has streamed in, since most providers only report their
+	 * own output tokens once the request is done; that count wins as soon as it
+	 * arrives and exceeds the estimate.
+	 */
+	private sampleThroughput(message: AssistantMessage): void {
+		if (!this.settingsManager.getShowThroughput()) return;
+		let chars = 0;
+		for (const content of message.content) {
+			if (content.type === "text") chars += content.text.length;
+			else if (content.type === "thinking") chars += content.thinking.length;
+			else if (content.type === "toolCall") chars += JSON.stringify(content.arguments).length;
+		}
+		const tokens = Math.max(estimateTokens(chars), message.usage.output);
+		this.footer.setThroughput(this.throughputMeter.sample(Date.now(), tokens));
+	}
+
 	private renderCurrentSessionState(): void {
 		this.loadedResourcesContainer.clear();
 		this.chatContainer.clear();
@@ -3299,6 +3321,8 @@ export class InteractiveMode {
 					this.streamingMessage = event.message;
 					this.chatContainer.addChild(this.streamingComponent);
 					this.streamingComponent.updateContent(this.streamingMessage, true);
+					this.throughputMeter.reset();
+					this.footer.setThroughput(undefined);
 					this.ui.requestRender();
 				}
 				break;
@@ -3307,6 +3331,7 @@ export class InteractiveMode {
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
 					this.streamingComponent.updateContent(this.streamingMessage, true);
+					this.sampleThroughput(this.streamingMessage);
 
 					for (const content of this.streamingMessage.content) {
 						if (content.type === "toolCall") {
@@ -3340,6 +3365,7 @@ export class InteractiveMode {
 
 			case "message_end":
 				if (event.message.role === "user") break;
+				this.footer.setThroughput(undefined);
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
 					let errorMessage: string | undefined;
@@ -4633,6 +4659,7 @@ export class InteractiveMode {
 					treeFilterMode: this.settingsManager.getTreeFilterMode(),
 					showHardwareCursor: this.settingsManager.getShowHardwareCursor(),
 					showCacheMissNotices: this.settingsManager.getShowCacheMissNotices(),
+					showThroughput: this.settingsManager.getShowThroughput(),
 					showHiddenChats: this.settingsManager.getShowHiddenChats(),
 					reviewAutoFix: loadReviewSettings(this.sessionManager.getCwd()).autoFix === true,
 					reviewWatch: loadReviewSettings(this.sessionManager.getCwd()).watch === true,
@@ -4734,6 +4761,10 @@ export class InteractiveMode {
 					onShowCacheMissNoticesChange: (shown) => {
 						this.settingsManager.setShowCacheMissNotices(shown);
 						this.rebuildChatFromMessages();
+					},
+					onShowThroughputChange: (shown) => {
+						this.settingsManager.setShowThroughput(shown);
+						if (!shown) this.footer.setThroughput(undefined);
 					},
 					onShowHiddenChatsChange: (shown) => {
 						this.settingsManager.setShowHiddenChats(shown);

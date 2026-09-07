@@ -821,7 +821,7 @@ function WorkingLine({ message, running }: { message: ChatMessage | undefined; r
 		meter.current.reset();
 		setRate(undefined);
 		const timer = setInterval(() => {
-			setRate(meter.current.sample(Date.now(), turnOutputTokens(app.chat)));
+			if (app.showThroughput) setRate(meter.current.sample(Date.now(), turnOutputTokens(app.chat)));
 			setTick((n) => n + 1);
 		}, 1000);
 		return () => clearInterval(timer);
@@ -835,13 +835,12 @@ function WorkingLine({ message, running }: { message: ChatMessage | undefined; r
 	// answer is the answer, and its cost is on the home screen either way.
 	if (!running) return null;
 	const seconds = app.runStartedAt > 0 ? Math.floor((Date.now() - app.runStartedAt) / 1000) : 0;
-	// The same figure the context ring shows: the agent's own context
-	// accounting, or the streaming request's fresher context. Not input +
-	// output, which sums the response back on top and reads ahead of the ring.
-	const tokens = Math.max(
-		app.contextUsage?.tokens ?? 0,
-		app.chat.streaming && app.chat.request ? app.chat.request.context : 0,
-	);
+	// What THIS turn has spent, across every request it has made, not the chat
+	// to date: a working line reading "133.1k tokens" was the whole context
+	// window restated, the same number the ring already shows, and said nothing
+	// about the answer being written.
+	const turn = app.chat.usage;
+	const tokens = turn ? turn.input + turn.output : 0;
 	// Blocked on an approval is not "responding": a bash request once sat
 	// unanswered for six minutes while this line claimed the model was busy.
 	// Say who the turn is actually waiting on, and for how long.
@@ -855,7 +854,7 @@ function WorkingLine({ message, running }: { message: ChatMessage | undefined; r
 	// Nothing to say while the model is not writing — waiting on a tool, or on
 	// its first token — a "0 tps" there would read as a stall.
 	const tokenPart = tokens > 0 ? formatTokens(tokens) : "";
-	const ratePart = rate !== undefined && rate > 0 ? `(${formatRate(rate)})` : "";
+	const ratePart = app.showThroughput && rate !== undefined && rate > 0 ? `(${formatRate(rate)})` : "";
 	const spend = [tokenPart, ratePart].filter((part) => part !== "").join(" ");
 	const parts = [formatElapsed(seconds), ...(spend !== "" ? [spend] : []), activity];
 	return (

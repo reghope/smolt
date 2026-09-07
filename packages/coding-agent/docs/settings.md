@@ -33,6 +33,7 @@ Use `/trust` in interactive mode to save a project trust decision for future ses
 | `modelThinkingLevels` | object | - | Per-model startup thinking levels keyed by `"provider/modelId"`; configure from `/settings` → Default thinking level per model or edit manually |
 | `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in output |
 | `showCacheMissNotices` | boolean | `false` | Show transcript notices for significant prompt-cache misses and compaction or branch-summary usage |
+| `showThroughput` | boolean | `false` | Show how fast the model is writing, in tokens per second, while a turn runs (footer in the terminal, working line in the desktop app) |
 | `showHiddenChats` | boolean | `false` | List hidden chats in the session picker: sessions an extension ran on your behalf and kept out of the way, such as the one `/review` auto-fix uses. They are always kept; this decides whether they are shown |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level. Anthropic, Google, and Bedrock use these natively. OpenAI-compatible models use them when `compat.thinkingTokenBudgetField` (or `supportsThinkingTokenBudget`) is set. |
 

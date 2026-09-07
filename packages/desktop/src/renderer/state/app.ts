@@ -235,6 +235,8 @@ interface AppState {
 	sidebarShowAll: boolean;
 	/** Chat markers render as dot bullets instead of asterisks. */
 	sidebarDots: boolean;
+	/** The working line shows the model's live tokens-per-second rate. */
+	showThroughput: boolean;
 	/** Spelling/dialect for user-facing labels: "us" (default) or "uk". */
 	language: "us" | "uk";
 	sessionRows: SessionRow[];
@@ -400,6 +402,7 @@ export const app: AppState = {
 	defaultThinking: storedPreference("smolt.defaultEffort", AUTO_THINKING_ENTRY),
 	sidebarShowAll: storedPreference("smolt.sidebarShowAll", "0") === "1",
 	sidebarDots: storedPreference("smolt.sidebarDots", "0") === "1",
+	showThroughput: false,
 	language: storedPreference("smolt.language", "us") === "uk" ? "uk" : "us",
 	enterSendsQueued: storedPreference("smolt.enterSendsQueued", "0") === "1",
 	sessionRows: [],
@@ -1136,6 +1139,7 @@ export async function refreshState(options: { owned?: boolean } = {}): Promise<v
 			app.sessionName = String(rpcState.sessionName ?? "");
 		}
 		app.autoCompaction = rpcState.autoCompactionEnabled !== false;
+		app.showThroughput = rpcState.showThroughput === true;
 		app.deliverAllQueued = rpcState.steeringMode === "all";
 		// The view may have just landed on an agent mid-turn; mirror its truth.
 		app.chat.streaming = rpcState.isStreaming === true;
@@ -1717,17 +1721,9 @@ async function adoptNewChat(text: string): Promise<void> {
 	// turn, and the chat appears to be missing from the sidebar for minutes.
 	if (app.currentSessionPath === "") await waitForSessionFile();
 	if (app.currentSessionPath === "") return;
-	// Naming and listing are separate jobs. A message with no words to take a
-	// title from (an image on its own) still gets its row; it just keeps the
-	// lister's own fallback name instead of a stored one.
-	const title = titleFrom(text);
-	if (title !== "") {
-		// Name it for real rather than leaning on the lister's fallback, which
-		// only ever shows the opening words: a stored name survives, and a chat
-		// opened with boilerplate (a skill's preamble) still reads as itself.
-		void call("setSessionName", title);
-		app.sessionName = title;
-	}
+	// The chat is not named here. Naming it after the opening words listed
+	// chats as "hello there"; the agent names it once the first turn shows what
+	// it is about, and a stored name is what the row then reads.
 	await refreshSessionRows();
 	if (app.sessionRows.some((row) => row.path === app.currentSessionPath)) return;
 	app.sessionRows = [
@@ -1735,7 +1731,9 @@ async function adoptNewChat(text: string): Promise<void> {
 			path: app.currentSessionPath,
 			id: app.currentSessionPath,
 			cwd: app.appInfo.cwd,
-			title: title === "" ? "New chat" : title,
+			// Same words the lister gives an unnamed chat, so the provisional row
+			// does not change its name when the stored one takes its place.
+			title: "New session",
 			preview: text.trim().slice(0, 120),
 			lastActive: Date.now(),
 			messageCount: 1,
@@ -1763,27 +1761,6 @@ async function waitForSessionFile(): Promise<void> {
 		}
 		await new Promise((resolve) => setTimeout(resolve, 150));
 	}
-}
-
-/**
- * A chat's name, from the message that started it.
- *
- * Kept to the first sentence and a whole word, so the sidebar reads as a list
- * of subjects rather than of severed openings.
- */
-function titleFrom(text: string): string {
-	const firstLine =
-		text
-			.trim()
-			.split("\n")
-			.find((line) => line.trim() !== "") ?? "";
-	// A slash command is how the chat was invoked, not what it is about.
-	const body = firstLine.replace(/^\/\S+\s*/, "").trim() || firstLine.trim();
-	const sentence = (body.split(/(?<=[.!?])\s/)[0] ?? body).replace(/\s+/g, " ").trim();
-	if (sentence.length <= 48) return sentence;
-	const cut = sentence.slice(0, 48);
-	const lastSpace = cut.lastIndexOf(" ");
-	return `${(lastSpace > 24 ? cut.slice(0, lastSpace) : cut).replace(/[,;:.]$/, "")}…`;
 }
 
 /** What this chat has waiting — never another chat's queue. */
@@ -3146,6 +3123,13 @@ export function boot(): void {
 		// agent writes its session file as the turn opens, so this is the moment
 		// the sidebar can show it rather than waiting for the turn to finish.
 		if (raw.type === "agent_start" && app.chat.messages.length === 0) void refreshSessionRows();
+		// The chat has just been named, by the agent working out what it is about
+		// or by a rename elsewhere. The sidebar row still reads "New session"
+		// until it is relisted.
+		if (raw.type === "session_info_changed") {
+			app.sessionName = typeof raw.name === "string" ? raw.name : "";
+			void refreshSessionRows();
+		}
 		// A finished write moves the working tree now, not when the turn ends.
 		if (wroteAFile(event)) refreshDiffSoon();
 		// Each finished request and each tool result changes what the next

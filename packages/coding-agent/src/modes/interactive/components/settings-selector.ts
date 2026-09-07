@@ -69,6 +69,7 @@ export interface SettingsConfig {
 	hideThinkingBlock: boolean;
 	mermaidRenderingMode: MermaidRenderingMode;
 	showCacheMissNotices: boolean;
+	showThroughput: boolean;
 	showHiddenChats: boolean;
 	reviewAutoFix: boolean;
 	reviewWatch: boolean;
@@ -109,6 +110,7 @@ export interface SettingsCallbacks {
 	onHideThinkingBlockChange: (hidden: boolean) => void;
 	onMermaidRenderingModeChange: (mode: MermaidRenderingMode) => void;
 	onShowCacheMissNoticesChange: (shown: boolean) => void;
+	onShowThroughputChange: (shown: boolean) => void;
 	onShowHiddenChatsChange: (shown: boolean) => void;
 	onReviewAutoFixChange: (enabled: boolean) => void;
 	onReviewWatchChange: (enabled: boolean) => void;
@@ -520,6 +522,13 @@ export class SettingsSelectorComponent extends Container {
 				values: ["true", "false"],
 			},
 			{
+				id: "show-throughput",
+				label: "Show tokens per second",
+				description: "Show how fast the model is writing while a turn runs",
+				currentValue: config.showThroughput ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
 				id: "show-hidden-chats",
 				label: "Show hidden chats",
 				description: "List chats an extension ran for you and kept out of the way, such as review auto-fix",
@@ -896,6 +905,9 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "cache-miss-notices":
 						callbacks.onShowCacheMissNoticesChange(newValue === "true");
+						break;
+					case "show-throughput":
+						callbacks.onShowThroughputChange(newValue === "true");
 						break;
 					case "show-hidden-chats":
 						callbacks.onShowHiddenChatsChange(newValue === "true");

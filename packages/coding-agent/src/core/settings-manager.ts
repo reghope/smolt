@@ -123,6 +123,7 @@ export interface Settings {
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
 	showCacheMissNotices?: boolean; // default: false - show prompt-cache miss and compaction cost notices
+	showThroughput?: boolean; // default: false - show the model's live tokens-per-second rate while it writes
 	showHiddenChats?: boolean; // default: false - list sessions an extension kept out of the way (e.g. review auto-fix)
 	externalEditor?: string; // Command for Ctrl+G external editor; takes precedence over VISUAL/EDITOR
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows); supports leading ~ expansion
@@ -943,6 +944,11 @@ export class SettingsManager {
 		return this.settings.showCacheMissNotices ?? false;
 	}
 
+	/** Whether surfaces show how fast the model is writing, in tokens per second. */
+	getShowThroughput(): boolean {
+		return this.settings.showThroughput ?? false;
+	}
+
 	/**
 	 * Whether session lists include hidden chats: sessions an extension started
 	 * on the reader's behalf and kept out of the way, such as the one that fixes
@@ -974,6 +980,12 @@ export class SettingsManager {
 	setShowCacheMissNotices(show: boolean): void {
 		this.globalSettings.showCacheMissNotices = show;
 		this.markModified("showCacheMissNotices");
+		this.save();
+	}
+
+	setShowThroughput(show: boolean): void {
+		this.globalSettings.showThroughput = show;
+		this.markModified("showThroughput");
 		this.save();
 	}
 

@@ -423,9 +423,13 @@ const RAIL_MIN_WIDTH = 280;
 
 /**
  * The right rail: Changes and the side chat stacked, resizable by its left
- * border. Open it is a rounded card inset from the window edges; a drag-out
- * from the closed edge paints the same card as soon as it has width, instead
- * of a slab that snaps to a card on release.
+ * border while it is open. Open it is a rounded card inset from the window
+ * edges.
+ *
+ * Closed, the window's right edge is just an edge. It used to be a drag
+ * handle that pulled the rail out, which meant any drag that started near
+ * the right of the window opened a pane nobody asked for. The Changes button
+ * is how the pane opens.
  */
 export function RightRail() {
 	const state = useApp();
@@ -445,30 +449,11 @@ export function RightRail() {
 		return stored >= RAIL_MIN_WIDTH ? stored : null;
 	});
 
-	// Closed is width zero, not unmounted: the drag edge stays at the window's
-	// side, so hovering there still reveals the grip and a drag reopens it.
+	// Closed is width zero rather than unmounted, so the open pane keeps its
+	// scroll position and its loaded diff between openings.
 	const hidden = !state.diffOpen && !state.sideOpen;
-	// Closed is width zero, not unmounted, so a drag from the edge has
-	// something to grow. While that drag paints width the rail is already
-	// the inset card — keying the card on open/closed alone made a drag-out
-	// paint a full-height flush slab that snapped to a card on release.
-	const painting = !hidden || (live ?? 0) > 0;
-
-	// Changes and the side chat are separate panes that share this column, so
-	// a drag on the closed edge has to know which one is wanted: the one that
-	// was showing when the rail last closed, the same way the sidebar comes
-	// back as it was. Changes is the default before either has been opened.
-	const lastPane = useRef<"diff" | "side">(storedPreference("smolt.railPane", "diff") === "side" ? "side" : "diff");
-	if (state.sideOpen && !state.diffOpen) lastPane.current = "side";
-	else if (state.diffOpen && !state.sideOpen) lastPane.current = "diff";
-	const rememberPane = (): void => storePreference("smolt.railPane", lastPane.current);
-
-	// While a drag paints the closed rail open, the pane it will reopen on is
-	// already on stage: otherwise the card grows in empty and its content
-	// pops in only on release.
-	const previewing = hidden && (live ?? 0) > 0;
-	const showDiff = state.diffOpen || (previewing && lastPane.current === "diff");
-	const showSide = state.sideOpen || (previewing && lastPane.current === "side");
+	const showDiff = state.diffOpen;
+	const showSide = state.sideOpen;
 
 	// Becoming visible is the cue to re-read: the pane holds whatever the last
 	// open left behind, so opening (or dragging open) freshens it — throttled
@@ -486,45 +471,40 @@ export function RightRail() {
 			// bare edge so the drag grip stays at the window side.
 			className={cn(
 				"relative max-w-[65vw] flex-none bg-background-deep [background:var(--background-deep)]",
-				painting ? "mt-12 mr-2 mb-2 ml-2 rounded-xl border" : "border-l",
+				hidden ? "border-l" : "mt-12 mr-2 mb-2 ml-2 rounded-xl border",
 			)}
 			style={{ width: live ?? (hidden ? 0 : (width ?? "clamp(300px, 34vw, 420px)")) }}
 		>
-			<ResizeHandle
-				side="left"
-				flush={!painting}
-				label={hidden ? "Drag to open the side panes" : "Resize the side panes"}
-				minWidth={RAIL_MIN_WIDTH}
-				measure={(clientX) =>
-					Math.min(Math.max(window.innerWidth - clientX, 0), Math.round(window.innerWidth * 0.6))
-				}
-				onWidth={(next) => {
-					setLive(next);
-					if (contentRef.current) contentRef.current.style.opacity = next === 0 ? "0" : "1";
-				}}
-				onRelease={(next) => {
-					setLive(null);
-					if (contentRef.current) contentRef.current.style.opacity = "";
-					if (next <= PANE_COLLAPSE_ZONE) {
-						// A deliberate close; the stored width and the pane that was
-						// showing both survive for the next open.
-						rememberPane();
-						app.diffOpen = false;
-						app.sideOpen = false;
+			{/* Only while it is open: the closed edge is not a way in. */}
+			{!hidden && (
+				<ResizeHandle
+					side="left"
+					label="Resize the side panes"
+					minWidth={RAIL_MIN_WIDTH}
+					measure={(clientX) =>
+						Math.min(Math.max(window.innerWidth - clientX, 0), Math.round(window.innerWidth * 0.6))
+					}
+					onWidth={(next) => {
+						setLive(next);
+						if (contentRef.current) contentRef.current.style.opacity = next === 0 ? "0" : "1";
+					}}
+					onRelease={(next) => {
+						setLive(null);
+						if (contentRef.current) contentRef.current.style.opacity = "";
+						if (next <= PANE_COLLAPSE_ZONE) {
+							// Dragged shut; the stored width survives for the next open.
+							app.diffOpen = false;
+							app.sideOpen = false;
+							bump();
+							return;
+						}
+						const settled = Math.max(next, RAIL_MIN_WIDTH);
+						setWidth(settled);
+						storePreference("smolt.railWidth", String(Math.round(settled)));
 						bump();
-						return;
-					}
-					const settled = Math.max(next, RAIL_MIN_WIDTH);
-					setWidth(settled);
-					storePreference("smolt.railWidth", String(Math.round(settled)));
-					if (hidden) {
-						// Dragged open from the closed edge: back to the pane it closed on.
-						if (lastPane.current === "side") app.sideOpen = true;
-						else app.diffOpen = true;
-					}
-					bump();
-				}}
-			/>
+					}}
+				/>
+			)}
 			{/* The scroll (and the closed state's clipping and inertness) lives
 			    one level in, so the handle on the rail's edge stays live. */}
 			<div
@@ -535,9 +515,8 @@ export function RightRail() {
 					// way the sidebar's content clears it.
 					"flex h-full flex-col overflow-hidden",
 					// At width zero, painted content would peek past the closed edge,
-					// so the closed rail does not paint (matching the sidebar). A
-					// drag-out keeps painting, so the pane content shows as it grows.
-					!painting && "opacity-0",
+					// so the closed rail does not paint (matching the sidebar).
+					hidden && "opacity-0",
 				)}
 			>
 				{showDiff && <DiffPane />}

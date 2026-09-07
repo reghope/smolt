@@ -107,20 +107,13 @@ function listSessionsIn(root: string, limit: number): SessionSummary[] {
 }
 
 /**
- * A subject line from the first message, for sessions nothing named.
+ * What an unnamed chat is called: nothing about it, rather than a guess.
  *
- * The first sentence, kept to whole words: a cut-off opening reads like a
- * leaked prompt rather than a chat's title, and gives nothing back when the
- * list is scanned later.
+ * The opening words used to stand in as a title, which listed chats as "hi"
+ * and as half-finished prompts. A chat is named once the session-name
+ * extension works out what it is about; until then it is a new session.
  */
-function titleFromPreview(preview: string): string {
-	const sentence = (preview.split(/(?<=[.!?])\s/)[0] ?? preview).replace(/\s+/g, " ").trim();
-	if (sentence === "") return "(untitled)";
-	if (sentence.length <= 48) return sentence;
-	const cut = sentence.slice(0, 48);
-	const lastSpace = cut.lastIndexOf(" ");
-	return `${(lastSpace > 24 ? cut.slice(0, lastSpace) : cut).replace(/[,;:.]$/, "")}…`;
-}
+const UNNAMED_TITLE = "New session";
 
 /**
  * Summaries by path, keyed off mtime. The sidebar relists sessions on every
@@ -181,7 +174,7 @@ function summarizeUncached(path: string, mtime: number): SessionSummary | undefi
 		path,
 		id,
 		cwd,
-		title: title || titleFromPreview(preview),
+		title: title || UNNAMED_TITLE,
 		preview,
 		lastActive: mtime,
 		messageCount,

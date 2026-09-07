@@ -1046,6 +1046,20 @@ export function SettingsDialog() {
 										/>
 									</Row>
 								)}
+								{matches(query, "throughput tokens per second tps speed rate") && (
+									<Row
+										label="Show tokens per second"
+										hint="The working line reports how fast the model is writing, beside its token count"
+									>
+										<Switch
+											checked={state.showThroughput}
+											onCheckedChange={async (next) => {
+												app.showThroughput = next;
+												await call("setShowThroughput", next);
+											}}
+										/>
+									</Row>
+								)}
 								{matches(query, "sidebar chats history day collapse") && (
 									<Row label="Show every chat per day" hint="Sidebar days list all their chats instead of the latest 5">
 										<Switch checked={state.sidebarShowAll} onCheckedChange={(next) => setSidebarShowAll(next)} />

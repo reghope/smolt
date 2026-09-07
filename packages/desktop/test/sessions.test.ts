@@ -85,7 +85,7 @@ describe("listSessions", () => {
 		expect(listSessions(root, 50).map((row) => row.title)).toEqual(["mine"]);
 	});
 
-	test("falls back to the first user message when a session is unnamed", () => {
+	test("titles an unnamed session and keeps the first user message as its preview", () => {
 		const dir = join(root, projectDirName(project));
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
@@ -95,7 +95,9 @@ describe("listSessions", () => {
 				message: { role: "user", content: "explain the retry logic" },
 			})}\n`,
 		);
-		expect(listSessions(root, 50)[0]?.title).toBe("explain the retry logic");
+		const row = listSessions(root, 50)[0];
+		expect(row?.title).toBe("New session");
+		expect(row?.preview).toBe("explain the retry logic");
 	});
 
 	test("honours the limit", () => {

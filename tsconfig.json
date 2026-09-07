@@ -41,13 +41,6 @@
 		"packages/coding-agent/examples/extensions/gondolin/**",
 		"packages/desktop/src/renderer/**",
 		"packages/desktop/src/web-shim.ts",
-		"packages/desktop/test/session-selection.test.ts",
-		"packages/desktop/test/context-breakdown.test.ts",
-		"packages/desktop/test/composer-drafts.test.ts",
-		"packages/desktop/test/new-chat-listing.test.ts",
-		"packages/desktop/test/send-echo.test.ts",
-		"packages/desktop/test/session-delete-view.test.ts",
-		"packages/desktop/test/session-switch-race.test.ts",
-		"packages/desktop/test/web-shim-parity.test.ts"
+		"packages/desktop/test/session-selection.test.ts"
 	]
 }

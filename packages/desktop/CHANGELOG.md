@@ -7,6 +7,7 @@
 
 ### Fixed
 - The branch chip on a new chat renders instantly from a cached branch list instead of popping in after the IPC round-trip.
+- The browser web server now gates its privileged routes (/invoke, /send, /events) on a per-run token embedded in the served page, and rejects requests whose Host header is not this machine's own localhost, Tailscale or LAN address. Before, any web page the user visited could call IPC handlers cross-origin, and DNS rebinding could read stored API keys.
 
 ### Changed
 

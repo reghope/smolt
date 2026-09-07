@@ -1,4 +1,7 @@
 import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { watchClaimFile } from "./config.ts";
 
 /** A pull request event worth reviewing. */
 export interface PullRequestEvent {
@@ -133,6 +136,61 @@ interface Hooks {
 	notice: (message: string, kind: "info" | "warning") => void;
 }
 
+interface WatchClaim {
+	pid: number;
+	at: number;
+}
+
+function readClaim(file: string): WatchClaim | undefined {
+	try {
+		const parsed = JSON.parse(readFileSync(file, "utf-8")) as Partial<WatchClaim>;
+		if (typeof parsed.pid !== "number") return undefined;
+		return { pid: parsed.pid, at: parsed.at ?? 0 };
+	} catch {
+		return undefined;
+	}
+}
+
+function processAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Take (or re-take) the claim on a repo's webhook.
+ *
+ * GitHub allows one forwarder hook per repository, and installing one deletes
+ * any other, so two sessions watching the same repo would take turns silently
+ * destroying each other's connection — the loser looks healthy and receives
+ * nothing. The claim file gives the webhook an owner: a watcher without it
+ * stands down and says so, and a claim left by a dead process is free to take.
+ */
+function claimWebhook(repo: string): boolean {
+	const file = watchClaimFile(repo);
+	const claim = readClaim(file);
+	if (claim !== undefined && claim.pid !== process.pid && processAlive(claim.pid)) return false;
+	mkdirSync(dirname(file), { recursive: true });
+	writeFileSync(file, `${JSON.stringify({ pid: process.pid, at: Date.now() } satisfies WatchClaim)}\n`, "utf-8");
+	return true;
+}
+
+/** Release our own claim, leaving everyone else's alone. */
+function releaseWebhook(repo: string): void {
+	const file = watchClaimFile(repo);
+	if (!existsSync(file)) return;
+	const claim = readClaim(file);
+	if (claim !== undefined && claim.pid !== process.pid) return;
+	try {
+		unlinkSync(file);
+	} catch {
+		// already gone
+	}
+}
+
 /**
  * Watch a repo for pull requests, and review them as they arrive.
  *
@@ -208,6 +266,17 @@ function startWatching(repo: string, hooks: Hooks): () => void {
 
 	const connect = (): void => {
 		if (stopped) return;
+		// Every connect re-takes the claim: this process losing it (another
+		// session took the repo over after a crash left a stale claim) must end
+		// the watcher instead of silently deleting the new owner's hook.
+		if (!claimWebhook(repo)) {
+			stopped = true;
+			hooks.notice(
+				`Another smolt session is already watching ${repo}; this one stands down. Stop the other session's watch or run /review setup again after it exits.`,
+				"info",
+			);
+			return;
+		}
 		removeStaleForwarderHook(repo);
 		child = spawn("gh", ["webhook", "forward", `--events=${FORWARDED_EVENTS.join(",")}`, `--repo=${repo}`], {
 			// Not detached: the forwarder must die with smolt. An orphan keeps the
@@ -284,5 +353,6 @@ function startWatching(repo: string, hooks: Hooks): () => void {
 		stopped = true;
 		if (retry) clearTimeout(retry);
 		child?.kill();
+		releaseWebhook(repo);
 	};
 }

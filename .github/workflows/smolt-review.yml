@@ -41,6 +41,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      # The PR under review must never control its own reviewer: the prompt
+      # and the helper script are taken from the default branch, not from
+      # this checkout (which is the PR's merge ref).
+      - name: Take the review tooling from the default branch
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+        run: |
+          default_branch=$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)
+          git show "origin/$default_branch:.github/smolt-review-prompt.md" > .github/smolt-review-prompt.md
+          git show "origin/$default_branch:.github/smolt-review-comment.mjs" > .github/smolt-review-comment.mjs
       - name: Resolve the pull request
         id: pr
         env:

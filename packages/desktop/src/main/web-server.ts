@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
@@ -19,8 +20,13 @@ import { type BrowserWindow, ipcMain } from "electron";
  *
  * Reach: the server binds to localhost and, when one exists, the machine's
  * Tailscale address, so the tailnet can open it and the LAN cannot. The
- * `lan` setting binds every interface instead. There is no login: whoever
- * can reach the port drives the agent, with the shell it has.
+ * `lan` setting binds every interface instead. There is no login, but two
+ * guards keep a stray web page from driving the app: every privileged call
+ * (/invoke, /send, /events) must echo a per-run token that only the served
+ * index.html is given, and the Host header must be this machine's own
+ * localhost, Tailscale or LAN address — a cross-origin POST cannot read the
+ * token, and DNS rebinding cannot fake the Host. Whoever can open the page
+ * still drives the agent, with the shell it has.
  *
  * HTTPS rides beside HTTP on the next port up, with a self-signed
  * certificate made by openssl on first use; the microphone exists only in
@@ -275,12 +281,13 @@ document.addEventListener("click", (e) => {
 })();
 `;
 
-/** The desktop's index.html with the browser shim, the mobile layer, and a viewport. */
-function indexHtml(dist: string): string {
+/** The desktop's index.html with the browser shim, the mobile layer, a
+ * viewport, and this run's access token. */
+function indexHtml(dist: string, token: string): string {
 	let html = readFileSync(join(dist, "index.html"), "utf8");
 	html = html.replace(
 		"<title>",
-		'<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />\n\t<title>',
+		`<script>window.__smoltWebToken=${JSON.stringify(token)}</script>\n\t<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />\n\t<title>`,
 	);
 	html = html.replace(
 		'<link rel="stylesheet" href="styles.css" />',
@@ -322,6 +329,8 @@ export class WebServer {
 	private httpsOn = false;
 	private error: string | undefined;
 	private keepAlive: NodeJS.Timeout | undefined;
+	private token = "";
+	private allowedHosts = new Set<string>();
 
 	constructor(options: WebServerOptions) {
 		this.options = options;
@@ -405,6 +414,15 @@ export class WebServer {
 		this.urls = [...new Set(hosts)].map((host) =>
 			cert ? `https://${host}:${settings.port + 1}` : `http://${host}:${settings.port}`,
 		);
+		this.token = randomBytes(32).toString("base64url");
+		this.allowedHosts = new Set([
+			"localhost",
+			"127.0.0.1",
+			"[::1]",
+			"::1",
+			...(settings.lan ? lanAddresses() : []),
+			...(tailscale ? [tailscale] : []),
+		]);
 		// A comment line every so often keeps idle SSE connections open
 		// through proxies and mobile radios that drop silent sockets.
 		this.keepAlive = setInterval(() => {
@@ -423,11 +441,49 @@ export class WebServer {
 		await Promise.all(closing);
 	}
 
+	/** The machine's own names the Host header may carry: hostname only, no port. */
+	private hostAllowed(req: http.IncomingMessage): boolean {
+		const raw = req.headers.host;
+		if (raw === undefined || raw === "") return false;
+		let hostname = raw.toLowerCase();
+		if (hostname.startsWith("[")) {
+			const end = hostname.indexOf("]");
+			if (end === -1) return false;
+			hostname = hostname.slice(0, end + 1);
+		} else {
+			const colon = hostname.lastIndexOf(":");
+			if (colon !== -1) hostname = hostname.slice(0, colon);
+		}
+		return this.allowedHosts.has(hostname);
+	}
+
+	/** Only the served page knows the run's token; header for calls, query for the SSE stream. */
+	private tokenOk(req: http.IncomingMessage, url: string): boolean {
+		const given = String(
+			req.headers["x-smolt-web-token"] ?? new URL(`http://x/${url}`).searchParams.get("token") ?? "",
+		);
+		if (given.length !== this.token.length) return false;
+		return timingSafeEqual(Buffer.from(given), Buffer.from(this.token));
+	}
+
 	private handler(port: number): http.RequestListener {
 		const { dist } = this.options;
 		return async (req, res) => {
 			const url = (req.url ?? "/").split("?")[0] ?? "/";
 			try {
+				if (!this.hostAllowed(req)) {
+					res.writeHead(403);
+					res.end();
+					return;
+				}
+				const privileged =
+					(req.method === "POST" && (url === "/invoke" || url === "/send")) ||
+					(req.method === "GET" && url === "/events");
+				if (privileged && (this.token === "" || !this.tokenOk(req, req.url ?? ""))) {
+					res.writeHead(403);
+					res.end();
+					return;
+				}
 				const navigation =
 					req.method === "GET" &&
 					(url === "/" || url === "/index.html") &&
@@ -444,7 +500,7 @@ export class WebServer {
 				}
 				if (req.method === "GET" && (url === "/" || url === "/index.html")) {
 					res.writeHead(200, { "content-type": MIME[".html"] });
-					res.end(indexHtml(dist));
+					res.end(indexHtml(dist, this.token));
 				} else if (req.method === "GET" && url === "/mobile.css") {
 					res.writeHead(200, { "content-type": MIME[".css"] });
 					res.end(MOBILE_CSS);

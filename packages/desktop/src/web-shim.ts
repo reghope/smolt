@@ -3,14 +3,21 @@
  * POST /invoke and SSE /events instead of Electron IPC. Built to
  * dist/webshim.js and injected ahead of renderer.js by the web server.
  *
- * Every method in preload.ts has a twin here — a test holds the two key
- * sets equal — but a few cannot mean the same thing without a window:
- * the titlebar, the folder picker, the context menu and the mic prompt are
- * answered locally, and the clipboard goes through the browser's own.
+ * Every method in preload.ts has a twin here, but a few cannot mean the
+ * same thing without a window: the titlebar, the folder picker, the
+ * context menu and the mic prompt are answered locally, and the clipboard
+ * goes through the browser's own.
  */
 
 type Listener = (...args: unknown[]) => void;
 const listeners: Record<string, Listener[]> = {};
+
+// The web server stamps the served index.html with a per-run token; every
+// privileged call echoes it, so a page that did not come from this server
+// cannot drive the app.
+const token = String(
+	(typeof window !== "undefined" ? (window as unknown as { __smoltWebToken?: string }).__smoltWebToken : "") ?? "",
+);
 
 function sub(channel: string): (cb: Listener) => void {
 	return (cb) => {
@@ -22,7 +29,7 @@ function sub(channel: string): (cb: Listener) => void {
 
 function connect(): void {
 	if (typeof EventSource === "undefined") return;
-	const source = new EventSource("events");
+	const source = new EventSource(`events?token=${encodeURIComponent(token)}`);
 	source.onmessage = (event) => {
 		const { channel, args } = JSON.parse(event.data) as { channel: string; args: unknown[] };
 		for (const cb of listeners[channel] ?? []) cb(...args);
@@ -37,7 +44,7 @@ connect();
 async function invoke(channel: string, ...args: unknown[]): Promise<unknown> {
 	const response = await fetch("invoke", {
 		method: "POST",
-		headers: { "content-type": "application/json" },
+		headers: { "content-type": "application/json", "x-smolt-web-token": token },
 		body: JSON.stringify({ channel, args }),
 	});
 	const data = (await response.json()) as { value?: unknown; error?: string };
@@ -48,7 +55,7 @@ async function invoke(channel: string, ...args: unknown[]): Promise<unknown> {
 function send(channel: string, ...args: unknown[]): void {
 	void fetch("send", {
 		method: "POST",
-		headers: { "content-type": "application/json" },
+		headers: { "content-type": "application/json", "x-smolt-web-token": token },
 		body: JSON.stringify({ channel, args }),
 	});
 }

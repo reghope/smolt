@@ -45,6 +45,8 @@
 
 ### Fixed
 
+- Two smolt sessions watching the same repository no longer take turns silently deleting each other's webhook: the watcher now takes a claim file (`~/.smolt/agent/review-watch/`), a second session stands down and says so, and a claim left by a crashed session is free to take.
+
 - Capped inline images at 3.5MB of base64 instead of 4.5MB: providers that limit the entire request body to 4.5MiB rejected captures sized to the old cap, since the image alone filled the whole budget before the rest of the conversation was added. Also gave the screenshot tool a `window` parameter ('active' or a title substring) to capture a single window instead of the full desktop.
 
 - Fixed the goal tool reporting 0 tokens over 0s for a goal the model completed mid-run: charging happened once at the run boundary, but by then the model had already marked the goal `complete` with its goal tool, and the accounting gate refused to charge a completed goal — so the whole run's spend was thrown away and the completion report said the goal cost nothing. Tokens are now charged as each turn ends (at `turn_end`), the run that completes a goal still charges after the completion call, and the accounting closes when that run ends so later turns never charge to a finished goal.

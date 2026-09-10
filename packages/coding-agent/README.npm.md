@@ -15,8 +15,10 @@ Smolt is a minimal terminal coding agent with one addition that compounds: it re
 ## Install
 
 ```bash
-npm install -g @smolt/cli
+npm install -g @smolt/cli@latest
 ```
+
+The same line upgrades an existing install: without `@latest`, npm sees the package is already there and does nothing.
 
 Prefer a window? [Smolt desktop](https://smolt.dev/desktop) is the same agent, same memory, same sessions.
 

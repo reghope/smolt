@@ -161,6 +161,56 @@ function processAlive(pid: number): boolean {
 }
 
 /**
+ * How often the session holding a claim writes the time into it, and how old a
+ * claim may be before it counts as abandoned.
+ *
+ * A pid alone does not say whether the process that wrote it is still the one
+ * running. Operating systems reuse pids, and one of these claims was found
+ * being "held" by pid 5432 — a smolt had written it that morning, died, and
+ * Chrome had been handed the same number an hour later. Every other session
+ * stood down behind a browser for as long as it ran, because the liveness
+ * check could only ask whether *something* had that pid. A claim that nobody
+ * is refreshing goes stale instead, whoever ends up holding the number.
+ */
+const CLAIM_HEARTBEAT_MS = 30_000;
+const CLAIM_STALE_MS = 3 * CLAIM_HEARTBEAT_MS;
+
+/** Whether someone else is watching this repo and still saying so. */
+function claimIsHeld(claim: WatchClaim): boolean {
+	if (claim.pid === process.pid) return false;
+	if (!processAlive(claim.pid)) return false;
+	// A claim written by a version that did not refresh carries no time worth
+	// trusting, and readClaim dates it to 0, so it reads as abandoned here. That
+	// is the right way round: taking a claim someone still holds costs one
+	// re-created hook, and leaving one costs watching nothing at all.
+	return Date.now() - claim.at < CLAIM_STALE_MS;
+}
+
+function writeClaim(file: string): void {
+	mkdirSync(dirname(file), { recursive: true });
+	writeFileSync(file, `${JSON.stringify({ pid: process.pid, at: Date.now() } satisfies WatchClaim)}\n`, "utf-8");
+}
+
+/**
+ * Say we are still here, if the claim is still ours.
+ *
+ * Another session may have taken the repo over while we were connected — after
+ * a machine slept through the stale window, say — and stamping our pid back
+ * over theirs would give the repo two owners, which is the one thing the claim
+ * exists to prevent. The next connect finds we lost it and stands down.
+ */
+function refreshClaim(repo: string): void {
+	const file = watchClaimFile(repo);
+	const claim = readClaim(file);
+	if (claim !== undefined && claim.pid !== process.pid) return;
+	try {
+		writeClaim(file);
+	} catch {
+		// An unwritable agent dir costs the claim, not the connection in hand.
+	}
+}
+
+/**
  * Take (or re-take) the claim on a repo's webhook.
  *
  * GitHub allows one forwarder hook per repository, and installing one deletes
@@ -172,9 +222,8 @@ function processAlive(pid: number): boolean {
 function claimWebhook(repo: string): boolean {
 	const file = watchClaimFile(repo);
 	const claim = readClaim(file);
-	if (claim !== undefined && claim.pid !== process.pid && processAlive(claim.pid)) return false;
-	mkdirSync(dirname(file), { recursive: true });
-	writeFileSync(file, `${JSON.stringify({ pid: process.pid, at: Date.now() } satisfies WatchClaim)}\n`, "utf-8");
+	if (claim !== undefined && claimIsHeld(claim)) return false;
+	writeClaim(file);
 	return true;
 }
 
@@ -290,6 +339,7 @@ function startWatching(repo: string, hooks: Hooks): () => void {
 	let backoffMs = 2000;
 	let failures = 0;
 	let connectedAt = 0;
+	let heartbeat: ReturnType<typeof setInterval> | undefined;
 	/** Whether the reader has already been told this session is on standby. */
 	let announcedStandby = false;
 
@@ -300,6 +350,8 @@ function startWatching(repo: string, hooks: Hooks): () => void {
 		failures = Date.now() - connectedAt > SETTLED_MS ? 0 : failures + 1;
 		if (failures >= MAX_FAILED_ATTEMPTS) {
 			stopped = true;
+			clearInterval(heartbeat);
+			heartbeat = undefined;
 			// The claim goes with the watcher. Kept after giving up, it names a
 			// process that is alive and no longer watching, so every standby
 			// session on this machine waits behind it for as long as smolt runs
@@ -335,6 +387,10 @@ function startWatching(repo: string, hooks: Hooks): () => void {
 			retry = setTimeout(connect, STANDBY_RETRY_MS);
 			return;
 		}
+		// The claim is ours; keep saying so for as long as we hold it, or the next
+		// session to look reads it as abandoned and takes the repo over. Unref'd:
+		// watching a repo is not a reason for smolt to stay alive.
+		if (heartbeat === undefined) heartbeat = setInterval(() => refreshClaim(repo), CLAIM_HEARTBEAT_MS).unref();
 		if (announcedStandby) {
 			announcedStandby = false;
 			hooks.notice(`Watching ${repo}: the session that held it has gone.`, "info");
@@ -414,6 +470,8 @@ function startWatching(repo: string, hooks: Hooks): () => void {
 	return () => {
 		stopped = true;
 		if (retry) clearTimeout(retry);
+		clearInterval(heartbeat);
+		heartbeat = undefined;
 		child?.kill();
 		releaseWebhook(repo);
 	};

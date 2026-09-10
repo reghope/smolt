@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("node:child_process", () => ({
@@ -31,6 +31,27 @@ vi.mock("node:child_process", () => ({
 const { watchClaimFile } = await import("../src/extensions/review/config.ts");
 const { watchAll } = await import("../src/extensions/review/watch.ts");
 
+const REPO = "owner/name";
+
+/** The pid recorded in the claim file, whoever wrote it. */
+function readClaimPid(): number | undefined {
+	if (!existsSync(watchClaimFile(REPO))) return undefined;
+	return JSON.parse(readFileSync(watchClaimFile(REPO), "utf-8")).pid;
+}
+
+/**
+ * A process that is genuinely running and is not this one.
+ *
+ * Spawned through the real child_process, not the mock above: the point of
+ * these two tests is what the liveness check says about a pid the operating
+ * system really has handed out, which a fake pid cannot exercise.
+ */
+async function liveForeignPid(): Promise<{ pid: number; kill: () => void }> {
+	const real = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+	const child = real.spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], { stdio: "ignore" });
+	if (child.pid === undefined) throw new Error("could not start a process to stand in for another session");
+	return { pid: child.pid, kill: () => child.kill() };
+}
 /**
  * The claim file gives a repo's webhook one owner, because GitHub allows one
  * forwarder hook per repository and installing a second silently destroys the
@@ -86,6 +107,35 @@ describe("review watcher claim", () => {
 		expect(existsSync(watchClaimFile("owner/name"))).toBe(true);
 	});
 
+	it("takes over a claim whose owner stopped saying it was there", async () => {
+		// The shape that locked this repo out for a whole day: a smolt wrote the
+		// claim, died, and another program was handed its pid, so the liveness
+		// check kept answering yes for a process that had never watched anything.
+		const squatter = await liveForeignPid();
+		mkdirSync(dirname(watchClaimFile(REPO)), { recursive: true });
+		writeFileSync(watchClaimFile(REPO), JSON.stringify({ pid: squatter.pid, at: Date.now() - 10 * 60_000 }), "utf-8");
+
+		const notices: string[] = [];
+		stop = watchAll([REPO], { review: () => {}, notice: (message) => notices.push(message) });
+
+		expect(readClaimPid()).toBe(process.pid);
+		expect(notices.some((notice) => notice.includes("on standby"))).toBe(false);
+		squatter.kill();
+	});
+
+	it("stands down behind a claim that is still being kept up", async () => {
+		const owner = await liveForeignPid();
+		mkdirSync(dirname(watchClaimFile(REPO)), { recursive: true });
+		writeFileSync(watchClaimFile(REPO), JSON.stringify({ pid: owner.pid, at: Date.now() }), "utf-8");
+
+		const notices: string[] = [];
+		stop = watchAll([REPO], { review: () => {}, notice: (message) => notices.push(message) });
+
+		// Left alone: a fresh claim on a live pid is someone else's repo.
+		expect(readClaimPid()).toBe(owner.pid);
+		expect(notices.some((notice) => notice.includes("on standby"))).toBe(true);
+		owner.kill();
+	});
 	it("gives up the claim when watching is stopped by hand", async () => {
 		const stopWatching = watchAll(["owner/name"], { review: () => {}, notice: () => {} });
 		expect(existsSync(watchClaimFile("owner/name"))).toBe(true);

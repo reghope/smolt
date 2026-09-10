@@ -73,6 +73,11 @@ export interface PendingReview {
 	/** How many times it has been started, including runs that died. */
 	attempts: number;
 	at: number;
+	/**
+	 * The transcript the last attempt was writing, so the retry can carry on in
+	 * it rather than read the whole pull request again from nothing.
+	 */
+	session?: string;
 }
 
 /**
@@ -91,6 +96,28 @@ function pendingFile(repo: string, number: number): string {
 	return path.join(pendingDir(), `${repo.replace(/[^a-zA-Z0-9._-]+/g, "-")}-${number}.json`);
 }
 
+function writePending(entry: PendingReview): void {
+	try {
+		fs.mkdirSync(pendingDir(), { recursive: true });
+		fs.writeFileSync(pendingFile(entry.repo, entry.number), `${JSON.stringify(entry)}\n`, "utf-8");
+	} catch {
+		// An unwritable agent dir costs the retry, not the review in hand.
+	}
+}
+
+/**
+ * Note the transcript a review is being written into.
+ *
+ * Separate from marking it pending because the record is written before the
+ * work starts — deliberately, so a crash between the two is still remembered —
+ * and the transcript only exists once the child is running.
+ */
+export function recordReviewSession(repo: string, number: number, session: string): void {
+	const existing = listPendingReviews().find((entry) => entry.repo === repo && entry.number === number);
+	if (existing === undefined) return;
+	writePending({ ...existing, session });
+}
+
 /** Record that a review is owed, or bump the attempt count of one already owed. */
 export function markReviewPending(repo: string, number: number): PendingReview {
 	const existing = listPendingReviews().find((entry) => entry.repo === repo && entry.number === number);
@@ -99,13 +126,11 @@ export function markReviewPending(repo: string, number: number): PendingReview {
 		number,
 		attempts: (existing?.attempts ?? 0) + 1,
 		at: Date.now(),
+		// The transcript of the attempt that just died is what the new one picks
+		// up; it is replaced once this attempt has a transcript of its own.
+		...(existing?.session === undefined ? {} : { session: existing.session }),
 	};
-	try {
-		fs.mkdirSync(pendingDir(), { recursive: true });
-		fs.writeFileSync(pendingFile(repo, number), `${JSON.stringify(entry)}\n`, "utf-8");
-	} catch {
-		// An unwritable agent dir costs the retry, not the review in hand.
-	}
+	writePending(entry);
 	return entry;
 }
 
@@ -139,6 +164,9 @@ export function listPendingReviews(): PendingReview[] {
 				number: parsed.number,
 				attempts: typeof parsed.attempts === "number" ? parsed.attempts : 1,
 				at: typeof parsed.at === "number" ? parsed.at : 0,
+				// Only a transcript still on disk is worth resuming; one deleted
+				// between runs reads as no transcript at all.
+				...(typeof parsed.session === "string" && fs.existsSync(parsed.session) ? { session: parsed.session } : {}),
 			});
 		} catch {
 			// malformed entry: not a reason to break startup

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -7,6 +7,7 @@ import {
 	listPendingReviews,
 	MAX_REVIEW_ATTEMPTS,
 	markReviewPending,
+	recordReviewSession,
 } from "../src/extensions/review/config.ts";
 
 /**
@@ -56,6 +57,39 @@ describe("pending reviews", () => {
 	});
 
 	it("says nothing is owed when nothing was started", () => {
+		expect(listPendingReviews()).toEqual([]);
+	});
+
+	it("remembers the transcript so a retry carries on in it", () => {
+		// Reading a big pull request takes tens of minutes. A retry that starts a
+		// new transcript reads all of it a second time; one that reopens this file
+		// costs a single turn.
+		const transcript = join(agentDir, "review-session.jsonl");
+		writeFileSync(transcript, "{}\n", "utf-8");
+		markReviewPending("owner/name", 11);
+		recordReviewSession("owner/name", 11, transcript);
+
+		const retry = markReviewPending("owner/name", 11);
+
+		expect(retry.attempts).toBe(2);
+		expect(retry.session).toBe(transcript);
+		expect(listPendingReviews()[0]?.session).toBe(transcript);
+	});
+
+	it("forgets a transcript that is no longer on disk", () => {
+		// Sessions are files someone may have cleared out between runs. Resuming
+		// one that has gone would fail where starting again would have worked.
+		const transcript = join(agentDir, "deleted-session.jsonl");
+		writeFileSync(transcript, "{}\n", "utf-8");
+		markReviewPending("owner/name", 11);
+		recordReviewSession("owner/name", 11, transcript);
+		rmSync(transcript);
+
+		expect(listPendingReviews()[0]?.session).toBeUndefined();
+	});
+
+	it("does not record a transcript for a review nothing is owed on", () => {
+		recordReviewSession("owner/name", 99, join(agentDir, "stray.jsonl"));
 		expect(listPendingReviews()).toEqual([]);
 	});
 });

@@ -23,6 +23,8 @@ import { createLeanChildExtension, type LeanChildOptions } from "./lean.ts";
 export interface ChildDriver {
 	abort(): Promise<void>;
 	dispose(): void;
+	/** The transcript this child is writing, when it keeps one, so it can be resumed. */
+	sessionFile?: string;
 	/** How many actions (tool executions) the child has performed so far. */
 	actions?(): number;
 	/** Cut into the child's turn with a supervisor message (e.g. wrap up). */
@@ -89,6 +91,16 @@ export interface ChildSpawnOptions {
 	 * they did not sit and watch, and may want to read afterwards.
 	 */
 	hidden?: boolean;
+	/**
+	 * Carry on in this session file instead of opening a new one.
+	 *
+	 * Work that takes tens of minutes is worth resuming rather than repeating.
+	 * A review killed by a restart had read a hundred files, and starting it
+	 * again read them all a second time; picking the same transcript up costs
+	 * one turn. `task` becomes the nudge to continue rather than the whole
+	 * brief, since the brief is already the first message of that transcript.
+	 */
+	resumeFrom?: string;
 }
 
 export type ChildFinish = (status: "completed" | "errored", detail: string) => void;
@@ -170,6 +182,23 @@ export async function spawnChildSession(options: ChildSpawnOptions, onFinish: Ch
 	const resourceLoader = createChildResourceLoader({ cwd: ctx.cwd, agentDir, settingsManager, lean: options.lean });
 	await resourceLoader.reload();
 
+	const sessionManager = options.hidden
+		? SessionManager.create(ctx.cwd, getHiddenSessionDir(ctx.cwd, agentDir))
+		: persistChildSessions(settingsManager)
+			? SessionManager.create(ctx.cwd, getDefaultSessionDir(ctx.cwd, agentDir))
+			: SessionManager.inMemory(ctx.cwd);
+	// Carrying on where a killed run stopped: the transcript is loaded before the
+	// session is built, so its messages are the context this turn continues from.
+	// A file that will not load is not worth failing over — the caller's task
+	// still reads as a whole brief, so the work restarts instead of resuming.
+	if (options.resumeFrom !== undefined) {
+		try {
+			sessionManager.setSessionFile(options.resumeFrom);
+		} catch {
+			// A transcript we cannot read is one we start again.
+		}
+	}
+
 	const { session } = await createAgentSession({
 		cwd: ctx.cwd,
 		agentDir,
@@ -184,11 +213,7 @@ export async function spawnChildSession(options: ChildSpawnOptions, onFinish: Ch
 		customTools,
 		resourceLoader,
 		settingsManager,
-		sessionManager: options.hidden
-			? SessionManager.create(ctx.cwd, getHiddenSessionDir(ctx.cwd, agentDir))
-			: persistChildSessions(settingsManager)
-				? SessionManager.create(ctx.cwd, getDefaultSessionDir(ctx.cwd, agentDir))
-				: SessionManager.inMemory(ctx.cwd),
+		sessionManager,
 	});
 
 	// Every action is timed: tool spans and the model's thinking between them,
@@ -230,6 +255,7 @@ export async function spawnChildSession(options: ChildSpawnOptions, onFinish: Ch
 		.catch((error: unknown) => onFinish("errored", error instanceof Error ? error.message : String(error)));
 
 	return {
+		sessionFile: sessionManager.getSessionFile(),
 		abort: async () => {
 			await session.abort();
 		},

@@ -16,6 +16,7 @@ import {
 	MAX_REVIEW_ATTEMPTS,
 	markReviewPending,
 	type ReviewSettings,
+	recordReviewSession,
 	reviewSettingsFile,
 	saveReviewSettings,
 } from "./config.ts";
@@ -231,6 +232,22 @@ HOW TO WORK
 - Do not touch anything the findings do not cover.
 
 Finish with a short report: what you changed, file by file, and what you left alone and why.`;
+}
+
+/**
+ * What a resumed review is told, in a transcript that already holds the brief.
+ *
+ * Everything it had read is still in front of it, so repeating the brief would
+ * only invite it to start the reading again. What it needs is the one thing
+ * the transcript cannot tell it: that it was interrupted, and that it should
+ * finish rather than begin.
+ */
+function resumeBrief(): string {
+	return `You were interrupted part-way through this review — smolt was restarted — and you are now back in the same session, with everything you had already read above.
+
+Carry on from where you stopped. Do not start the review again, do not re-read what you have already read, and do not repeat work whose results are already in this conversation. If you had already recorded findings, they are still recorded; do not add them a second time.
+
+Take stock in one short paragraph — what you had covered and what is left — and then finish the review: record what still needs recording, complete the review record, and post the comment as your original instructions describe.`;
 }
 
 /** A target naming a pull request: 5, #5, or any .../pull/5 URL. */
@@ -458,7 +475,7 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 	// sent from it is refused outright ("Agent is already processing") and the
 	// review is lost without a word. agent_settled is the first moment the
 	// session is genuinely free.
-	const pending: { number: number; repo: string; commentId?: number }[] = [];
+	const pending: { number: number; repo: string; commentId?: number; session?: string }[] = [];
 	// The target of the review the session is running, so auto-fix knows one
 	// just finished and which record holds its findings.
 	let reviewing: number | undefined;
@@ -543,7 +560,15 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 		// Only say "this is elsewhere" when it really is: a pull request on the
 		// repo open here is reviewed in place, with no clone.
 		const here = currentRepo();
-		const task = reviewPrompt(String(next.number), settings, next.repo === here ? undefined : next.repo);
+		// A retry with a transcript carries on in it, and is told to carry on
+		// rather than handed the brief again: the brief is already the first
+		// message of that transcript, and re-reading a pull request this one has
+		// spent twenty minutes on reads it all a second time for nothing.
+		const resumeFrom = next.session;
+		const task =
+			resumeFrom === undefined
+				? reviewPrompt(String(next.number), settings, next.repo === here ? undefined : next.repo)
+				: resumeBrief();
 		const startedAt = Date.now();
 		const model = reviewModel(settings, ctx);
 		// Before the review, not after it: the pull request should show it was heard.
@@ -565,7 +590,7 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 		const owed = markReviewPending(next.repo, next.number);
 		reviewingPullRequest = true;
 		try {
-			await spawnChildSession(
+			const child = await spawnChildSession(
 				{
 					task,
 					customTools: [reviewToolDefinition],
@@ -573,6 +598,7 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 					hidden: true,
 					defaultThinkingLevel: "medium",
 					...(model ? { model } : {}),
+					...(resumeFrom === undefined ? {} : { resumeFrom }),
 				},
 				(status, detail) => {
 					clearInterval(progress);
@@ -595,6 +621,9 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 					void drain().catch(() => undefined);
 				},
 			);
+			// Noted once the child exists, so a run killed from here on is resumed
+			// in this transcript rather than started again from the first file.
+			if (child.sessionFile !== undefined) recordReviewSession(next.repo, next.number, child.sessionFile);
 		} catch (error) {
 			clearInterval(progress);
 			reviewingPullRequest = false;
@@ -728,7 +757,12 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 			}
 			if (pending.some((entry) => entry.repo === owed.repo && entry.number === owed.number)) continue;
 			say(`Picking up the unfinished review of ${owed.repo} #${owed.number}.`, "info");
-			pending.push({ number: owed.number, repo: owed.repo });
+			// With the transcript of the attempt that died, so it is resumed.
+			pending.push({
+				number: owed.number,
+				repo: owed.repo,
+				...(owed.session === undefined ? {} : { session: owed.session }),
+			});
 		}
 		if (pending.length > 0) void drain().catch(() => undefined);
 	};

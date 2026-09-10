@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const forwarder = vi.hoisted(() => ({ diesAtOnce: true, children: [] as EventEmitter[] }));
+
 vi.mock("node:child_process", () => ({
 	// Every `gh api` call fails, which is what a revoked admin right or an
 	// expired login looks like from here: ghJson swallows it and returns
@@ -20,16 +22,20 @@ vi.mock("node:child_process", () => ({
 		child.stdout = new EventEmitter();
 		child.stderr = new EventEmitter();
 		child.kill = () => {};
-		// A forwarder that dies the moment it starts: the shape of a `gh webhook
-		// forward` that cannot authenticate. Emitted as a microtask so the exit
-		// listener registered just after the spawn call is there to hear it.
-		queueMicrotask(() => child.emit("exit"));
+		forwarder.children.push(child);
+		// A forwarder that dies the moment it starts is the shape of a `gh webhook
+		// forward` that cannot authenticate, and is what the claim tests need.
+		// Emitted as a microtask so the exit listener registered just after the
+		// spawn call is there to hear it. A test that wants to speak through the
+		// forwarder keeps it alive instead.
+		if (forwarder.diesAtOnce) queueMicrotask(() => child.emit("exit"));
 		return child;
 	},
 }));
 
 const { watchClaimFile } = await import("../src/extensions/review/config.ts");
 const { watchAll } = await import("../src/extensions/review/watch.ts");
+type PullRequestEvent = import("../src/extensions/review/watch.ts").PullRequestEvent;
 
 const REPO = "owner/name";
 
@@ -71,6 +77,8 @@ describe("review watcher claim", () => {
 		// microtask, and Date.now() has to keep moving for the settled-connection
 		// check to see these connections as the short-lived ones they are.
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		forwarder.diesAtOnce = true;
+		forwarder.children.length = 0;
 	});
 
 	afterEach(() => {
@@ -136,6 +144,55 @@ describe("review watcher claim", () => {
 		expect(notices.some((notice) => notice.includes("on standby"))).toBe(true);
 		owner.kill();
 	});
+
+	it("answers on the comment that asked for the review", () => {
+		// What the forwarder prints for '@smolt review' on a pull request. The id
+		// matters: it is the only way back to the comment someone typed, and
+		// without it a request could only be acknowledged somewhere else on the
+		// page, which is how one looked ignored.
+		forwarder.diesAtOnce = false;
+		const seen: PullRequestEvent[] = [];
+		stop = watchAll([REPO], { review: (event) => seen.push(event), notice: () => {} });
+
+		const child = forwarder.children[0] as EventEmitter & { stdout: EventEmitter };
+		child.stdout.emit(
+			"data",
+			Buffer.from(
+				`${JSON.stringify({
+					action: "created",
+					issue: { number: 11, title: "A pull request", pull_request: {} },
+					comment: { body: "@smolt review", id: 5622697706 },
+				})}
+`,
+			),
+		);
+
+		expect(seen).toEqual([{ number: 11, title: "A pull request", headSha: "", repo: REPO, commentId: 5622697706 }]);
+	});
+
+	it("ignores a comment that does not ask", () => {
+		forwarder.diesAtOnce = false;
+		const seen: PullRequestEvent[] = [];
+		stop = watchAll([REPO], { review: (event) => seen.push(event), notice: () => {} });
+
+		const child = forwarder.children[0] as EventEmitter & { stdout: EventEmitter };
+		for (const body of ["looks good to me", "mail rob@smoltreview.example", "@smolt please review"]) {
+			child.stdout.emit(
+				"data",
+				Buffer.from(
+					`${JSON.stringify({
+						action: "created",
+						issue: { number: 11, title: "A pull request", pull_request: {} },
+						comment: { body, id: 1 },
+					})}
+`,
+				),
+			);
+		}
+
+		expect(seen).toEqual([]);
+	});
+
 	it("gives up the claim when watching is stopped by hand", async () => {
 		const stopWatching = watchAll(["owner/name"], { review: () => {}, notice: () => {} });
 		expect(existsSync(watchClaimFile("owner/name"))).toBe(true);

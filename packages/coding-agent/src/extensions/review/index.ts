@@ -70,11 +70,29 @@ const COMMENT_HEADING =
  * commenting, had no way to tell it had been heard. This is the same marker
  * comment the finished review updates in place, so the acknowledgement becomes
  * the review rather than standing beside it.
+ *
+ * The start time is in the text because that comment is edited rather than
+ * re-posted, and one review request looks exactly like the next: asking again
+ * while it still said "Reviewing this pull request now" from a run that had
+ * died wrote the identical body back, changed nothing anyone could see, and
+ * read as though the request had been ignored. A reaction goes on the comment
+ * that asked, which is where whoever asked is actually looking.
  */
-function acknowledge(repo: string, pr: string): void {
-	const body = `${COMMENT_MARKER}\n\n${COMMENT_HEADING}\n\nReviewing this pull request now. This comment will be updated with the findings.`;
+function acknowledge(repo: string, pr: string, commentId?: number): void {
+	const startedAt = new Date().toISOString().replace("T", " ").slice(0, 16);
+	const body = `${COMMENT_MARKER}\n\n${COMMENT_HEADING}\n\nReviewing this pull request now, started ${startedAt} UTC. This comment will be updated with the findings.`;
 	const gh = (args: string[]): string =>
 		execFileSync("gh", args, { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+	// First, and on its own: it lands in the moment rather than after the two
+	// round trips below, and a pull request we cannot edit a comment on is
+	// usually still one we can react on.
+	if (commentId !== undefined) {
+		try {
+			gh(["api", "--method", "POST", `repos/${repo}/issues/comments/${commentId}/reactions`, "-f", "content=eyes"]);
+		} catch {
+			// A reaction is the nicety, not the acknowledgement.
+		}
+	}
 	try {
 		const existing = gh([
 			"pr",
@@ -388,7 +406,7 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 	// sent from it is refused outright ("Agent is already processing") and the
 	// review is lost without a word. agent_settled is the first moment the
 	// session is genuinely free.
-	const pending: { number: number; repo: string }[] = [];
+	const pending: { number: number; repo: string; commentId?: number }[] = [];
 	// The target of the review the session is running, so auto-fix knows one
 	// just finished and which record holds its findings.
 	let reviewing: number | undefined;
@@ -477,7 +495,7 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 		const startedAt = Date.now();
 		const model = reviewModel(settings, ctx);
 		// Before the review, not after it: the pull request should show it was heard.
-		acknowledge(next.repo, String(next.number));
+		acknowledge(next.repo, String(next.number), next.commentId);
 		// On disk before the work starts, so a review interrupted by a closed
 		// smolt, a crash, or a failure is picked up the next time watching runs.
 		const owed = markReviewPending(next.repo, next.number);
@@ -611,7 +629,7 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 		stopWatching = watchAll(repos, {
 			review: (event) => {
 				say(`Reviewing ${event.repo} #${event.number} in a hidden chat: ${event.title}`, "info");
-				pending.push({ number: event.number, repo: event.repo });
+				pending.push({ number: event.number, repo: event.repo, commentId: event.commentId });
 				void drain().catch(() => undefined);
 			},
 			notice: (message, kind) => say(message, kind),

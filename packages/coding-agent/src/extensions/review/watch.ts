@@ -8,6 +8,8 @@ export interface PullRequestEvent {
 	number: number;
 	title: string;
 	headSha: string;
+	/** The comment that asked for this review, when one did, so it can be answered on. */
+	commentId?: number;
 	/** "owner/name" of the repo the pull request is on. */
 	repo: string;
 }
@@ -422,7 +424,7 @@ function startWatching(repo: string, hooks: Hooks): () => void {
 					number?: number;
 					pull_request?: Record<string, unknown>;
 					issue?: { number?: number; title?: string; pull_request?: unknown };
-					comment?: { body?: string };
+					comment?: { body?: string; id?: number };
 				};
 				try {
 					payload = JSON.parse(line);
@@ -443,6 +445,7 @@ function startWatching(repo: string, hooks: Hooks): () => void {
 						title: typeof issue.title === "string" ? issue.title : `#${issue.number}`,
 						headSha: "",
 						repo,
+						commentId: typeof payload.comment.id === "number" ? payload.comment.id : undefined,
 					});
 					continue;
 				}

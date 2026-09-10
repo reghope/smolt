@@ -134,11 +134,12 @@ function doctrine(): string {
    - Anything else is plain language — interpret it against the repo, say what you resolved it to.
    An empty diff is a real answer: say so and stop; no review record for nothing.
 2. START the record: review tool action 'start' (target, target_key). It returns the standing findings from earlier reviews of the same target — verify each against the current code, mark the gone ones 'fixed' (update_finding), and never re-report one that still stands.
-3. READ the change properly. The diff alone lies: for every non-trivial hunk read the enclosing function, the callers of what changed, and the tests that cover it. Understand what the change is trying to do before judging how.
+3. READ the change properly. The diff alone lies: for every non-trivial hunk read the enclosing function, the callers of what changed, and the tests that cover it. Understand what the change is trying to do before judging how. READ, do not RUN: no 'npm install', no 'npm ci', no builds, no test suites, no dev servers. Reading tells you what the change does; running tells you about the machine it ran on. A review that installed dependencies and ran the suites took half an hour and tens of thousands of tokens to learn less than the diff already showed, and a red suite in a fresh clone is almost always failures that were already there.
 4. HUNT across these dimensions, in this order of importance: correctness (broken logic, wrong edge cases, races), security (injection, secrets, unsafe input, permissions), data loss (destructive paths, missing guards, bad migrations), API/contract breaks (signatures, wire formats, persisted shapes), performance (only where it plausibly matters), simplification (dead code, needless complexity — sparingly), test gaps (only for risky changed behavior).
 5. VERIFY before recording. For each candidate: trace the concrete inputs or state that produce the wrong outcome. If you cannot name them, it is not a finding — drop it. Style opinions, hypotheticals, and "consider..." advice are not findings.
 6. RECORD what survives: review tool action 'add_finding' (title, file, line, severity blocker/major/minor/polish, category, confidence certain/likely/possible, claim, failure_scenario, evidence, suggested_fix?). The tool rejects findings without a failure scenario and bounces ones an earlier review holds open — obey the bounce.
 7. CLOSE: action 'complete' with a short summary (what was reviewed, the shape of what was found, what is fine).
+BUDGET: a review is a reading job and should read like one — 'gh pr diff' and 'gh pr view' once each, then targeted reads and greps of what the diff actually touches. Tens of commands, not hundreds. Stop when you understand the change, not when you understand the repository: a big diff means reading the risky parts closely and the mechanical parts quickly, never every file in the project.
 QUALITY BAR: fewer, harder findings beat many soft ones. No praise padding, no restating the diff, no nitpicks the codebase's own style contradicts. If the change is good, a clean review with zero findings is the correct and complete result.`;
 }
 
@@ -217,7 +218,7 @@ Then POST the review to pull request #${pr} as ONE comment, using gh on this mac
 function elsewhereInstructions(repo: string, pr: string): string {
 	return `
 
-This pull request is on ${repo}, which is NOT the repository open in this session. Before reviewing it: clone ${repo} into a temporary directory ('gh repo clone ${repo} <tmp> -- --filter=blob:none'), fetch the pull request there ('git -C <tmp> fetch origin pull/${pr}/head'), and do the whole review inside that clone so you can read the code around the diff. Delete the clone when you are done. Never touch the working tree of the repository open here.`;
+This pull request is on ${repo}, which is NOT the repository open in this session. Before reviewing it: clone ${repo} into a temporary directory ('gh repo clone ${repo} <tmp> -- --filter=blob:none'), fetch the pull request there ('git -C <tmp> fetch origin pull/${pr}/head'), and do the whole review inside that clone so you can read the code around the diff. The clone is there to be READ: do not install dependencies, build it, or run its tests. Delete the clone when you are done. Never touch the working tree of the repository open here.`;
 }
 
 function reviewPrompt(target: string, settings: ReviewSettings, elsewhere?: string): string {

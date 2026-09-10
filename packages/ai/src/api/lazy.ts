@@ -1,7 +1,22 @@
 import type { Api, AssistantMessage, AssistantMessageEvent, Model, ProviderStreams } from "../types.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 
+/**
+ * Whether a thrown value is a cancelled request rather than a failure.
+ *
+ * Both shapes appear: the DOMException Node's fetch throws ("This operation
+ * was aborted") and this package's own AbortError. Neither is a fault worth
+ * reporting as one — a caller that abandons a request already knows it did.
+ */
+function isAbortError(error: unknown): boolean {
+	return error instanceof Error && error.name === "AbortError";
+}
+
 function createSetupErrorMessage(model: Model<Api>, error: unknown): AssistantMessage {
+	// A cancelled request is reported as cancelled. Reported as an error, the
+	// harness aborting a turn to compact surfaced in the transcript as "API
+	// Error: This operation was aborted" every time the context filled up.
+	const aborted = isAbortError(error);
 	return {
 		role: "assistant",
 		content: [],
@@ -16,8 +31,8 @@ function createSetupErrorMessage(model: Model<Api>, error: unknown): AssistantMe
 			totalTokens: 0,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
-		stopReason: "error",
-		errorMessage: error instanceof Error ? error.message : String(error),
+		stopReason: aborted ? "aborted" : "error",
+		...(aborted ? {} : { errorMessage: error instanceof Error ? error.message : String(error) }),
 		timestamp: Date.now(),
 	};
 }
@@ -53,7 +68,7 @@ export function lazyStream(
 		.then((inner) => forwardStream(outer, inner))
 		.catch((error) => {
 			const message = createSetupErrorMessage(model, error);
-			outer.push({ type: "error", reason: "error", error: message });
+			outer.push({ type: "error", reason: message.stopReason === "aborted" ? "aborted" : "error", error: message });
 			outer.end(message);
 		});
 

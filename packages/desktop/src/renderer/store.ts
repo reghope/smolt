@@ -300,7 +300,10 @@ export function fromAgentMessage(message: Record<string, unknown>): ChatMessage 
 			});
 		}
 	}
-	const failure = failureText(message);
+	// A cancelled response that wrote nothing has nothing to say: the harness
+	// aborts a turn to compact when the context fills, and a lone "Stopped."
+	// above the compaction notice reads as though something went wrong.
+	const failure = message.stopReason === "aborted" && blocks.length === 0 ? null : failureText(message);
 	if (failure !== null) blocks.push(failure);
 	return {
 		role: "assistant",

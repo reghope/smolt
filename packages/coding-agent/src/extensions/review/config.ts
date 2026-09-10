@@ -56,6 +56,97 @@ export function watchClaimFile(repo: string): string {
 	return path.join(getAgentDir(), "review-watch", `${repo.replace(/[^a-zA-Z0-9._-]+/g, "-")}.json`);
 }
 
+/**
+ * A review that was asked for and has not been delivered.
+ *
+ * A review takes minutes, and smolt is closed, restarted and killed in the
+ * middle of them. Without a record on disk, a pull request that had been
+ * acknowledged ("Reviewing this pull request now") simply never heard back,
+ * and nothing retried it. Each queued review writes one of these; it is
+ * removed when the review finishes, and every one still there is picked up
+ * the next time watching starts.
+ */
+export interface PendingReview {
+	/** "owner/name" of the repo the pull request is on. */
+	repo: string;
+	number: number;
+	/** How many times it has been started, including runs that died. */
+	attempts: number;
+	at: number;
+}
+
+/**
+ * How many times a review may be started before it is left alone.
+ *
+ * A pull request the reviewer genuinely cannot get through — too large, a
+ * model that keeps erroring — must not be retried at every launch for ever.
+ */
+export const MAX_REVIEW_ATTEMPTS = 3;
+
+function pendingDir(): string {
+	return path.join(getAgentDir(), "review-pending");
+}
+
+function pendingFile(repo: string, number: number): string {
+	return path.join(pendingDir(), `${repo.replace(/[^a-zA-Z0-9._-]+/g, "-")}-${number}.json`);
+}
+
+/** Record that a review is owed, or bump the attempt count of one already owed. */
+export function markReviewPending(repo: string, number: number): PendingReview {
+	const existing = listPendingReviews().find((entry) => entry.repo === repo && entry.number === number);
+	const entry: PendingReview = {
+		repo,
+		number,
+		attempts: (existing?.attempts ?? 0) + 1,
+		at: Date.now(),
+	};
+	try {
+		fs.mkdirSync(pendingDir(), { recursive: true });
+		fs.writeFileSync(pendingFile(repo, number), `${JSON.stringify(entry)}\n`, "utf-8");
+	} catch {
+		// An unwritable agent dir costs the retry, not the review in hand.
+	}
+	return entry;
+}
+
+/** Forget a review: it has been delivered, or given up on. */
+export function clearReviewPending(repo: string, number: number): void {
+	try {
+		fs.unlinkSync(pendingFile(repo, number));
+	} catch {
+		// already gone
+	}
+}
+
+/** Every review still owed, oldest first. */
+export function listPendingReviews(): PendingReview[] {
+	let names: string[];
+	try {
+		names = fs.readdirSync(pendingDir());
+	} catch {
+		return [];
+	}
+	const entries: PendingReview[] = [];
+	for (const name of names) {
+		if (!name.endsWith(".json")) continue;
+		const raw = readIfExists(path.join(pendingDir(), name));
+		if (raw === undefined) continue;
+		try {
+			const parsed = JSON.parse(raw) as Partial<PendingReview>;
+			if (typeof parsed.repo !== "string" || typeof parsed.number !== "number") continue;
+			entries.push({
+				repo: parsed.repo,
+				number: parsed.number,
+				attempts: typeof parsed.attempts === "number" ? parsed.attempts : 1,
+				at: typeof parsed.at === "number" ? parsed.at : 0,
+			});
+		} catch {
+			// malformed entry: not a reason to break startup
+		}
+	}
+	return entries.sort((a, b) => a.at - b.at);
+}
+
 function readIfExists(file: string): string | undefined {
 	try {
 		return fs.readFileSync(file, "utf-8");

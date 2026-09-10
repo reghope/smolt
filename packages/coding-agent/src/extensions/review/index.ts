@@ -9,8 +9,12 @@ import { projectStore } from "../../core/project-store.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
 import { spawnChildSession } from "../battletest/spawn.ts";
 import {
+	clearReviewPending,
 	DEFAULT_MAX_FINDINGS,
+	listPendingReviews,
 	loadReviewSettings,
+	MAX_REVIEW_ATTEMPTS,
+	markReviewPending,
 	type ReviewSettings,
 	reviewSettingsFile,
 	saveReviewSettings,
@@ -474,6 +478,9 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 		const model = reviewModel(settings, ctx);
 		// Before the review, not after it: the pull request should show it was heard.
 		acknowledge(next.repo, String(next.number));
+		// On disk before the work starts, so a review interrupted by a closed
+		// smolt, a crash, or a failure is picked up the next time watching runs.
+		const owed = markReviewPending(next.repo, next.number);
 		reviewingPullRequest = true;
 		try {
 			await spawnChildSession(
@@ -487,10 +494,18 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 				},
 				(status, detail) => {
 					reviewingPullRequest = false;
+					// A finished review is no longer owed. A failed one stays owed
+					// until it has had its attempts, and is retried at the next start
+					// rather than immediately: whatever broke it is unlikely to have
+					// changed a second later.
+					const spent = status !== "completed" && owed.attempts >= MAX_REVIEW_ATTEMPTS;
+					if (status === "completed" || spent) clearReviewPending(next.repo, next.number);
 					say(
 						status === "completed"
 							? `Review of ${next.repo} #${next.number} finished: ${detail}`
-							: `Review of ${next.repo} #${next.number} failed: ${detail}`,
+							: spent
+								? `Review of ${next.repo} #${next.number} failed ${owed.attempts} times; giving up on it: ${detail}`
+								: `Review of ${next.repo} #${next.number} failed: ${detail}. It will be retried next time smolt runs.`,
 						status === "completed" ? "info" : "warning",
 					);
 					if (status === "completed") void autoFix(startedAt, next.repo);
@@ -603,7 +618,34 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 		});
 		const label = repos.length === 1 ? repos[0] : `${repos.length} repos`;
 		setWatchStatus(ctx, `watching ${label}`);
+		queueOwedReviews(repos);
 		return `watching ${repos.join(", ")}`;
+	};
+
+	/**
+	 * Re-queue reviews that were asked for and never delivered.
+	 *
+	 * A review runs for minutes in a hidden chat, and closing smolt, a crash, or
+	 * a failed run all end it silently — the pull request keeps the "reviewing
+	 * now" comment and hears nothing more. Whatever is still owed on a watched
+	 * repo is picked up here, when watching starts.
+	 */
+	const queueOwedReviews = (repos: string[]): void => {
+		for (const owed of listPendingReviews()) {
+			if (!repos.includes(owed.repo)) continue;
+			if (owed.attempts >= MAX_REVIEW_ATTEMPTS) {
+				clearReviewPending(owed.repo, owed.number);
+				say(
+					`Not retrying the review of ${owed.repo} #${owed.number}: it has already been started ${owed.attempts} times. Comment '@smolt review' to ask again.`,
+					"warning",
+				);
+				continue;
+			}
+			if (pending.some((entry) => entry.repo === owed.repo && entry.number === owed.number)) continue;
+			say(`Picking up the unfinished review of ${owed.repo} #${owed.number}.`, "info");
+			pending.push({ number: owed.number, repo: owed.repo });
+		}
+		if (pending.length > 0) void drain().catch(() => undefined);
 	};
 
 	// The settings file is watched so the toggle in the desktop settings page

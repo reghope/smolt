@@ -78,21 +78,20 @@ const COMMENT_HEADING =
  * read as though the request had been ignored. A reaction goes on the comment
  * that asked, which is where whoever asked is actually looking.
  */
-function acknowledge(repo: string, pr: string, commentId?: number): void {
-	const startedAt = new Date().toISOString().replace("T", " ").slice(0, 16);
-	const body = `${COMMENT_MARKER}\n\n${COMMENT_HEADING}\n\nReviewing this pull request now, started ${startedAt} UTC. This comment will be updated with the findings.`;
+function reviewingBody(started: string, minutes: number, findings: number): string {
+	const found = findings === 0 ? "nothing recorded yet" : `${findings} finding${findings === 1 ? "" : "s"} so far`;
+	const progress = minutes < 1 ? "" : ` ${minutes} minute${minutes === 1 ? "" : "s"} in, ${found}.`;
+	return `${COMMENT_MARKER}
+
+${COMMENT_HEADING}
+
+Reviewing this pull request, started ${started} UTC.${progress} This comment will be updated with the findings.`;
+}
+
+/** Put a body in the review comment, making one if the pull request has none yet. */
+function writeReviewComment(repo: string, pr: string, body: string): void {
 	const gh = (args: string[]): string =>
 		execFileSync("gh", args, { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-	// First, and on its own: it lands in the moment rather than after the two
-	// round trips below, and a pull request we cannot edit a comment on is
-	// usually still one we can react on.
-	if (commentId !== undefined) {
-		try {
-			gh(["api", "--method", "POST", `repos/${repo}/issues/comments/${commentId}/reactions`, "-f", "content=eyes"]);
-		} catch {
-			// A reaction is the nicety, not the acknowledgement.
-		}
-	}
 	try {
 		const existing = gh([
 			"pr",
@@ -106,7 +105,7 @@ function acknowledge(repo: string, pr: string, commentId?: number): void {
 			`[.comments[] | select(.body | contains("${COMMENT_MARKER}")) | .url] | last // ""`,
 		]);
 		// The comments API needs the numeric id, which the URL ends with.
-		const id = /#issuecomment-(\d+)$/.exec(existing)?.[1];
+		const id = /#issuecomment-(d+)$/.exec(existing)?.[1];
 		if (id === undefined) {
 			gh(["pr", "comment", pr, "--repo", repo, "--body", body]);
 			return;
@@ -116,6 +115,32 @@ function acknowledge(repo: string, pr: string, commentId?: number): void {
 		// A pull request we cannot comment on is still worth reviewing; the review
 		// itself will report what it could not post.
 	}
+}
+
+/** How often a review in flight says where it has got to, on the pull request. */
+const PROGRESS_MS = 120_000;
+
+/** Findings recorded by the review running now, for that progress line. */
+let findingsSoFar = 0;
+
+function acknowledge(repo: string, pr: string, started: string, commentId?: number): void {
+	// First, and on its own: it lands in the moment rather than after the two
+	// round trips below, and a pull request we cannot edit a comment on is
+	// usually still one we can react on.
+	if (commentId !== undefined) {
+		try {
+			execFileSync(
+				"gh",
+				["api", "--method", "POST", `repos/${repo}/issues/comments/${commentId}/reactions`, "-f", "content=eyes"],
+				{
+					stdio: "ignore",
+				},
+			);
+		} catch {
+			// A reaction is the nicety, not the acknowledgement.
+		}
+	}
+	writeReviewComment(repo, pr, reviewingBody(started, 0, 0));
 }
 
 /**
@@ -388,6 +413,10 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 				});
 			}
 			const result = reviewTool(store, params);
+			// The child records findings through this tool, in this process, so a
+			// review that says nothing for twenty minutes can at least say how many
+			// it has found. A rejected one is not a finding and is not counted.
+			if (params.action === "add_finding" && result.error === undefined) findingsSoFar += 1;
 			return reply(result);
 		},
 	};
@@ -496,7 +525,18 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 		const startedAt = Date.now();
 		const model = reviewModel(settings, ctx);
 		// Before the review, not after it: the pull request should show it was heard.
-		acknowledge(next.repo, String(next.number), next.commentId);
+		const started = new Date().toISOString().replace("T", " ").slice(0, 16);
+		acknowledge(next.repo, String(next.number), started, next.commentId);
+		// Reading a large pull request takes tens of minutes, and the comment used
+		// to say the same thing for every one of them: whoever asked could not
+		// tell a review still going from one that had died. Unref'd, because a
+		// review in flight is not a reason for smolt to stay alive.
+		findingsSoFar = 0;
+		const progress = setInterval(() => {
+			const minutes = Math.round((Date.now() - startedAt) / 60_000);
+			writeReviewComment(next.repo, String(next.number), reviewingBody(started, minutes, findingsSoFar));
+		}, PROGRESS_MS);
+		progress.unref();
 		// On disk before the work starts, so a review interrupted by a closed
 		// smolt, a crash, or a failure is picked up the next time watching runs.
 		const owed = markReviewPending(next.repo, next.number);
@@ -512,6 +552,7 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 					...(model ? { model } : {}),
 				},
 				(status, detail) => {
+					clearInterval(progress);
 					reviewingPullRequest = false;
 					// A finished review is no longer owed. A failed one stays owed
 					// until it has had its attempts, and is retried at the next start
@@ -532,6 +573,7 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 				},
 			);
 		} catch (error) {
+			clearInterval(progress);
 			reviewingPullRequest = false;
 			say(
 				`Could not start the review of #${next.number}: ${error instanceof Error ? error.message : error}`,
@@ -898,7 +940,8 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 			// people watching that pull request see the review coming.
 			const pr = pullRequestNumber(trimmed);
 			const repo = currentRepo();
-			if (pr !== undefined && repo !== undefined) acknowledge(repo, pr);
+			if (pr !== undefined && repo !== undefined)
+				acknowledge(repo, pr, new Date().toISOString().replace("T", " ").slice(0, 16));
 			reviewing = Date.now();
 			smolt.sendUserMessage(reviewPrompt(trimmed, settings), { deliverAs: "followUp" });
 		},

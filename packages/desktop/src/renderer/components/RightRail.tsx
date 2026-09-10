@@ -3,6 +3,7 @@ import { cn } from "../lib/cn.ts";
 import { formatCost, parentHint, shortTokens } from "../lib/format.ts";
 import { storedPreference, storePreference } from "../lib/prefs.ts";
 import { PANE_COLLAPSE_ZONE, ResizeHandle } from "./ResizeHandle.tsx";
+import { TurnSpinner } from "./Transcript.tsx";
 import {
 	app,
 	bump,
@@ -279,7 +280,14 @@ function DiffPane() {
 				</div>
 			)}
 			<div ref={scrollRef} className="flex-1 overflow-y-auto pt-1.5 pb-4">
-				{state.diffFiles.length === 0 ? (
+				{state.diffLoading && state.diffFiles.length === 0 ? (
+					// A large working tree takes a moment to read. Saying nothing
+					// changed until it lands is worse than saying it is being read.
+					<div className="flex items-center gap-2 px-4 py-3 text-sm text-faint">
+						<TurnSpinner size={14} />
+						Reading the changes…
+					</div>
+				) : state.diffFiles.length === 0 ? (
 					<p className="px-4 py-3 text-sm leading-normal text-faint">
 						{state.diffUnavailable !== ""
 							? state.diffUnavailable

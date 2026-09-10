@@ -1,5 +1,5 @@
 import { api } from "../lib/api.ts";
-import { app, bump, toast } from "./app.ts";
+import { app, appendToChatDraft, bump, toast } from "./app.ts";
 import { collapseRepeats, isRunaway, isStockAnswer, renderRun, shouldCutSegment } from "./voice-core.ts";
 
 /**
@@ -190,15 +190,27 @@ async function decodeSegment(clip: Float32Array): Promise<void> {
 	// invention it is rather than typing it at the user.
 	if (isStockAnswer(text, settled)) return;
 	if (text === "") return;
+	// Words go to the chat that was being dictated into, not to whichever chat
+	// is on screen when the decode lands. Switching chats mid-sentence used to
+	// type the rest of it into the chat just opened.
+	settled.push(text);
+	if (dictatedInto !== "" && dictatedInto !== app.currentSessionPath) {
+		appendToChatDraft(dictatedInto, text);
+		return;
+	}
 	// Append at the end of whatever the composer holds, replacing trailing
 	// whitespace with the one separating space.
 	app.draft = renderRun(app.draft, "", text).draft;
-	settled.push(text);
 	bump();
 }
 
+/** The chat dictation is being typed into: fixed when the sitting starts. */
+let dictatedInto = "";
+
 export async function startVoice(): Promise<void> {
 	if (voice) return;
+	// Whichever chat is open now owns every word of this sitting.
+	dictatedInto = app.currentSessionPath;
 	// A fresh sitting starts with a clean slate: the last attempt's failure
 	// must not keep staining the button once the user tries again. Segments
 	// still coming back from the last sitting keep theirs, since what has

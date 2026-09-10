@@ -67,6 +67,8 @@ export interface SmoltApi {
 	pickFolder(): Promise<{ ok: boolean; value?: unknown; error?: string }>;
 	openProject(path: string): Promise<{ ok: boolean; value?: unknown; error?: string }>;
 	recentProjects(): Promise<string[]>;
+	/** Project files matching what was typed after an "@" in the composer. */
+	projectFiles(query: string): Promise<string[]>;
 	repoUrl(dir?: string): Promise<string | undefined>;
 	closeProject(): Promise<{ ok: boolean; error?: string }>;
 	folders(): Promise<string[]>;
@@ -162,6 +164,10 @@ export interface SessionRow {
 	messageCount: number;
 	/** The folder the chat ran in, so opening it can follow it there. */
 	cwd: string;
+	/** The chat's own model, as "provider/id", so opening it paints at once. */
+	model?: string;
+	/** The chat's own thinking level, painted with the model. */
+	thinking?: string;
 	/** True while this session's agent is still working in the background. */
 	busy?: boolean;
 	/** This is the chat the dedicated Telegram host writes into. */

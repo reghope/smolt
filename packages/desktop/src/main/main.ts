@@ -31,6 +31,7 @@ import {
 import { transformersEntry } from "./embeddings-module.ts";
 import { refreshIconCacheAfterUpdate } from "./icon-cache.ts";
 import { fetchLinkPreview } from "./link-preview.ts";
+import { searchProjectFiles } from "./project-files.ts";
 import { listSessions, searchSessions, sessionCwd } from "./sessions.ts";
 import { chooseSlotForSession, type SlotChoice } from "./slots.ts";
 import { ensureModel, isModelCached, speechStatus, stopSpeech, transcribeSamples } from "./speech.ts";
@@ -1484,6 +1485,11 @@ app.whenReady().then(async () => {
 			telegram: telegramPath !== "" && row.path === telegramPath,
 		}));
 	});
+	// What "@" offers in the composer: files of the folder the chat is in.
+	ipcMain.handle(
+		"app:project-files",
+		async (_e, query?: string) => await searchProjectFiles(activeCwd, typeof query === "string" ? query : ""),
+	);
 	ipcMain.handle("app:info", () => ({
 		cwd: activeCwd,
 		hasProject: projectFolders.length > 0,

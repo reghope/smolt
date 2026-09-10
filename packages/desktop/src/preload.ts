@@ -33,6 +33,7 @@ contextBridge.exposeInMainWorld("smolt", {
 	openProject: (path: string): Promise<AgentCallResult> => ipcRenderer.invoke("app:open-project", path),
 	pickFolder: (): Promise<AgentCallResult> => ipcRenderer.invoke("app:pick-folder"),
 	recentProjects: (): Promise<string[]> => ipcRenderer.invoke("app:recent-projects"),
+	projectFiles: (query: string): Promise<string[]> => ipcRenderer.invoke("app:project-files", query),
 	repoUrl: (dir?: string): Promise<string | undefined> => ipcRenderer.invoke("app:repo-url", dir),
 	closeProject: (): Promise<AgentCallResult> => ipcRenderer.invoke("app:close-project"),
 	folders: (): Promise<string[]> => ipcRenderer.invoke("app:folders"),

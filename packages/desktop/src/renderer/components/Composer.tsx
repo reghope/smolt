@@ -1385,6 +1385,47 @@ export function Composer() {
 		inputRef.current?.focus();
 	};
 
+	// Where the caret is, so an "@" typed in the middle of a sentence offers
+	// files too. Read off the textarea rather than guessed from the draft.
+	const [caret, setCaret] = useState(0);
+	const readCaret = (): void => setCaret(inputRef.current?.selectionStart ?? 0);
+
+	// "@" mentions a file. The token runs from an "@" at the start of the draft
+	// or after a space, up to the caret: "@src/mai" is a query, an email address
+	// in the middle of a word is not.
+	const mentionMatch = /(?:^|\s)@([^\s]*)$/.exec(state.draft.slice(0, caret));
+	const mentionQuery = mentionMatch ? (mentionMatch[1] ?? "") : null;
+	const [mentionFiles, setMentionFiles] = useState<string[]>([]);
+	useEffect(() => {
+		if (mentionQuery === null) {
+			setMentionFiles([]);
+			return;
+		}
+		let live = true;
+		void api.projectFiles(mentionQuery).then((files) => {
+			if (live) setMentionFiles(files);
+		});
+		return () => {
+			live = false;
+		};
+	}, [mentionQuery]);
+
+	/** Put a chosen path in the draft in place of the "@…" being typed. */
+	const insertMention = (path: string): void => {
+		const before = state.draft.slice(0, caret);
+		const start = before.lastIndexOf("@");
+		if (start === -1) return;
+		const replaced = `${before.slice(0, start)}@${path} `;
+		app.draft = replaced + state.draft.slice(caret);
+		bump();
+		const input = inputRef.current;
+		input?.focus();
+		requestAnimationFrame(() => {
+			input?.setSelectionRange(replaced.length, replaced.length);
+			setCaret(replaced.length);
+		});
+	};
+
 	// A leading "/" opens the palette; "/resume …" keeps it open across spaces
 	// so past conversations can be searched and continued from right here.
 	const paletteMatch = /^\/(\S*)$/.exec(state.draft) ?? /^\/(resume\s+.*)$/i.exec(state.draft);
@@ -1395,7 +1436,7 @@ export function Composer() {
 		// any dismissal is forgotten.
 		setPaletteIndex(0);
 		setPaletteHidden(false);
-	}, [paletteQuery]);
+	}, [paletteQuery, mentionQuery]);
 
 	// An outside click dismisses the palette: it is a suggestion popup, not
 	// a panel that holds its ground against the rest of the app. Clicking
@@ -1486,7 +1527,17 @@ export function Composer() {
 			},
 		}));
 
-	const paletteItems: PaletteItem[] = counted((() => {
+	// Files first: an "@" being typed is a file question, whatever else the
+	// draft holds. Each row inserts its path and leaves the draft to be sent.
+	const mentionItems: PaletteItem[] = mentionFiles.map((path) => ({
+		title: path.slice(path.lastIndexOf("/") + 1),
+		plain: true,
+		description: path,
+		kind: "insert" as const,
+		run: () => insertMention(path),
+	}));
+
+	const paletteItems: PaletteItem[] = mentionQuery !== null ? mentionItems : counted((() => {
 		if (paletteQuery === null) return [];
 		const query = paletteQuery.toLowerCase();
 		// "/resume …" turns the palette into the chat history, ready to continue.
@@ -1623,7 +1674,7 @@ export function Composer() {
 								? state.enterSendsQueued
 									? "Queue a message for when it finishes…"
 									: "Send a message to the running turn…"
-								: "Type / for commands"
+								: "Type / for commands, @ for files"
 						}
 						className={cn(
 							"relative max-h-60 min-h-[26px] w-full resize-none bg-transparent px-0.5 pb-1 text-sm leading-relaxed [scrollbar-gutter:stable] outline-none placeholder:text-faint",
@@ -1633,9 +1684,16 @@ export function Composer() {
 						// rather than for focus, because clicking empty space to dismiss the
 						// palette also refocuses the composer (App focuses it terminal-style)
 						// — on focus, every dismissal would undo itself a tick later.
-						onPointerDown={() => setPaletteHidden(false)}
+						onPointerDown={() => {
+							setPaletteHidden(false);
+							requestAnimationFrame(readCaret);
+						}}
+						// Every caret move can start or end an "@" token, so the file
+						// list follows the cursor as well as the text.
+						onSelect={readCaret}
 						onChange={(event) => {
 							app.draft = event.target.value;
+							setCaret(event.target.selectionStart ?? event.target.value.length);
 							setHistoryIndex(-1);
 							// Editing the draft is what the palette listens to; a change
 							// also revokes a dismissal, since the query moved on.
@@ -1647,8 +1705,11 @@ export function Composer() {
 						onKeyDown={(event) => {
 							const input = event.currentTarget;
 							// With the palette open, a bare digit picks that entry.
+							// Not while a file is being named: a digit there belongs to the
+							// path being typed.
 							if (
 								paletteItems.length > 0 &&
+								mentionQuery === null &&
 								/^[1-9]$/.test(event.key) &&
 								!event.ctrlKey &&
 								!event.metaKey &&

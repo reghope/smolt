@@ -278,6 +278,8 @@ interface AppState {
 	backgroundSpend: BackgroundSpend[];
 	providerUsage: ProviderUsageSnapshot | null;
 	diffFiles: DiffFile[];
+	/** A read of the diff is in flight and the pane has nothing to show yet. */
+	diffLoading: boolean;
 	preexistingChanges: number;
 	/** Files, lines added and lines removed across the whole branch: the bar's figures. */
 	diffChanged: number;
@@ -434,6 +436,7 @@ export const app: AppState = {
 	backgroundSpend: [],
 	providerUsage: null,
 	diffFiles: [],
+	diffLoading: false,
 	preexistingChanges: 0,
 	diffChanged: 0,
 	diffAdded: 0,
@@ -660,6 +663,22 @@ function rememberDraft(): void {
 /** The words this chat was left with, if any. */
 function draftFor(path: string): string {
 	return drafts.get(path) ?? "";
+}
+
+/**
+ * Add words to a chat that is not on screen.
+ *
+ * Dictation belongs to the chat it was started in. A sitting that is still
+ * decoding when the reader opens another chat finishes into the chat it came
+ * from, rather than typing the rest of the sentence at whatever is in front
+ * of them.
+ */
+export function appendToChatDraft(path: string, text: string): void {
+	if (path === "" || text === "") return;
+	const current = drafts.get(path) ?? "";
+	const joined = current.replace(/\s+$/, "");
+	drafts.set(path, `${joined === "" ? "" : `${joined} `}${text}`.slice(0, DRAFT_MAX_CHARS));
+	scheduleDraftFlush();
 }
 
 /** This chat is gone, and so are the words that were waiting in it. */
@@ -1448,9 +1467,19 @@ export async function refreshDiff(): Promise<void> {
 
 /** The pane's list, with bodies: read only while the pane is open. */
 async function refreshDiffFiles(): Promise<void> {
+	// Only while there is nothing to show. A refresh over a list already on
+	// screen leaves it there: replacing a read diff with a spinner every time
+	// the agent touches a file would be the pane flickering, not loading.
+	const blank = app.diffFiles.length === 0;
+	if (blank) {
+		app.diffLoading = true;
+		bump();
+	}
 	const result = await api.diff();
+	app.diffLoading = false;
 	if (!result.ok) {
 		reportAgentError(result.error ?? "Could not read the working tree");
+		bump();
 		return;
 	}
 	const { files, unlisted, preexisting } = (result.value ?? {}) as {
@@ -2075,7 +2104,13 @@ async function runSwitch(path: string, options: { follow?: boolean }): Promise<v
 	// for a chat in the same folder made the changes bar and the repo line drop
 	// out and come back a second later, shoving the composer and the pane about
 	// for no gain. Only a move to another project clears them.
-	const targetCwd = app.sessionRows.find((row) => row.path === path)?.cwd ?? "";
+	// The chat's own model and effort, from its stored records, in this frame.
+	// They used to arrive with the agent's state, seconds later, so the composer
+	// sat showing the model of the chat just left.
+	const targetRow = app.sessionRows.find((row) => row.path === path);
+	if (targetRow?.model) app.model = targetRow.model;
+	if (targetRow?.thinking) app.thinking = targetRow.thinking;
+	const targetCwd = targetRow?.cwd ?? "";
 	if (targetCwd !== "" && targetCwd !== app.appInfo.cwd) {
 		app.diffFiles = [];
 		app.diffChanged = 0;
@@ -2851,9 +2886,16 @@ export async function rewindToUserMessage(userIndex: number, currentText: string
 	}
 	const result = await call<{ text: string; cancelled: boolean }>("fork", target.entryId);
 	if (!result || result.cancelled) return;
-	app.draft = result.text || currentText;
+	const text = result.text || currentText;
+	// The fork is a new session file, and the agent announces the move. That
+	// announcement re-opens the chat and fills the composer from what that path
+	// had waiting, which is nothing — so a draft put in the box before the
+	// switch settled was wiped, and the message being edited never appeared.
+	// Set it after the move, where it is also filed against the new chat.
 	await refreshState();
 	await loadMessages();
+	app.draft = text;
+	bumpDraft();
 	document.querySelector<HTMLTextAreaElement>("textarea")?.focus();
 }
 
@@ -3063,6 +3105,8 @@ export function boot(): void {
 			widgetDetails?: unknown;
 			message?: string;
 			notifyType?: string;
+			/** The chat's new name, on session_info_changed. */
+			name?: string;
 		};
 		// A dialog holds its agent's turn open until it is answered, so it shows
 		// whichever chat is on screen; dropping one for coming from another slot

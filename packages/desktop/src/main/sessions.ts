@@ -13,6 +13,19 @@ export interface SessionSummary {
 	messageCount: number;
 	/** The working directory the chat ran in, from its own opening record. */
 	cwd: string;
+	/**
+	 * What the chat was last set to, as "provider/id", and its thinking level.
+	 *
+	 * Read from the chat's own records so opening one paints its model at once.
+	 * Asking the agent instead meant the composer showed the previous chat's
+	 * model for the seconds the switch took, which reads as the wrong chat.
+	 */
+	model: string;
+	thinking: string;
+	/** The chat this one continues from, when it was forked or resumed out of another. */
+	parent: string;
+	/** When the chat was opened, from its own first record. */
+	created: number;
 }
 
 export function sessionsDir(): string {
@@ -103,7 +116,19 @@ function listSessionsIn(root: string, limit: number): SessionSummary[] {
 		const summary = summarize(file.path, file.mtime);
 		if (summary && folderExists(summary.cwd)) out.push(summary);
 	}
-	return out;
+	// Editing a message forks the chat: a new transcript that continues an old
+	// one, listed beside it under the same title, which reads as a duplicate.
+	// The parent is hidden only when the fork truly replaced it — nothing was
+	// said in the parent after the fork was taken. A parent still being used is
+	// a conversation of its own and stays listed, however many forks came off
+	// it. Hidden or not, it stays on disk and search still finds it.
+	const superseded = new Set<string>();
+	for (const summary of out) {
+		if (summary.parent === "") continue;
+		const parent = out.find((candidate) => candidate.path === summary.parent);
+		if (parent && parent.lastActive <= summary.created) superseded.add(parent.path);
+	}
+	return superseded.size === 0 ? out : out.filter((summary) => !superseded.has(summary.path));
 }
 
 /**
@@ -142,6 +167,10 @@ function summarizeUncached(path: string, mtime: number): SessionSummary | undefi
 	let cwd = "";
 	let title = "";
 	let preview = "";
+	let model = "";
+	let thinking = "";
+	let parent = "";
+	let created = mtime;
 	let messageCount = 0;
 	for (const line of raw.split("\n")) {
 		if (line.trim() === "") continue;
@@ -150,6 +179,11 @@ function summarizeUncached(path: string, mtime: number): SessionSummary | undefi
 			id?: string;
 			cwd?: string;
 			name?: string;
+			timestamp?: string;
+			parentSession?: string;
+			provider?: string;
+			modelId?: string;
+			thinkingLevel?: string;
 			message?: { role?: string; content?: unknown };
 		};
 		try {
@@ -160,7 +194,13 @@ function summarizeUncached(path: string, mtime: number): SessionSummary | undefi
 		if (entry.type === "session") {
 			id = entry.id ?? "";
 			cwd = entry.cwd ?? "";
+			parent = entry.parentSession ?? "";
+			const opened = entry.timestamp ? Date.parse(entry.timestamp) : Number.NaN;
+			created = Number.isNaN(opened) ? mtime : opened;
 		} else if (entry.type === "session_info") title = entry.name || title;
+		else if (entry.type === "model_change") {
+			model = entry.provider && entry.modelId ? `${entry.provider}/${entry.modelId}` : model;
+		} else if (entry.type === "thinking_level_change") thinking = entry.thinkingLevel || thinking;
 		else if (entry.type === "message" && entry.message) {
 			const role = entry.message.role;
 			if (role === "user" || role === "assistant") {
@@ -178,6 +218,10 @@ function summarizeUncached(path: string, mtime: number): SessionSummary | undefi
 		preview,
 		lastActive: mtime,
 		messageCount,
+		model,
+		thinking,
+		parent,
+		created,
 	};
 }
 

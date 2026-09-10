@@ -41,7 +41,8 @@ todo.md
 plans/
 .smolt/hf-sessions/
 .smolt/hf-sessions-backup/
-.smolt/battletest/.scratch/
+.smolt/battletest/
+.smolt/wayfinder/
 collect.sh
 dist-npm/
 

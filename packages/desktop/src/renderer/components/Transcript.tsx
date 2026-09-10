@@ -4,6 +4,7 @@ import { api } from "../lib/api.ts";
 import { cn } from "../lib/cn.ts";
 import { EmptyChat } from "./EmptyChat.tsx";
 import { formatElapsed, formatTokens } from "../lib/format.ts";
+import { formatRate, ThroughputMeter } from "../lib/throughput.ts";
 import { renderMarkdown } from "../markdown.ts";
 import {
 	app,
@@ -11,15 +12,20 @@ import {
 	branchFromResponse,
 	type ExtensionWidget,
 	loadEarlier,
+	openLocalFile,
+	openSessionById,
 	rewindToUserMessage,
+	sessionExistsFor,
+	sessionTitleFor,
 	toast,
 	toggleShowThinking,
 } from "../state/app.ts";
 import { useApp } from "../state/useApp.ts";
-import type { ChatMessage, ToolBlock } from "../store.ts";
+import { type AdvisoryBlock, type ChatMessage, type ToolBlock, turnOutputTokens } from "../store.ts";
 import { thinkingSummary } from "../thinking.ts";
 import { Button } from "./ui/button.tsx";
 import { Icon } from "./ui/icon.tsx";
+import { Tip } from "./ui/tooltip.tsx";
 import { ImageCard, LinkPreviewCard, standaloneLinks } from "./MediaCards.tsx";
 
 /**
@@ -110,24 +116,34 @@ function toolGroupLabel(blocks: ToolBlock[], running: boolean): string {
  */
 export const openDisclosures = new Set<string>();
 
+/** The mirror image, for disclosures that start open: which ones the reader has shut. */
+export const closedDisclosures = new Set<string>();
+
 function Disclosure({
 	dkey,
 	className,
+	defaultOpen,
 	children,
 }: {
 	dkey: string;
+	defaultOpen?: boolean;
 	className?: string;
 	children: React.ReactNode;
 }) {
 	return (
 		<details
 			className={className}
-			open={openDisclosures.has(dkey)}
+			open={defaultOpen ? !closedDisclosures.has(dkey) : openDisclosures.has(dkey)}
 			data-key={dkey}
 			onToggle={(event) => {
 				const details = event.currentTarget;
-				if (details.open) openDisclosures.add(dkey);
-				else openDisclosures.delete(dkey);
+				if (details.open) {
+					openDisclosures.add(dkey);
+					closedDisclosures.delete(dkey);
+				} else {
+					openDisclosures.delete(dkey);
+					closedDisclosures.add(dkey);
+				}
 			}}
 		>
 			{children}
@@ -140,7 +156,7 @@ function ToolRow({ block, dkey }: { block: ToolBlock; dkey: string }) {
 	// While an extension tool runs, its live widget (the battletest tester
 	// roster, subagent threads) renders right under the call in the chat,
 	// the activity belongs to the tool row, not to a strip somewhere else.
-	const live = block.running ? app.extensionWidgets.get(block.name) : undefined;
+	const live = block.running ? app.extensionWidgets.get(app.attachedSlot ?? 0)?.get(block.name) : undefined;
 	return (
 		<>
 			<Disclosure dkey={dkey} className="group/tool mb-2 font-mono">
@@ -148,7 +164,7 @@ function ToolRow({ block, dkey }: { block: ToolBlock; dkey: string }) {
 				<span
 					className={cn(
 						"mr-2 flex-none text-xs",
-						state === "running" && "animate-pulse-soft text-salmon-text",
+						state === "running" && "animate-pulse-soft text-ok",
 						state === "error" && "text-destructive",
 						state === "done" && "text-ok",
 						state === "aborted" && "text-warn",
@@ -156,7 +172,16 @@ function ToolRow({ block, dkey }: { block: ToolBlock; dkey: string }) {
 				>
 					{state === "aborted" ? "⏹" : "⏺"}
 				</span>
-				<span className={cn("text-sm text-foreground", state === "error" && "text-destructive")}>{block.name}</span>
+				<span
+					className={cn(
+						"text-sm text-foreground",
+						state === "done" && "text-ok",
+						state === "error" && "text-destructive",
+						state === "aborted" && "text-warn",
+					)}
+				>
+					{block.name}
+				</span>
 				{state === "aborted" && <span className="mx-1.5 flex-none text-sm text-warn">stopped</span>}
 				<span className="overflow-hidden text-ellipsis whitespace-nowrap text-sm text-muted-foreground before:content-['('] after:content-[')']">
 					{summarizeArgs(block.args)}
@@ -241,7 +266,7 @@ function ToolLiveActivity({ widget }: { widget: ExtensionWidget }) {
 								<div className="mt-0.5 mb-1 ml-3 flex max-h-40 flex-col gap-0.5 overflow-y-auto border-l border-border pl-2">
 									{(open === "tickets" ? detail.tickets : detail.actions).map((item, i) => (
 										<span key={i} className="whitespace-pre-wrap break-words text-xs leading-relaxed text-faint">
-											{item}
+											<WidgetDetailItem item={item} />
 										</span>
 									))}
 								</div>
@@ -251,6 +276,64 @@ function ToolLiveActivity({ widget }: { widget: ExtensionWidget }) {
 				})}
 			</div>
 		</div>
+	);
+}
+
+/** Colour for a widget detail item's bracket token (severity or confidence). */
+const DETAIL_TOKEN_CLASS: Record<string, string> = {
+	// research confidences
+	confirmed: "text-ok",
+	likely: "text-warn",
+	unverified: "text-faint",
+	contradicted: "text-destructive",
+	// battletest severities
+	blocker: "text-destructive",
+	major: "text-warn",
+	minor: "text-muted-foreground",
+	polish: "text-faint",
+};
+
+/**
+ * One expanded roster item: `[confidence/kind] Title — [source](url)`.
+ * The bracket tokens are colour-coded and any markdown link in the tail
+ * becomes a real anchor; plain items render untouched.
+ */
+function WidgetDetailItem({ item }: { item: string }) {
+	const bracket = /^\[([\w-]+)\/([\w-]+)\]\s*/.exec(item);
+	const rest = bracket ? item.slice(bracket[0].length) : item;
+	// Split the tail on markdown links so `[text](url)` becomes an anchor.
+	const parts: React.ReactNode[] = [];
+	const linkPattern = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+	let cursor = 0;
+	for (const match of rest.matchAll(linkPattern)) {
+		if (match.index > cursor) parts.push(rest.slice(cursor, match.index));
+		parts.push(
+			<a
+				key={match.index}
+				href={match[2]}
+				target="_blank"
+				rel="noreferrer"
+				className="text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground"
+			>
+				{match[1]}
+			</a>,
+		);
+		cursor = match.index + match[0].length;
+	}
+	if (cursor < rest.length) parts.push(rest.slice(cursor));
+	return (
+		<>
+			{bracket && (
+				<span>
+					<span className="text-faint">[</span>
+					<span className={DETAIL_TOKEN_CLASS[bracket[1]!] ?? "text-muted-foreground"}>{bracket[1]}</span>
+					<span className="text-faint">/</span>
+					<span className="text-tint-text">{bracket[2]}</span>
+					<span className="text-faint">] </span>
+				</span>
+			)}
+			{parts}
+		</>
 	);
 }
 
@@ -384,9 +467,27 @@ function WidgetLine({
 	);
 }
 
+/**
+ * How a group is going, as one colour: green when every finished call
+ * succeeded, red when every one failed, amber for anything in between. A
+ * group whose first call is still running is plain text; after that it
+ * carries the colour of what has completed so far. Stopped calls count as neither, so a group the reader
+ * halted is judged on what actually ran.
+ */
+function groupOutcomeClass(blocks: ToolBlock[]): string | false {
+	// While calls are still running, the colour is the verdict so far: what
+	// has finished decides it, and only a group with nothing finished yet is
+	// plain text.
+	const settled = blocks.filter((block) => !block.aborted && !block.running);
+	if (settled.length === 0) return blocks.some((block) => block.running) ? "text-foreground" : "text-warn";
+	const failed = settled.filter((block) => block.isError).length;
+	if (failed === 0) return "text-ok";
+	if (failed === settled.length) return "text-destructive";
+	return "text-warn";
+}
+
 function ToolGroup({ blocks, scope, index }: { blocks: ToolBlock[]; scope: string; index: number }) {
 	const running = blocks.some((block) => block.running);
-	const failed = blocks.some((block) => block.isError);
 	// One call that has no sentence of its own would give a group whose label
 	// simply repeats the row beneath it, so it stands alone.
 	if (blocks.length === 1 && toolDescription(blocks[0]!) === "") {
@@ -394,12 +495,11 @@ function ToolGroup({ blocks, scope, index }: { blocks: ToolBlock[]; scope: strin
 	}
 	const dkey = `${scope}:group-${blocks[0]?.id ?? index}`;
 	return (
-		<Disclosure dkey={dkey} className="group/tg mb-2.5">
+		<Disclosure dkey={dkey} className="group/tg mb-2">
 			<summary
 				className={cn(
-					"flex cursor-pointer list-none select-none items-center gap-1.5 rounded-lg py-1 text-sm text-muted-foreground transition-colors hover:text-foreground group-open/tg:mb-1 group-open/tg:text-foreground [&::-webkit-details-marker]:hidden",
-					running && "text-salmon-text",
-					failed && "text-destructive",
+					"flex cursor-pointer list-none select-none items-center gap-1.5 rounded-lg py-1 text-sm transition-colors hover:text-foreground group-open/tg:mb-1 group-open/tg:text-foreground [&::-webkit-details-marker]:hidden",
+					groupOutcomeClass(blocks),
 				)}
 			>
 				<span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{toolGroupLabel(blocks, running)}</span>
@@ -434,6 +534,26 @@ const Markdown = memo(function Markdown({ text, className }: { text: string; cla
 	useEffect(() => {
 		const root = ref.current;
 		if (!root) return;
+		// A quoted session id reads as the chat it names once that name is
+		// known; the id itself moves to the tooltip. An id that matches
+		// nothing is not a chat, so the link is unwrapped back to plain text
+		// rather than staying clickable and failing on click.
+		for (const link of root.querySelectorAll<HTMLElement>("[data-session]:not([data-named])")) {
+			const id = link.dataset.session ?? "";
+			link.dataset.named = "";
+			void sessionExistsFor(id).then((exists) => {
+				if (!link.isConnected) return;
+				if (!exists) {
+					link.replaceWith(document.createTextNode(id));
+					return;
+				}
+				void sessionTitleFor(id).then((title) => {
+					if (!title || !link.isConnected) return;
+					link.textContent = title;
+					link.title = `Open this chat (${id})`;
+				});
+			});
+		}
 		for (const pre of root.querySelectorAll("pre")) {
 			if (pre.querySelector("[data-copy]")) continue;
 			const button = document.createElement("button");
@@ -452,6 +572,18 @@ const Markdown = memo(function Markdown({ text, className }: { text: string; cla
 			ref={ref}
 			className={cn("md prose-response text-sm leading-[1.7]", className)}
 			onClick={(event) => {
+				const link = (event.target as HTMLElement).closest<HTMLElement>("[data-session]");
+				if (link) {
+					event.preventDefault();
+					void openSessionById(link.dataset.session ?? "");
+					return;
+				}
+				const file = (event.target as HTMLElement).closest<HTMLElement>("[data-file]");
+				if (file) {
+					event.preventDefault();
+					void openLocalFile(file.dataset.file ?? "");
+					return;
+				}
 				const button = (event.target as HTMLElement).closest<HTMLElement>("[data-copy]");
 				if (!button) return;
 				const code = button.closest("pre")?.querySelector("code");
@@ -472,6 +604,63 @@ const Markdown = memo(function Markdown({ text, className }: { text: string; cla
 		/>
 	);
 });
+
+/**
+ * A failed turn, in the flow of the chat rather than over it.
+ *
+ * Deliberately not a toast: the error explains the silence where an answer
+ * should be, so it has to sit in that gap, survive a scroll, and still be
+ * there when the chat is reopened. Muted rather than alarming — most of
+ * these are a rate limit or a dropped connection, and the reader's next
+ * move is usually just to send again.
+ */
+/**
+ * A turn ended on purpose. Said quietly, in the transcript's own voice —
+ * upright weight so it is legible, italic so it is plainly not the agent
+ * speaking, and no box, because nothing went wrong.
+ */
+function StatusNotice({ text }: { text: string }) {
+	return <div className="mb-2 text-sm italic leading-relaxed break-words whitespace-pre-wrap">{text}</div>;
+}
+
+/**
+ * An advisor note, in the tool row's voice: dot, label, monospace body under
+ * a ⎿. It is the watcher speaking into the transcript, so it borrows the
+ * same mechanical register a tool call uses; the dot's color carries the
+ * severity, and the label names the caller so a roster of advisors reads
+ * as distinct voices.
+ */
+function AdvisoryRow({ block }: { block: AdvisoryBlock }) {
+	const tone =
+		block.severity === "blocker" ? "text-destructive" : block.severity === "concern" ? "text-warn" : "text-ok";
+	return (
+		<Disclosure dkey={`advisory:${block.text.slice(0, 64)}`} defaultOpen className="group/tool mb-2 font-mono">
+			<summary className="flex cursor-pointer list-none select-none items-baseline rounded-lg py-px pr-1 text-sm text-muted-foreground [&::-webkit-details-marker]:hidden">
+				<span className={cn("mr-2 flex-none text-xs", tone)}>⏺</span>
+				<span className="text-sm text-foreground">advisor</span>
+				{block.advisor && <span className="ml-1.5 text-sm text-muted-foreground">{block.advisor}</span>}
+				<span className={cn("ml-1.5 text-sm", tone)}>{block.severity}</span>
+				<span className="ml-1.5 flex items-center text-faint opacity-0 transition-opacity group-hover/tool:opacity-100 group-open/tool:opacity-100 group-open/tool:rotate-90">
+					<Icon name="chevron" />
+				</span>
+			</summary>
+			<div className="mt-1 ml-1 flex gap-2">
+				<span className="flex-none select-none text-sm text-faint">⎿</span>
+				<pre className="min-w-0 flex-1 max-h-56 overflow-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-faint">
+					{block.text}
+				</pre>
+			</div>
+		</Disclosure>
+	);
+}
+
+function ErrorNotice({ text }: { text: string }) {
+	return (
+		<div className="mb-2 overflow-hidden rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm leading-relaxed break-words whitespace-pre-wrap text-destructive">
+			{text}
+		</div>
+	);
+}
 
 function MessageBlocks({ message, scope }: { message: ChatMessage; scope: string }) {
 	const parts: React.ReactNode[] = [];
@@ -499,7 +688,7 @@ function MessageBlocks({ message, scope }: { message: ChatMessage; scope: string
 			// auto-thinking the level shifts per task, and "which effort
 			// produced this" is exactly what the reader wants to know.
 			parts.push(
-				<div key={`th${key++}`} className="mb-3 whitespace-pre-wrap text-sm italic leading-relaxed text-faint">
+				<div key={`th${key++}`} className="mb-2 whitespace-pre-wrap text-sm italic leading-relaxed text-faint">
 					{!thinkingLabeled && message.thinkingLevel !== undefined && message.thinkingLevel !== "" && (
 						<span className="mr-2 rounded border border-border px-1.5 py-px font-mono text-[11px] not-italic">
 							{message.thinkingLevel}
@@ -514,6 +703,21 @@ function MessageBlocks({ message, scope }: { message: ChatMessage; scope: string
 		if (block.kind === "image") {
 			flush();
 			parts.push(<ImageCard key={`i${key++}`} data={block.data} mimeType={block.mimeType} />);
+			continue;
+		}
+		if (block.kind === "error") {
+			flush();
+			parts.push(<ErrorNotice key={`e${key++}`} text={block.text} />);
+			continue;
+		}
+		if (block.kind === "notice") {
+			flush();
+			parts.push(<StatusNotice key={`n${key++}`} text={block.text} />);
+			continue;
+		}
+		if (block.kind === "advisory") {
+			flush();
+			parts.push(<AdvisoryRow key={`a${key++}`} block={block} />);
 			continue;
 		}
 		if (block.text.trim() === "") continue;
@@ -601,16 +805,42 @@ function currentActivity(message: ChatMessage | undefined): string {
  */
 function WorkingLine({ message, running }: { message: ChatMessage | undefined; running: boolean }) {
 	const [, setTick] = useState(0);
+	// The reasoning state is only interesting right after the click that changed
+	// it: shown permanently it is a label nobody reads, and it crowds the line.
+	// Counted rather than a boolean so a second click while the first is still
+	// showing restarts the window and replays the fade, instead of inheriting
+	// the older click's timer and vanishing early.
+	const [flash, setFlash] = useState(0);
+	// How fast the model is writing right now, read off the turn's running
+	// output count once a second. Measured the same way for every model, so a
+	// provider that only reports its tokens at the end still shows a live rate.
+	const meter = useRef(new ThroughputMeter());
+	const [rate, setRate] = useState<number | undefined>(undefined);
 	useEffect(() => {
 		if (!running) return;
-		const timer = setInterval(() => setTick((n) => n + 1), 1000);
+		meter.current.reset();
+		setRate(undefined);
+		const timer = setInterval(() => {
+			if (app.showThroughput) setRate(meter.current.sample(Date.now(), turnOutputTokens(app.chat)));
+			setTick((n) => n + 1);
+		}, 1000);
 		return () => clearInterval(timer);
 	}, [running]);
+	useEffect(() => {
+		if (flash === 0) return;
+		const timer = setTimeout(() => setFlash(0), 2000);
+		return () => clearTimeout(timer);
+	}, [flash]);
 	// Only while it is working. A finished turn has nothing to report: the
 	// answer is the answer, and its cost is on the home screen either way.
 	if (!running) return null;
 	const seconds = app.runStartedAt > 0 ? Math.floor((Date.now() - app.runStartedAt) / 1000) : 0;
-	const tokens = app.chat.usage ? app.chat.usage.input + app.chat.usage.output : 0;
+	// What THIS turn has spent, across every request it has made, not the chat
+	// to date: a working line reading "133.1k tokens" was the whole context
+	// window restated, the same number the ring already shows, and said nothing
+	// about the answer being written.
+	const turn = app.chat.usage;
+	const tokens = turn ? turn.input + turn.output : 0;
 	// Blocked on an approval is not "responding": a bash request once sat
 	// unanswered for six minutes while this line claimed the model was busy.
 	// Say who the turn is actually waiting on, and for how long.
@@ -620,17 +850,42 @@ function WorkingLine({ message, running }: { message: ChatMessage | undefined; r
 				Math.max(0, Math.floor((Date.now() - approval.createdAt) / 1000)),
 			)})`
 		: currentActivity(message);
-	const parts = [formatElapsed(seconds), ...(tokens > 0 ? [formatTokens(tokens)] : []), activity];
+	// The rate sits with the count it belongs to: "105.4k tokens (345 tps)".
+	// Nothing to say while the model is not writing — waiting on a tool, or on
+	// its first token — a "0 tps" there would read as a stall.
+	const tokenPart = tokens > 0 ? formatTokens(tokens) : "";
+	const ratePart = app.showThroughput && rate !== undefined && rate > 0 ? `(${formatRate(rate)})` : "";
+	const spend = [tokenPart, ratePart].filter((part) => part !== "").join(" ");
+	const parts = [formatElapsed(seconds), ...(spend !== "" ? [spend] : []), activity];
 	return (
+		<Tip label={app.showThinking ? "Hide the model's reasoning" : "Show the model's reasoning"}>
 		<button
 			type="button"
 			className="mt-2.5 flex w-full cursor-pointer items-center gap-2 rounded-md text-left font-mono text-sm text-faint transition-colors hover:text-muted-foreground"
-			title={app.showThinking ? "Hide the model's reasoning" : "Show the model's reasoning"}
-			onClick={() => toggleShowThinking()}
+			onClick={() => {
+				toggleShowThinking({ quiet: true });
+				setFlash((n) => n + 1);
+			}}
 		>
 			<TurnSpinner />
 			<span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{parts.join(" · ")}</span>
+			{/* What the click just did, said once and then gone. It sits directly
+			    after the running figures, in the same separator rhythm, so it reads
+			    as part of the line rather than as a second column. flex-none against
+			    the truncating figures beside it: in a narrow pane the elapsed/token
+			    text loses characters to the ellipsis and this stays whole, because a
+			    half-shown answer to "what did my click do" is no answer. */}
+			{flash > 0 ? (
+				<span
+					key={flash}
+					className="flex-none whitespace-nowrap animate-in fade-in-0"
+				>
+					<span className="pr-2 text-faint">·</span>
+					{app.showThinking ? "Showing thinking" : "Hiding thinking"}
+				</span>
+			) : null}
 		</button>
+		</Tip>
 	);
 }
 
@@ -639,13 +894,13 @@ function WorkingLine({ message, running }: { message: ChatMessage | undefined; r
  * sized to the context meter's ring so a turn in flight and the context it is
  * spending read as one family rather than two unrelated ornaments.
  */
-function TurnSpinner({ size = 16 }: { size?: number }) {
+export function TurnSpinner({ size = 16 }: { size?: number }) {
 	return (
 		<svg
 			width={size}
 			height={size}
 			viewBox="0 0 18 18"
-			className="flex-none animate-spin text-salmon [animation-duration:0.7s]"
+			className="flex-none animate-spin text-tint [animation-duration:0.7s]"
 			aria-hidden="true"
 		>
 			<circle cx="9" cy="9" r="6.5" fill="none" stroke="currentColor" strokeOpacity="0.25" strokeWidth="2" />
@@ -662,15 +917,16 @@ function TurnSpinner({ size = 16 }: { size?: number }) {
  */
 function ActionButton({ title, onClick, children }: { title: string; onClick: () => void; children: React.ReactNode }) {
 	return (
-		<button
-			type="button"
-			title={title}
-			aria-label={title}
-			onClick={onClick}
-			className="inline-flex size-[26px] items-center justify-center rounded-md text-faint transition-colors hover:bg-accent hover:text-foreground"
-		>
-			{children}
-		</button>
+		<Tip label={title}>
+			<button
+				type="button"
+				aria-label={title}
+				onClick={onClick}
+				className="inline-flex size-[26px] items-center justify-center rounded-md text-faint transition-colors hover:bg-accent hover:text-foreground"
+			>
+				{children}
+			</button>
+		</Tip>
 	);
 }
 
@@ -753,15 +1009,62 @@ function CopyAction({ text }: { text: string }) {
 	);
 }
 
-function ActionRow({ end, children }: { end?: boolean; children: React.ReactNode }) {
+/**
+ * How long ago a message was written, in the coarsest unit that still says
+ * something: a reader scanning back through a chat wants "20 minutes ago",
+ * not a clock time they have to subtract from.
+ */
+function agoLabel(at: number): string {
+	const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
+	if (seconds < 5) return "just now";
+	if (seconds < 60) return `${seconds} seconds ago`;
+	const minutes = Math.round(seconds / 60);
+	if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+	const hours = Math.round(minutes / 60);
+	if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+	const days = Math.round(hours / 24);
+	return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+/** The age of a message, re-read on a slow tick so it does not go stale on screen. */
+function TimeAgo({ at }: { at: number }) {
+	const [, tick] = useState(0);
+	useEffect(() => {
+		const timer = setInterval(() => tick((count) => count + 1), 30_000);
+		return () => clearInterval(timer);
+	}, []);
 	return (
+		<Tip label={new Date(at).toLocaleString()}>
+			<span className="text-xs text-faint">{agoLabel(at)}</span>
+		</Tip>
+	);
+}
+
+function ActionRow({ end, at, children }: { end?: boolean; at?: number; children: React.ReactNode }) {
+	// The button's 26px box holds a 14px glyph, so 6px of its own padding
+	// already sits between the glyph and the age; 4px of margin over the row's
+	// 2px gap is what makes the two read as separate things.
+	const age =
+		at === undefined ? null : (
+			<span className={cn("flex items-center text-xs text-faint", end ? "mr-1" : "ml-1")}>
+				<TimeAgo at={at} />
+			</span>
+		);
+	return (
+		// In flow, not floating: it renders once per turn, and an overlay in an
+		// 8px gap landed on top of whatever followed.
 		<div
 			className={cn(
 				"mt-1 flex items-center gap-0.5 opacity-0 transition-opacity duration-150 group-hover/row:opacity-100 focus-within:opacity-100",
 				end && "justify-end",
 			)}
 		>
+			{/* The age leads on the reader's own side, where their messages are
+			    aligned, and trails on the agent's: either way it reads outward
+			    from the message rather than off its edge. */}
+			{end && age}
 			{children}
+			{!end && age}
 		</div>
 	);
 }
@@ -784,9 +1087,11 @@ function messageProse(message: ChatMessage): string {
 type Segment =
 	| { kind: "user"; message: ChatMessage; index: number; userIndex: number }
 	| { kind: "system"; message: ChatMessage; index: number }
-	| { kind: "prose"; text: string; streaming: boolean; branchAfterUser?: number }
+	| { kind: "prose"; text: string; streaming: boolean; branchAfterUser?: number; at?: number; turnEnd?: boolean }
 	| { kind: "thinking"; text: string; level?: string }
 	| { kind: "picture"; data: string; mimeType: string }
+	| { kind: "failure"; text: string }
+	| { kind: "notice"; text: string }
 	| { kind: "tools"; blocks: ToolBlock[]; scope: string }
 	| { kind: "footer"; message: ChatMessage | undefined };
 
@@ -848,9 +1153,21 @@ function buildSegments(messages: ChatMessage[], running: boolean): Segment[] {
 				segments.push({ kind: "picture", data: block.data, mimeType: block.mimeType });
 				continue;
 			}
+			if (block.kind === "error") {
+				// After the tools, so it reads as the end of what the turn managed
+				// to do rather than as a note about the call that follows it.
+				flushTools();
+				segments.push({ kind: "failure", text: block.text });
+				continue;
+			}
+			if (block.kind === "notice") {
+				flushTools();
+				segments.push({ kind: "notice", text: block.text });
+				continue;
+			}
 			if (block.text.trim() === "") continue;
 			flushTools();
-			segments.push({ kind: "prose", text: block.text, streaming: message.streaming === true });
+			segments.push({ kind: "prose", text: block.text, streaming: message.streaming === true, at: message.at });
 			lastProse = segments.length - 1;
 		}
 		// A finished response's last prose carries the branch point: forking at
@@ -869,6 +1186,24 @@ function buildSegments(messages: ChatMessage[], running: boolean): Segment[] {
 	if (running && !segments.some((segment) => segment.kind === "footer")) {
 		segments.push({ kind: "footer", message: undefined });
 	}
+	// Everything between two user messages is one turn, and a turn carries a
+	// single row of controls on its closing block — a row under each message's
+	// last block gave a dozen of them down one answer.
+	let pending: Segment | undefined;
+	for (const segment of segments) {
+		if (segment.kind === "user") {
+			if (pending?.kind === "prose") pending.turnEnd = true;
+			pending = undefined;
+			continue;
+		}
+		if (segment.kind === "prose" && !segment.streaming) pending = segment;
+	}
+	// Not while the turn is still in flight: a row under the prose of a step
+	// that has already landed reads as the end of the answer, and the tools that
+	// follow it look like a second message. The working line is the test, since
+	// a message can still be streaming when the chat's own flag has cleared.
+	const inFlight = running || segments.some((segment) => segment.kind === "footer");
+	if (!inFlight && pending?.kind === "prose") pending.turnEnd = true;
 	return segments;
 }
 
@@ -876,6 +1211,9 @@ export function Transcript() {
 	const state = useApp();
 	const scroller = useRef<HTMLDivElement>(null);
 	const [awayFromEnd, setAwayFromEnd] = useState(false);
+	// Whether anything has scrolled up under the top edge, which is when the
+	// fade there has a job. Hidden at rest so the first line reads at full ink.
+	const [scrolledPastTop, setScrolledPastTop] = useState(false);
 	const stickRef = useRef(true);
 	/** Where we last parked the view, to tell our own jumps from the reader's. */
 	const parkedTop = useRef(0);
@@ -884,7 +1222,9 @@ export function Transcript() {
 	const heldCount = useRef(0);
 
 	// A chat opens at its newest message, whatever the last one was left at.
-	useEffect(() => {
+	// Layout, not passive: this has to be true before the pin below runs in the
+	// same commit, or a chat left scrolled up paints the new one unpinned.
+	useLayoutEffect(() => {
 		stickRef.current = true;
 		anchor.current = null;
 	}, [state.currentSessionPath]);
@@ -908,9 +1248,14 @@ export function Transcript() {
 	});
 
 	// Stick to the bottom while streaming, unless the reader scrolled away.
-	useEffect(() => {
+	// Before paint, not after: pinning in a passive effect showed the transcript
+	// at the top for a frame and then jumped it down on every chat switch.
+	useLayoutEffect(() => {
 		const node = scroller.current;
 		if (!node || !stickRef.current) return;
+		// Never pin the empty state: it reads top-down, and in a short window
+		// bottom-pinning scrolled the water band and greeting out of view.
+		if (state.chat.messages.length === 0) return;
 		node.scrollTop = node.scrollHeight;
 		parkedTop.current = node.scrollTop;
 	});
@@ -941,6 +1286,7 @@ export function Transcript() {
 		if (!movedUp && distance <= 8) stickRef.current = true;
 		parkedTop.current = node.scrollTop;
 		setAwayFromEnd(distance >= 120);
+		setScrolledPastTop(node.scrollTop > 4);
 		// Near the top with more above it: fetch the page before this one.
 		if (node.scrollTop < 240 && app.historyStart > 0 && !app.historyLoading) {
 			anchor.current = node.scrollHeight - node.scrollTop;
@@ -950,16 +1296,36 @@ export function Transcript() {
 
 	return (
 		<div className="relative min-h-0 flex-1">
+			{/* Text scrolling up under the titlebar dissolves into it rather than
+			    being sliced off at the pane's edge. Takes no clicks, so the scrollbar
+			    beneath it still works. */}
+			<div
+				aria-hidden
+				className={cn(
+					"pointer-events-none absolute inset-x-0 top-0 z-[1] h-10 bg-gradient-to-b from-background to-transparent transition-opacity duration-200",
+					scrolledPastTop ? "opacity-100" : "opacity-0",
+				)}
+			/>
+			{/* Switching chats: the one being left stays put under a veil with the
+			    turn spinner on it, and the new one takes its place when read. A
+			    pane that emptied and refilled read as the app losing its place. */}
+			{state.chatLoading && state.chat.messages.length > 0 && (
+				<div className="appear-delayed absolute inset-0 z-[2] flex items-center justify-center bg-background/55">
+					<TurnSpinner size={22} />
+				</div>
+			)}
 			<div ref={scroller} onScroll={onScroll} onWheel={onWheel} className="h-full overflow-y-auto">
 				<div className="mx-auto max-w-[740px] px-8 pt-6 pb-10">
-					{/* A chat being read in says so with the same spinner a turn uses,
-					    rather than flashing the empty state on its way to a transcript. */}
-					{state.chatLoading && (
-						<div className="flex h-[60vh] items-center justify-center">
+					{/* Nothing to veil yet: a chat being read in says so with the same
+					    spinner a turn uses, rather than flashing the empty state on its
+					    way to a transcript. The empty state itself only shows once a
+					    read has confirmed the chat has nothing in it. */}
+					{state.chatLoading && state.chat.messages.length === 0 && (
+						<div className="appear-delayed flex h-[60vh] items-center justify-center">
 							<TurnSpinner size={22} />
 						</div>
 					)}
-					{!state.chatLoading && state.chat.messages.length === 0 && <EmptyChat />}
+					{!state.chatLoading && state.chatEmpty && state.chat.messages.length === 0 && <EmptyChat />}
 					{state.historyLoading && (
 						<div className="mb-6 flex justify-center">
 							<TurnSpinner />
@@ -978,13 +1344,13 @@ export function Transcript() {
 						if (segment.kind === "user") {
 							const prose = messageProse(segment.message);
 							return (
-								<div key={`u${segment.index}`} className="group/row mt-7 mb-6 first:mt-0">
+								<div key={`u${segment.index}`} className="group/row mt-6 mb-1 first:mt-0">
 									<div className="flex justify-end">
 										<div className="max-w-[85%] rounded-xl bg-card px-4 py-3 text-sm leading-relaxed">
 											<MessageBlocks message={segment.message} scope={`main-${segment.index}`} />
 										</div>
 									</div>
-									<ActionRow end>
+									<ActionRow end at={segment.message.at}>
 										<ActionButton
 											title="Edit and resend from here"
 											onClick={() => void rewindToUserMessage(segment.userIndex, prose)}
@@ -1012,11 +1378,17 @@ export function Transcript() {
 						if (segment.kind === "picture") {
 							return <ImageCard key={`pic${position}`} data={segment.data} mimeType={segment.mimeType} />;
 						}
+						if (segment.kind === "failure") {
+							return <ErrorNotice key={`err${position}`} text={segment.text} />;
+						}
+						if (segment.kind === "notice") {
+							return <StatusNotice key={`note${position}`} text={segment.text} />;
+						}
 						if (segment.kind === "thinking") {
 							return (
 								<div
 									key={`th${position}`}
-									className="mb-4 whitespace-pre-wrap text-sm italic leading-relaxed text-faint"
+									className="mb-2 whitespace-pre-wrap text-sm italic leading-relaxed text-faint"
 								>
 									{segment.level !== undefined && (
 										<span className="mr-2 rounded border border-border px-1.5 py-px font-mono text-[11px] not-italic">
@@ -1028,12 +1400,14 @@ export function Transcript() {
 							);
 						}
 						return (
-							<div key={`p${position}`} className="group/row mb-4">
+							<div key={`p${position}`} className="group/row mb-2">
 								<Markdown text={segment.text} />
 								{!segment.streaming &&
 									standaloneLinks(segment.text).map((url) => <LinkPreviewCard key={url} url={url} />)}
-								{!segment.streaming && (
-									<ActionRow>
+								{/* One action row per turn, on its closing block, the way the
+								    reference app groups everything between two user messages. */}
+								{segment.turnEnd === true && (
+									<ActionRow at={segment.at}>
 										<CopyAction text={segment.text} />
 										{segment.branchAfterUser !== undefined && (
 											<ActionButton
@@ -1051,15 +1425,17 @@ export function Transcript() {
 				</div>
 			</div>
 			{awayFromEnd && (
+				<Tip label="Jump to latest">
 				<Button
 					variant="outline"
 					size="icon"
-					title="Jump to latest"
+					aria-label="Jump to latest"
 					className="absolute bottom-3 left-1/2 z-20 -translate-x-1/2 rounded-full bg-card shadow-lg"
 					onClick={() => scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" })}
 				>
 					<Icon name="scrollDown" />
 				</Button>
+				</Tip>
 			)}
 		</div>
 	);
@@ -1073,7 +1449,12 @@ export function toggleAllToolOutput(): void {
 		group.open = anyClosed;
 		const key = group.dataset.key;
 		if (!key) continue;
-		if (anyClosed) openDisclosures.add(key);
-		else openDisclosures.delete(key);
+		if (anyClosed) {
+			openDisclosures.add(key);
+			closedDisclosures.delete(key);
+		} else {
+			openDisclosures.delete(key);
+			closedDisclosures.add(key);
+		}
 	}
 }

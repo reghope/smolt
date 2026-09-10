@@ -1,6 +1,8 @@
 import { Dialog as DialogPrimitive } from "radix-ui";
 import type * as React from "react";
+import { useEffect } from "react";
 import { cn } from "../../lib/cn.ts";
+import { setDialogOpen } from "../../state/app.ts";
 import { Icon } from "./icon.tsx";
 
 const Dialog = DialogPrimitive.Root;
@@ -9,11 +11,17 @@ const DialogPortal = DialogPrimitive.Portal;
 const DialogClose = DialogPrimitive.Close;
 
 function DialogOverlay({ className, ...props }: React.ComponentProps<typeof DialogPrimitive.Overlay>) {
+	// While this backdrop is up, the native window-controls strip dims with it.
+	useEffect(() => {
+		setDialogOpen(true);
+		return () => setDialogOpen(false);
+	}, []);
+
 	return (
 		<DialogPrimitive.Overlay
 			data-slot="dialog-overlay"
 			className={cn(
-				"fixed inset-0 z-50 bg-black/40 backdrop-blur-xl data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0",
+				"fixed inset-0 z-50 bg-black/40 backdrop-blur-md data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=closed]:fade-out-0",
 				className,
 			)}
 			{...props}

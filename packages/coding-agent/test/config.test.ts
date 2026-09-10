@@ -166,9 +166,7 @@ describe("detectInstallMethod", () => {
 		);
 
 		expect(detectInstallMethod()).toBe("pnpm");
-		expect(getUpdateInstruction("smolt")).toBe(
-			"Run: pnpm install -g --ignore-scripts --config.minimumReleaseAge=0 smolt",
-		);
+		expect(getUpdateInstruction("smolt")).toBe("Run: pnpm install -g --config.minimumReleaseAge=0 smolt");
 	});
 
 	test("does not self-update unknown wrapper installs", () => {
@@ -189,8 +187,8 @@ describe("detectInstallMethod", () => {
 		expect(detectInstallMethod()).toBe("npm");
 		expect(command).toEqual({
 			command: "npm",
-			args: ["--prefix", prefix, "install", "-g", "--ignore-scripts", "--min-release-age=0", "smolt"],
-			display: `npm --prefix ${prefix} install -g --ignore-scripts --min-release-age=0 smolt`,
+			args: ["--prefix", prefix, "install", "-g", "--min-release-age=0", "smolt"],
+			display: `npm --prefix ${prefix} install -g --min-release-age=0 smolt`,
 		});
 	});
 
@@ -204,8 +202,8 @@ describe("detectInstallMethod", () => {
 
 		expect(command).toEqual({
 			command: "npm",
-			args: ["--prefix", prefix, "install", "-g", "--ignore-scripts", "--min-release-age=0", "smolt@1.2.3"],
-			display: `npm --prefix ${prefix} install -g --ignore-scripts --min-release-age=0 smolt@1.2.3`,
+			args: ["--prefix", prefix, "install", "-g", "--min-release-age=0", "smolt@1.2.3"],
+			display: `npm --prefix ${prefix} install -g --min-release-age=0 smolt@1.2.3`,
 		});
 	});
 
@@ -216,8 +214,8 @@ describe("detectInstallMethod", () => {
 
 		expect(command).toEqual({
 			command: "npm",
-			args: ["--prefix", prefix, "install", "-g", "--ignore-scripts", "--min-release-age=0", "@new-scope/smolt"],
-			display: `npm --prefix ${prefix} uninstall -g @mariozechner/smolt-coding-agent && npm --prefix ${prefix} install -g --ignore-scripts --min-release-age=0 @new-scope/smolt`,
+			args: ["--prefix", prefix, "install", "-g", "--min-release-age=0", "@new-scope/smolt"],
+			display: `npm --prefix ${prefix} uninstall -g @mariozechner/smolt-coding-agent && npm --prefix ${prefix} install -g --min-release-age=0 @new-scope/smolt`,
 			steps: [
 				{
 					command: "npm",
@@ -226,16 +224,8 @@ describe("detectInstallMethod", () => {
 				},
 				{
 					command: "npm",
-					args: [
-						"--prefix",
-						prefix,
-						"install",
-						"-g",
-						"--ignore-scripts",
-						"--min-release-age=0",
-						"@new-scope/smolt",
-					],
-					display: `npm --prefix ${prefix} install -g --ignore-scripts --min-release-age=0 @new-scope/smolt`,
+					args: ["--prefix", prefix, "install", "-g", "--min-release-age=0", "@new-scope/smolt"],
+					display: `npm --prefix ${prefix} install -g --min-release-age=0 @new-scope/smolt`,
 				},
 			],
 		});
@@ -248,8 +238,8 @@ describe("detectInstallMethod", () => {
 
 		expect(command).toEqual({
 			command: "npm",
-			args: ["--prefix", prefix, "install", "-g", "--ignore-scripts", "--min-release-age=0", "smolt"],
-			display: `npm --prefix ${prefix} install -g --ignore-scripts --min-release-age=0 smolt`,
+			args: ["--prefix", prefix, "install", "-g", "--min-release-age=0", "smolt"],
+			display: `npm --prefix ${prefix} install -g --min-release-age=0 smolt`,
 		});
 	});
 
@@ -258,15 +248,7 @@ describe("detectInstallMethod", () => {
 
 		const command = getSelfUpdateCommand("smolt", []);
 
-		expect(command?.args).toEqual([
-			"--prefix",
-			prefix,
-			"install",
-			"-g",
-			"--ignore-scripts",
-			"--min-release-age=0",
-			"smolt",
-		]);
+		expect(command?.args).toEqual(["--prefix", prefix, "install", "-g", "--min-release-age=0", "smolt"]);
 	});
 
 	test("quotes npm self-update display paths", () => {
@@ -274,7 +256,7 @@ describe("detectInstallMethod", () => {
 
 		const command = getSelfUpdateCommand("smolt");
 
-		expect(command?.display).toBe(`npm --prefix "${prefix}" install -g --ignore-scripts --min-release-age=0 smolt`);
+		expect(command?.display).toBe(`npm --prefix "${prefix}" install -g --min-release-age=0 smolt`);
 	});
 
 	test("does not infer Windows npm custom prefixes from package paths", () => {
@@ -283,7 +265,7 @@ describe("detectInstallMethod", () => {
 		setExecPath(`${packageDir}\\dist\\cli.js`);
 
 		expect(detectInstallMethod()).toBe("npm");
-		expect(getUpdateInstruction("smolt")).toBe("Run: npm install -g --ignore-scripts --min-release-age=0 smolt");
+		expect(getUpdateInstruction("smolt")).toBe("Run: npm install -g --min-release-age=0 smolt");
 	});
 
 	test("self-updates bun global installs from bun pm bin", () => {
@@ -294,8 +276,8 @@ describe("detectInstallMethod", () => {
 		expect(detectInstallMethod()).toBe("bun");
 		expect(command).toEqual({
 			command: "bun",
-			args: ["install", "-g", "--ignore-scripts", "--minimum-release-age=0", "smolt"],
-			display: "bun install -g --ignore-scripts --minimum-release-age=0 smolt",
+			args: ["install", "-g", "--minimum-release-age=0", "smolt"],
+			display: "bun install -g --minimum-release-age=0 smolt",
 		});
 	});
 
@@ -307,9 +289,9 @@ describe("detectInstallMethod", () => {
 		expect(detectInstallMethod()).toBe("pnpm");
 		expect(command).toEqual({
 			command: "pnpm",
-			args: ["install", "-g", "--ignore-scripts", "--config.minimumReleaseAge=0", "@new-scope/smolt"],
+			args: ["install", "-g", "--config.minimumReleaseAge=0", "@new-scope/smolt"],
 			display:
-				"pnpm remove -g @mariozechner/smolt-coding-agent && pnpm install -g --ignore-scripts --config.minimumReleaseAge=0 @new-scope/smolt",
+				"pnpm remove -g @mariozechner/smolt-coding-agent && pnpm install -g --config.minimumReleaseAge=0 @new-scope/smolt",
 			steps: [
 				{
 					command: "pnpm",
@@ -318,8 +300,8 @@ describe("detectInstallMethod", () => {
 				},
 				{
 					command: "pnpm",
-					args: ["install", "-g", "--ignore-scripts", "--config.minimumReleaseAge=0", "@new-scope/smolt"],
-					display: "pnpm install -g --ignore-scripts --config.minimumReleaseAge=0 @new-scope/smolt",
+					args: ["install", "-g", "--config.minimumReleaseAge=0", "@new-scope/smolt"],
+					display: "pnpm install -g --config.minimumReleaseAge=0 @new-scope/smolt",
 				},
 			],
 		});
@@ -363,8 +345,8 @@ describe("detectInstallMethod", () => {
 		expect(detectInstallMethod()).toBe("pnpm");
 		expect(command).toEqual({
 			command: "pnpm",
-			args: ["install", "-g", "--ignore-scripts", "--config.minimumReleaseAge=0", packageName],
-			display: `pnpm install -g --ignore-scripts --config.minimumReleaseAge=0 ${packageName}`,
+			args: ["install", "-g", "--config.minimumReleaseAge=0", packageName],
+			display: `pnpm install -g --config.minimumReleaseAge=0 ${packageName}`,
 		});
 	});
 
@@ -376,9 +358,8 @@ describe("detectInstallMethod", () => {
 		expect(detectInstallMethod()).toBe("yarn");
 		expect(command).toEqual({
 			command: "yarn",
-			args: ["global", "add", "--ignore-scripts", "@new-scope/smolt"],
-			display:
-				"yarn global remove @mariozechner/smolt-coding-agent && yarn global add --ignore-scripts @new-scope/smolt",
+			args: ["global", "add", "@new-scope/smolt"],
+			display: "yarn global remove @mariozechner/smolt-coding-agent && yarn global add @new-scope/smolt",
 			steps: [
 				{
 					command: "yarn",
@@ -387,8 +368,8 @@ describe("detectInstallMethod", () => {
 				},
 				{
 					command: "yarn",
-					args: ["global", "add", "--ignore-scripts", "@new-scope/smolt"],
-					display: "yarn global add --ignore-scripts @new-scope/smolt",
+					args: ["global", "add", "@new-scope/smolt"],
+					display: "yarn global add @new-scope/smolt",
 				},
 			],
 		});
@@ -402,9 +383,9 @@ describe("detectInstallMethod", () => {
 		expect(detectInstallMethod()).toBe("bun");
 		expect(command).toEqual({
 			command: "bun",
-			args: ["install", "-g", "--ignore-scripts", "--minimum-release-age=0", "@new-scope/smolt"],
+			args: ["install", "-g", "--minimum-release-age=0", "@new-scope/smolt"],
 			display:
-				"bun uninstall -g @mariozechner/smolt-coding-agent && bun install -g --ignore-scripts --minimum-release-age=0 @new-scope/smolt",
+				"bun uninstall -g @mariozechner/smolt-coding-agent && bun install -g --minimum-release-age=0 @new-scope/smolt",
 			steps: [
 				{
 					command: "bun",
@@ -413,8 +394,8 @@ describe("detectInstallMethod", () => {
 				},
 				{
 					command: "bun",
-					args: ["install", "-g", "--ignore-scripts", "--minimum-release-age=0", "@new-scope/smolt"],
-					display: "bun install -g --ignore-scripts --minimum-release-age=0 @new-scope/smolt",
+					args: ["install", "-g", "--minimum-release-age=0", "@new-scope/smolt"],
+					display: "bun install -g --minimum-release-age=0 @new-scope/smolt",
 				},
 			],
 		});

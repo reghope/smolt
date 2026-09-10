@@ -310,6 +310,63 @@ describe("a turn that settles mid-flight", () => {
 	});
 });
 
+describe("request context for the ring", () => {
+	test("tracks the newest request alone, cached context included, not the turn's running spend", () => {
+		const state = feed([
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant", content: [] } },
+			{
+				type: "message_update",
+				usage: { input: 100, output: 10, cacheRead: 20_000, cacheWrite: 0, cost: { total: 0.01 } },
+				assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x" },
+			},
+			{
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [],
+					usage: {
+						input: 100,
+						output: 12,
+						cacheRead: 20_000,
+						cacheWrite: 0,
+						totalTokens: 20_112,
+						cost: { total: 0.012 },
+					},
+				},
+			},
+			// A research wait banks five background sessions' spend into the turn.
+			{
+				type: "tool_execution_end",
+				toolCallId: "t1",
+				result: { content: [], usage: { input: 573_286, output: 29_743, cost: { total: 0.07 } } },
+			},
+			{ type: "message_start", message: { role: "assistant", content: [] } },
+			{
+				type: "message_update",
+				usage: { input: 700, output: 5, cacheRead: 21_000, cacheWrite: 0, cost: { total: 0.001 } },
+				assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "y" },
+			},
+		]);
+		// The turn's spend carries the researchers; the request figure does not.
+		expect(state.usage).toMatchObject({ input: 574_086, output: 29_760 });
+		expect(state.request).toEqual({ context: 21_705 });
+	});
+
+	test("a new turn starts with no request figure", () => {
+		const state = feed([
+			{ type: "agent_start" },
+			{
+				type: "message_update",
+				usage: { input: 100, output: 10, cost: { total: 0.01 } },
+				assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x" },
+			},
+			{ type: "agent_start" },
+		]);
+		expect(state.request).toBeNull();
+	});
+});
+
 describe("turn usage accounting", () => {
 	test("usage accumulates across a turn's requests instead of showing only the newest", () => {
 		const state = feed([
@@ -350,5 +407,102 @@ describe("turn usage accounting", () => {
 		]);
 		expect(state.usage).toBeNull();
 		expect(state.turnBase).toMatchObject({ input: 0, output: 0, cost: 0 });
+	});
+});
+
+describe("failed turns", () => {
+	// The real thing, from the session that prompted this: a provider refusing
+	// a request because the chat had accumulated more images than it accepts.
+	const IMAGE_CAP_ERROR =
+		'400: {"param":null,"type":"invalid_request_error","message":"Error from provider (Console Go): ' +
+		'Upstream request failed: [invalid_request_error] Too many images in request: 31 > 30"}';
+
+	test("an errored turn carries its reason instead of drawing nothing", () => {
+		const state = feed([
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant", content: [] } },
+			{
+				type: "message_end",
+				message: { role: "assistant", content: [], stopReason: "error", errorMessage: IMAGE_CAP_ERROR },
+			},
+		]);
+		expect(state.messages[0]!.blocks).toHaveLength(1);
+		expect(state.messages[0]!.blocks[0]).toMatchObject({
+			kind: "error",
+			text:
+				"API Error: 400 Error from provider (Console Go): Upstream request failed: " +
+				"[invalid_request_error] Too many images in request: 31 > 30",
+		});
+	});
+
+	test("an error survives a reload, where the message would otherwise be dropped", () => {
+		const mapped = fromAgentMessage({
+			role: "assistant",
+			content: [],
+			stopReason: "error",
+			errorMessage: IMAGE_CAP_ERROR,
+		});
+		expect(mapped?.blocks).toHaveLength(1);
+		expect(mapped?.blocks[0]).toMatchObject({ kind: "error" });
+	});
+
+	test("an error that is not JSON is shown exactly as it arrived", () => {
+		const mapped = fromAgentMessage({
+			role: "assistant",
+			content: [],
+			stopReason: "error",
+			errorMessage: "Connection to the API was lost",
+		});
+		expect(mapped?.blocks[0]).toMatchObject({ kind: "error", text: "API Error: Connection to the API was lost" });
+	});
+
+	test("an error with no message at all still says something", () => {
+		const mapped = fromAgentMessage({ role: "assistant", content: [], stopReason: "error" });
+		expect(mapped?.blocks[0]).toMatchObject({ kind: "error", text: "API Error: Unknown error" });
+	});
+
+	test("a stopped turn is marked, so aborting leaves a trace", () => {
+		const mapped = fromAgentMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "partial answer" }],
+			stopReason: "aborted",
+			errorMessage: "Request was aborted",
+		});
+		expect(mapped?.blocks).toHaveLength(2);
+		expect(mapped?.blocks[1]).toMatchObject({ kind: "notice", text: "Stopped." });
+	});
+
+	test("a real failure is still a failure", () => {
+		// Only a deliberate stop is softened; a provider error keeps its weight.
+		const mapped = fromAgentMessage({ role: "assistant", content: "", stopReason: "error", errorMessage: "boom" });
+		expect(mapped?.blocks[0]).toMatchObject({ kind: "error", text: "API Error: boom" });
+	});
+
+	test("a truncated turn says so", () => {
+		const mapped = fromAgentMessage({ role: "assistant", content: [], stopReason: "length" });
+		expect(mapped?.blocks[0]).toMatchObject({ kind: "error", text: "Response was truncated before completion." });
+	});
+
+	test("a turn that ended normally gains no error block", () => {
+		const mapped = fromAgentMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "done" }],
+			stopReason: "stop",
+		});
+		expect(mapped?.blocks).toHaveLength(1);
+		expect(mapped?.blocks[0]).toMatchObject({ kind: "text" });
+	});
+});
+
+describe("queued user message mid-turn", () => {
+	test("a steering message does not leave two messages streaming", () => {
+		const state = feed([
+			{ type: "agent_start" },
+			{ type: "message_start", message: { role: "assistant", content: [] } },
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "one" } },
+			{ type: "message_start", message: { role: "user", content: [{ type: "text", text: "also do this" }] } },
+			{ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "two" } },
+		]);
+		expect(state.messages.filter((message) => message.streaming === true)).toHaveLength(1);
 	});
 });

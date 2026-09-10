@@ -1,151 +1,51 @@
 /**
- * The pure half of dictation: which words a pass contributes, and how a
- * segment's audio is let go once it has become text.
+ * The pure half of dictation: how a finished transcription is appended to
+ * the draft, and how a bad answer from the model is recognised.
  *
  * Kept free of the audio graph and the app state so it can be tested
  * without a microphone.
  */
 
 /**
- * Words held back from the end of each pass.
+ * How much audio a segment holds before it is cut at the next pause.
  *
- * The last word or two of a clip are the ones still being spoken, and the
- * ones the next pass is most likely to change. Holding them back until
- * more audio has arrived is what keeps the committed text from churning.
+ * Long enough that cuts are rare and each decode has plenty of sentence
+ * around it to work from, short enough that words appear while the user is
+ * still talking and a stop has little left to wait for.
  */
-export const UNSETTLED_TAIL = 2;
+export const SEGMENT_SECONDS = 30;
+/**
+ * The length at which a segment is cut whether or not anyone has paused.
+ *
+ * Someone reading aloud may not leave a gap for minutes, and a segment that
+ * grew without bound would put back every limit segmenting removes. A cut
+ * here can land mid-word, costing that word its edges; at this length it
+ * happens only to speech with no pauses at all.
+ */
+export const SEGMENT_MAX_SECONDS = 75;
+/** Quiet for this long, and a segment that has grown enough is closed here. */
+export const CUT_AFTER_QUIET_SECONDS = 0.4;
 
 /**
- * Take from a pass only what it adds beyond the words already committed.
+ * Whether the segment being captured should be closed off and decoded.
  *
- * On a final pass everything counts, including the tail — the sentence is
- * over, so nothing more is coming to change it. Returns the fresh words;
- * the caller appends them to both its record and the composer.
+ * This is what lets a sitting run for hours: the audio in hand is handed
+ * over at every pause, so nothing accumulates — not memory, not the size of
+ * a message to the decoder, not the length of a single decode.
  */
-export function freshWords(settled: readonly string[], text: string, final: boolean): string[] {
-	const words = text.split(/\s+/).filter((word) => word !== "");
-	const usable = final ? words.length : Math.max(0, words.length - UNSETTLED_TAIL);
-	if (usable <= settled.length) return [];
-	return words.slice(settled.length, usable);
-}
-
-/**
- * The words a pass heard but has not settled: everything past the tail cut.
- *
- * `freshWords` holds these back because a later pass may rephrase them.
- * Holding them back from the *screen* too is what made dictation feel a
- * second and a half behind the voice, so they are returned separately and
- * shown as provisional text: the words appear the moment they are decoded
- * and are replaced wholesale by the next pass, while the settled text
- * behind them never moves.
- *
- * A final pass has no tail — the sentence is over, so every word settles.
- * Words the caller has already settled are never handed back, so a pass
- * that hears fewer words than the last cannot un-say them.
- */
-export function tailWords(settled: readonly string[], text: string, final: boolean): string[] {
-	if (final) return [];
-	const words = text.split(/\s+/).filter((word) => word !== "");
-	const unsettled = Math.max(0, words.length - UNSETTLED_TAIL);
-	return words.slice(Math.max(unsettled, settled.length));
-}
-
-/** A word stripped to its sound, for spotting the model stuttering. */
-function bareWord(word: string): string {
-	return word.toLowerCase().replace(/[^\p{L}\p{N}']/gu, "");
+export function shouldCutSegment(seconds: number, quietSeconds: number): boolean {
+	if (seconds >= SEGMENT_MAX_SECONDS) return true;
+	return seconds >= SEGMENT_SECONDS && quietSeconds >= CUT_AFTER_QUIET_SECONDS;
 }
 
 /**
- * Whether a pass's fresh words are just the last settled word again.
+ * Put dictated text at the end of the draft, replacing a previous run.
  *
- * Whisper handed trailing quiet does not stay quiet: it echoes the last
- * word it heard, once per pass, forever. A pass whose entire contribution
- * is the previous word repeated is that echo and is refused; a genuinely
- * repeated word still lands when its segment is committed whole, since
- * final passes never consult this.
- */
-export function isEcho(settled: readonly string[], fresh: readonly string[]): boolean {
-	if (fresh.length === 0 || settled.length === 0) return false;
-	const last = bareWord(settled[settled.length - 1]);
-	if (last === "") return false;
-	return fresh.every((word) => bareWord(word) === last);
-}
-
-/** The audio a segment still holds, in capture order. */
-export interface SampleBuffer {
-	samples: Float32Array[];
-	total: number;
-}
-
-/**
- * Drop the first `count` samples: the audio a finished pass has already
- * turned into text. What survives is whatever arrived while that pass was
- * in flight, so the next segment starts exactly where the last one ended
- * rather than losing or re-hearing anything.
- */
-export function dropSamples(buffer: SampleBuffer, count: number): void {
-	let remaining = Math.min(count, buffer.total);
-	buffer.total -= remaining;
-	while (remaining > 0 && buffer.samples.length > 0) {
-		const first = buffer.samples[0];
-		if (first.length <= remaining) {
-			remaining -= first.length;
-			buffer.samples.shift();
-		} else {
-			buffer.samples[0] = first.subarray(remaining);
-			remaining = 0;
-		}
-	}
-}
-
-/**
- * What a pass changes about the run of words already on screen or waiting.
- *
- * Whisper re-reads the whole segment each pass, so most passes simply carry
- * the run further; the interesting cases are the ones that revise it.
- */
-export type RunPlan =
-	/** The pass only carried the run further: add these to the back of the queue. */
-	| { kind: "append"; words: string[] }
-	/** It revised words not yet shown: swap the queue, the screen is untouched. */
-	| { kind: "requeue"; words: string[] }
-	/** It revised words already shown: the run has to be redrawn as a whole. */
-	| { kind: "rewrite"; words: string[] };
-
-/** Whether `words` opens with exactly `prefix`. */
-function opensWith(words: readonly string[], prefix: readonly string[]): boolean {
-	if (prefix.length > words.length) return false;
-	return prefix.every((word, index) => words[index] === word);
-}
-
-/**
- * Work out how a pass's words meet the ones already shown and queued.
- *
- * Words are revealed one at a time rather than in the clump a pass returns,
- * which means at any moment some of what the model has heard is still
- * waiting its turn. A pass that agrees with everything so far just adds to
- * the back of that queue. One that changes its mind about a word still
- * waiting costs nothing — it is swapped before anyone sees it. Only a pass
- * that contradicts what is already on screen forces a redraw, which is why
- * the three cases are kept apart.
- */
-export function planRun(shown: readonly string[], queued: readonly string[], target: readonly string[]): RunPlan {
-	const known = [...shown, ...queued];
-	if (opensWith(target, known)) return { kind: "append", words: target.slice(known.length) };
-	if (opensWith(target, shown)) return { kind: "requeue", words: target.slice(shown.length) };
-	return { kind: "rewrite", words: [...target] };
-}
-
-/**
- * Put the dictated run at the end of the draft, replacing the last one.
- *
- * The draft is otherwise appended to, never rebuilt: dictation holds no copy
- * of the text it has produced, so sending or editing mid-dictation just
- * works, and the next words land in whatever the composer holds at that
- * moment. The run is the one exception, and it is reclaimed only when the
- * draft still ends with exactly what was written. If the user has typed
- * since, or sent, `reclaimed` comes back false: those words are theirs, and
- * the caller starts a new run after them rather than eating them.
+ * The draft is otherwise appended to, never rebuilt. The run is the one
+ * exception, and it is reclaimed only when the draft still ends with exactly
+ * what was written. If the user has typed since, `reclaimed` comes back
+ * false: those words are theirs, and the caller starts a new run after them
+ * rather than eating them.
  */
 export function renderRun(
 	draft: string,
@@ -185,8 +85,8 @@ function capitaliseFirst(text: string): string {
  * ever heard over quiet — which is how a composer nobody was talking to
  * filled up with "You you Okay."
  *
- * These are the stock answers, kept lowercase and unpunctuated so a pass is
- * matched however the model dressed it up.
+ * These are the stock answers, kept lowercase and unpunctuated so an answer
+ * is matched however the model dressed it up.
  */
 const STOCK_ANSWERS_TO_QUIET = new Set([
 	"",
@@ -212,12 +112,11 @@ const STOCK_ANSWERS_TO_QUIET = new Set([
 ]);
 
 /**
- * Whether a whole pass is one of those stock answers.
+ * Whether a whole transcription is one of those stock answers.
  *
- * Only ever consulted for a segment that has settled nothing yet: mid
- * sentence these are ordinary words, and someone who answers a question
- * with "okay" must be heard. It is the segment that opens with one, out of
- * audio the microphone barely registered, that the model invented.
+ * Mid-text these are ordinary words, and someone who answers a question
+ * with "okay" must be heard. It is a whole sitting that decodes to one —
+ * out of audio the microphone barely registered — that the model invented.
  */
 export function isStockAnswer(text: string, settled: readonly string[]): boolean {
 	if (settled.length > 0) return false;
@@ -227,4 +126,68 @@ export function isStockAnswer(text: string, settled: readonly string[]): boolean
 		.replace(/\s+/g, " ")
 		.trim();
 	return STOCK_ANSWERS_TO_QUIET.has(bare);
+}
+
+/**
+ * A speech model on a bad clip can fall into a loop and answer with
+ * one word, or one short phrase, over and over. Nobody dictates a word
+ * three times running, so a run of three or more identical words, or of
+ * the same two-to-four-word phrase, collapses to a single copy. A genuine
+ * double ("no, no") is left alone.
+ */
+export function collapseRepeats(text: string): string {
+	const words = text.split(/\s+/).filter((word) => word !== "");
+	const same = (a: string, b: string): boolean =>
+		a.toLowerCase().replace(/[^\p{L}\p{N}']/gu, "") === b.toLowerCase().replace(/[^\p{L}\p{N}']/gu, "");
+	const out: string[] = [];
+	let i = 0;
+	while (i < words.length) {
+		let collapsed = false;
+		// Longest phrase first, so "a b a b a b" folds as a phrase rather
+		// than being left as alternating singles.
+		for (let size = 4; size >= 1; size -= 1) {
+			if (i + size > words.length) continue;
+			let repeats = 1;
+			while (i + (repeats + 1) * size <= words.length) {
+				let match = true;
+				for (let k = 0; k < size; k += 1) {
+					if (!same(words[i + k]!, words[i + repeats * size + k]!)) {
+						match = false;
+						break;
+					}
+				}
+				if (!match) break;
+				repeats += 1;
+			}
+			if (repeats >= 3) {
+				out.push(...words.slice(i, i + size));
+				i += repeats * size;
+				collapsed = true;
+				break;
+			}
+		}
+		if (!collapsed) {
+			out.push(words[i]!);
+			i += 1;
+		}
+	}
+	return out.join(" ");
+}
+
+/**
+ * Whether an answer is the loop itself rather than speech with a stammer in
+ * it: several words, most of them the same one. Such an answer says nothing
+ * about what was said and is dropped whole.
+ */
+export function isRunaway(text: string): boolean {
+	const words = text
+		.toLowerCase()
+		.split(/\s+/)
+		.map((word) => word.replace(/[^\p{L}\p{N}']/gu, ""))
+		.filter((word) => word !== "");
+	if (words.length < 6) return false;
+	const counts = new Map<string, number>();
+	for (const word of words) counts.set(word, (counts.get(word) ?? 0) + 1);
+	const top = Math.max(...counts.values());
+	return top / words.length >= 0.6;
 }

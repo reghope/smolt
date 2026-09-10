@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
 	BLOCKED_AUDIT_TURNS,
 	chargeTokens,
+	closeAccounting,
 	createGoal,
 	formatTokens,
 	type Goal,
@@ -100,6 +101,18 @@ describe("budget", () => {
 		expect(paused.ok).toBe(true);
 		if (!paused.ok) return;
 		expect(chargeTokens(paused.goal, 500).goal.tokensUsed).toBe(0);
+	});
+
+	test("a completed goal charges its finishing run, then closes", () => {
+		let goal = start();
+		const done = modelUpdate(goal, "complete");
+		if (!done.ok) throw new Error("unreachable");
+		goal = done.goal;
+		// The run that completed the goal is still going; its spend lands.
+		goal = chargeTokens(goal, 300).goal;
+		expect(goal.tokensUsed).toBe(300);
+		goal = closeAccounting(goal);
+		expect(chargeTokens(goal, 300).goal.tokensUsed).toBe(300);
 	});
 });
 

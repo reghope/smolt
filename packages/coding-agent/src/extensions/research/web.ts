@@ -67,7 +67,13 @@ export type FetchImpl = (
 	text(): Promise<string>;
 }>;
 
-export const DEFAULT_MAX_CHARS = 12_000;
+/**
+ * Default cap on a fetched or rendered page, in characters — about two
+ * thousand tokens. It was 12,000: a researcher reads a page, acts on it, and
+ * then carries it for several more turns, so every thousand characters here
+ * is paid many times over. A researcher that needs more passes max_chars.
+ */
+export const DEFAULT_MAX_CHARS = 8_000;
 const HARD_MAX_CHARS = 200_000;
 const TIMEOUT_MS = 25_000;
 

@@ -1,0 +1,226 @@
+import { EventEmitter } from "node:events";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const forwarder = vi.hoisted(() => ({ diesAtOnce: true, children: [] as EventEmitter[] }));
+
+vi.mock("node:child_process", () => ({
+	// Every `gh api` call fails, which is what a revoked admin right or an
+	// expired login looks like from here: ghJson swallows it and returns
+	// undefined, so no stale hook is found and none is deleted.
+	execFileSync: () => {
+		throw new Error("gh unavailable");
+	},
+	spawn: () => {
+		const child = new EventEmitter() as EventEmitter & {
+			stdout: EventEmitter;
+			stderr: EventEmitter;
+			kill: () => void;
+		};
+		child.stdout = new EventEmitter();
+		child.stderr = new EventEmitter();
+		child.kill = () => {};
+		forwarder.children.push(child);
+		// A forwarder that dies the moment it starts is the shape of a `gh webhook
+		// forward` that cannot authenticate, and is what the claim tests need.
+		// Emitted as a microtask so the exit listener registered just after the
+		// spawn call is there to hear it. A test that wants to speak through the
+		// forwarder keeps it alive instead.
+		if (forwarder.diesAtOnce) queueMicrotask(() => child.emit("exit"));
+		return child;
+	},
+}));
+
+const { watchClaimFile } = await import("../src/extensions/review/config.ts");
+const { watchAll } = await import("../src/extensions/review/watch.ts");
+type PullRequestEvent = import("../src/extensions/review/watch.ts").PullRequestEvent;
+
+const REPO = "owner/name";
+
+/** The pid recorded in the claim file, whoever wrote it. */
+function readClaimPid(): number | undefined {
+	if (!existsSync(watchClaimFile(REPO))) return undefined;
+	return JSON.parse(readFileSync(watchClaimFile(REPO), "utf-8")).pid;
+}
+
+/**
+ * A process that is genuinely running and is not this one.
+ *
+ * Spawned through the real child_process, not the mock above: the point of
+ * these two tests is what the liveness check says about a pid the operating
+ * system really has handed out, which a fake pid cannot exercise.
+ */
+async function liveForeignPid(): Promise<{ pid: number; kill: () => void }> {
+	const real = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+	const child = real.spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], { stdio: "ignore" });
+	if (child.pid === undefined) throw new Error("could not start a process to stand in for another session");
+	return { pid: child.pid, kill: () => child.kill() };
+}
+/**
+ * The claim file gives a repo's webhook one owner, because GitHub allows one
+ * forwarder hook per repository and installing a second silently destroys the
+ * first. Every other session stands down behind the claim, so a claim that
+ * outlives the watcher holding it locks the repo out of all of them.
+ */
+describe("review watcher claim", () => {
+	let agentDir: string;
+	let previousAgentDir: string | undefined;
+	let stop: (() => void) | undefined;
+
+	beforeEach(() => {
+		agentDir = mkdtempSync(join(tmpdir(), "smolt-review-watch-"));
+		previousAgentDir = process.env.SMOLT_CODING_AGENT_DIR;
+		process.env.SMOLT_CODING_AGENT_DIR = agentDir;
+		// Only the retry backoff is faked: the forwarder's exit arrives as a real
+		// microtask, and Date.now() has to keep moving for the settled-connection
+		// check to see these connections as the short-lived ones they are.
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		forwarder.diesAtOnce = true;
+		forwarder.children.length = 0;
+	});
+
+	afterEach(() => {
+		stop?.();
+		stop = undefined;
+		vi.useRealTimers();
+		if (previousAgentDir === undefined) delete process.env.SMOLT_CODING_AGENT_DIR;
+		else process.env.SMOLT_CODING_AGENT_DIR = previousAgentDir;
+		rmSync(agentDir, { recursive: true, force: true });
+	});
+
+	it("gives up the claim when it gives up watching", async () => {
+		const notices: string[] = [];
+		stop = watchAll(["owner/name"], {
+			review: () => {},
+			claimed: () => {},
+			notice: (message) => notices.push(message),
+		});
+		expect(existsSync(watchClaimFile("owner/name"))).toBe(true);
+
+		// Long enough for every attempt in the backoff (2s, 4s, 8s, 16s).
+		await vi.advanceTimersByTimeAsync(120_000);
+
+		expect(notices.some((notice) => notice.startsWith("Gave up watching owner/name"))).toBe(true);
+		// Without this, the claim named a live process that was no longer
+		// watching, and no other session could take the repo over until smolt
+		// itself was quit.
+		expect(existsSync(watchClaimFile("owner/name"))).toBe(false);
+	});
+
+	it("keeps the claim while it is still retrying", async () => {
+		const notices: string[] = [];
+		stop = watchAll(["owner/name"], {
+			review: () => {},
+			claimed: () => {},
+			notice: (message) => notices.push(message),
+		});
+
+		await vi.advanceTimersByTimeAsync(5_000);
+
+		expect(notices.some((notice) => notice.startsWith("Gave up watching"))).toBe(false);
+		expect(existsSync(watchClaimFile("owner/name"))).toBe(true);
+	});
+
+	it("takes over a claim whose owner stopped saying it was there", async () => {
+		// The shape that locked this repo out for a whole day: a smolt wrote the
+		// claim, died, and another program was handed its pid, so the liveness
+		// check kept answering yes for a process that had never watched anything.
+		const squatter = await liveForeignPid();
+		mkdirSync(dirname(watchClaimFile(REPO)), { recursive: true });
+		writeFileSync(watchClaimFile(REPO), JSON.stringify({ pid: squatter.pid, at: Date.now() - 10 * 60_000 }), "utf-8");
+
+		const notices: string[] = [];
+		const caughtUp: string[] = [];
+		stop = watchAll([REPO], {
+			review: () => {},
+			claimed: (repo) => caughtUp.push(repo),
+			notice: (message) => notices.push(message),
+		});
+
+		expect(readClaimPid()).toBe(process.pid);
+		expect(notices.some((notice) => notice.includes("on standby"))).toBe(false);
+		// Owning the repo is what says this session should catch up on it.
+		expect(caughtUp).toEqual([REPO]);
+		squatter.kill();
+	});
+
+	it("stands down behind a claim that is still being kept up", async () => {
+		const owner = await liveForeignPid();
+		mkdirSync(dirname(watchClaimFile(REPO)), { recursive: true });
+		writeFileSync(watchClaimFile(REPO), JSON.stringify({ pid: owner.pid, at: Date.now() }), "utf-8");
+
+		const notices: string[] = [];
+		const caughtUp: string[] = [];
+		stop = watchAll([REPO], {
+			review: () => {},
+			claimed: (repo) => caughtUp.push(repo),
+			notice: (message) => notices.push(message),
+		});
+
+		// Left alone: a fresh claim on a live pid is someone else's repo.
+		expect(readClaimPid()).toBe(owner.pid);
+		expect(notices.some((notice) => notice.includes("on standby"))).toBe(true);
+		// And so is the work owed on it. A session that stood down and caught up
+		// anyway reviewed the same pull request a second time, alongside the
+		// session that owned it, and spent its retries twice as fast.
+		expect(caughtUp).toEqual([]);
+		owner.kill();
+	});
+
+	it("answers on the comment that asked for the review", () => {
+		// What the forwarder prints for '@smolt review' on a pull request. The id
+		// matters: it is the only way back to the comment someone typed, and
+		// without it a request could only be acknowledged somewhere else on the
+		// page, which is how one looked ignored.
+		forwarder.diesAtOnce = false;
+		const seen: PullRequestEvent[] = [];
+		stop = watchAll([REPO], { review: (event) => seen.push(event), claimed: () => {}, notice: () => {} });
+
+		const child = forwarder.children[0] as EventEmitter & { stdout: EventEmitter };
+		child.stdout.emit(
+			"data",
+			Buffer.from(
+				`${JSON.stringify({
+					action: "created",
+					issue: { number: 11, title: "A pull request", pull_request: {} },
+					comment: { body: "@smolt review", id: 5622697706 },
+				})}
+`,
+			),
+		);
+
+		expect(seen).toEqual([{ number: 11, title: "A pull request", headSha: "", repo: REPO, commentId: 5622697706 }]);
+	});
+
+	it("ignores a comment that does not ask", () => {
+		forwarder.diesAtOnce = false;
+		const seen: PullRequestEvent[] = [];
+		stop = watchAll([REPO], { review: (event) => seen.push(event), claimed: () => {}, notice: () => {} });
+
+		const child = forwarder.children[0] as EventEmitter & { stdout: EventEmitter };
+		for (const body of ["looks good to me", "mail rob@smoltreview.example", "@smolt please review"]) {
+			child.stdout.emit(
+				"data",
+				Buffer.from(
+					`${JSON.stringify({
+						action: "created",
+						issue: { number: 11, title: "A pull request", pull_request: {} },
+						comment: { body, id: 1 },
+					})}
+`,
+				),
+			);
+		}
+
+		expect(seen).toEqual([]);
+	});
+
+	it("gives up the claim when watching is stopped by hand", async () => {
+		const stopWatching = watchAll(["owner/name"], { review: () => {}, claimed: () => {}, notice: () => {} });
+		expect(existsSync(watchClaimFile("owner/name"))).toBe(true);
+		stopWatching();
+		expect(existsSync(watchClaimFile("owner/name"))).toBe(false);
+	});
+});

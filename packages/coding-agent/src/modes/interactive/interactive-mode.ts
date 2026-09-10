@@ -100,6 +100,7 @@ import type { SourceInfo } from "../../core/source-info.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { getUsageCostBreakdown } from "../../core/usage-totals.ts";
+import { loadReviewSettings, saveReviewSettings } from "../../extensions/review/config.ts";
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
 import { spawnProcess } from "../../utils/child-process.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
@@ -178,6 +179,7 @@ import {
 	theme,
 } from "./theme/theme.ts";
 import { InteractiveThemeController } from "./theme/theme-controller.ts";
+import { estimateTokens, ThroughputMeter } from "./throughput.ts";
 
 /** Interface for components that can be expanded/collapsed */
 interface Expandable {
@@ -479,6 +481,8 @@ export class InteractiveMode {
 	// Streaming message tracking
 	private streamingComponent: AssistantMessageComponent | undefined = undefined;
 	private streamingMessage: AssistantMessage | undefined = undefined;
+	/** Measures how fast the model is writing, for the footer's tokens-per-second. */
+	private readonly throughputMeter = new ThroughputMeter();
 
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
@@ -2042,6 +2046,25 @@ export class InteractiveMode {
 		process.exit(1);
 	}
 
+	/**
+	 * Read the writing rate off the response in flight, for the footer.
+	 *
+	 * Counted from what has streamed in, since most providers only report their
+	 * own output tokens once the request is done; that count wins as soon as it
+	 * arrives and exceeds the estimate.
+	 */
+	private sampleThroughput(message: AssistantMessage): void {
+		if (!this.settingsManager.getShowThroughput()) return;
+		let chars = 0;
+		for (const content of message.content) {
+			if (content.type === "text") chars += content.text.length;
+			else if (content.type === "thinking") chars += content.thinking.length;
+			else if (content.type === "toolCall") chars += JSON.stringify(content.arguments).length;
+		}
+		const tokens = Math.max(estimateTokens(chars), message.usage.output);
+		this.footer.setThroughput(this.throughputMeter.sample(Date.now(), tokens));
+	}
+
 	private renderCurrentSessionState(): void {
 		this.loadedResourcesContainer.clear();
 		this.chatContainer.clear();
@@ -2432,6 +2455,7 @@ export class InteractiveMode {
 	private createExtensionUIContext(): ExtensionUIContext {
 		return {
 			select: (title, options, opts) => this.showExtensionSelector(title, options, opts),
+			multiselect: (title, options, selected, opts) => this.showExtensionMultiselect(title, options, selected, opts),
 			confirm: (title, message, opts) => this.showExtensionConfirm(title, message, opts),
 			input: (title, placeholder, opts) => this.showExtensionInput(title, placeholder, opts),
 			notify: (message, type) => this.showExtensionNotify(message, type),
@@ -2486,6 +2510,35 @@ export class InteractiveMode {
 	/**
 	 * Show a selector for extensions.
 	 */
+	/**
+	 * A checklist, built from the single-choice selector.
+	 *
+	 * The terminal selector answers on the first key, so ticking several things
+	 * means reopening it after each one. That reads fine in a terminal, where
+	 * the list simply redraws in place.
+	 */
+	private async showExtensionMultiselect(
+		title: string,
+		options: string[],
+		selected?: string[],
+		opts?: ExtensionUIDialogOptions,
+	): Promise<string[] | undefined> {
+		const chosen = new Set(selected ?? []);
+		for (;;) {
+			const done = `Done — ${chosen.size} selected`;
+			const pick = await this.showExtensionSelector(
+				title,
+				[done, ...options.map((option) => `${chosen.has(option) ? "[x] " : "[ ] "}${option}`)],
+				opts,
+			);
+			if (pick === undefined) return undefined;
+			if (pick === done) return [...chosen];
+			const option = pick.slice(4);
+			if (chosen.has(option)) chosen.delete(option);
+			else chosen.add(option);
+		}
+	}
+
 	private showExtensionSelector(
 		title: string,
 		options: string[],
@@ -3268,6 +3321,8 @@ export class InteractiveMode {
 					this.streamingMessage = event.message;
 					this.chatContainer.addChild(this.streamingComponent);
 					this.streamingComponent.updateContent(this.streamingMessage, true);
+					this.throughputMeter.reset();
+					this.footer.setThroughput(undefined);
 					this.ui.requestRender();
 				}
 				break;
@@ -3276,6 +3331,7 @@ export class InteractiveMode {
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
 					this.streamingComponent.updateContent(this.streamingMessage, true);
+					this.sampleThroughput(this.streamingMessage);
 
 					for (const content of this.streamingMessage.content) {
 						if (content.type === "toolCall") {
@@ -3309,6 +3365,7 @@ export class InteractiveMode {
 
 			case "message_end":
 				if (event.message.role === "user") break;
+				this.footer.setThroughput(undefined);
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
 					let errorMessage: string | undefined;
@@ -4602,6 +4659,10 @@ export class InteractiveMode {
 					treeFilterMode: this.settingsManager.getTreeFilterMode(),
 					showHardwareCursor: this.settingsManager.getShowHardwareCursor(),
 					showCacheMissNotices: this.settingsManager.getShowCacheMissNotices(),
+					showThroughput: this.settingsManager.getShowThroughput(),
+					showHiddenChats: this.settingsManager.getShowHiddenChats(),
+					reviewAutoFix: loadReviewSettings(this.sessionManager.getCwd()).autoFix === true,
+					reviewWatch: loadReviewSettings(this.sessionManager.getCwd()).watch === true,
 					defaultProjectTrust: this.settingsManager.getDefaultProjectTrust(),
 					editorPaddingX: this.settingsManager.getEditorPaddingX(),
 					outputPad: this.settingsManager.getOutputPad(),
@@ -4700,6 +4761,22 @@ export class InteractiveMode {
 					onShowCacheMissNoticesChange: (shown) => {
 						this.settingsManager.setShowCacheMissNotices(shown);
 						this.rebuildChatFromMessages();
+					},
+					onShowThroughputChange: (shown) => {
+						this.settingsManager.setShowThroughput(shown);
+						if (!shown) this.footer.setThroughput(undefined);
+					},
+					onShowHiddenChatsChange: (shown) => {
+						this.settingsManager.setShowHiddenChats(shown);
+					},
+					// Auto-fix belongs to the review extension, so it is stored in its own
+					// review.json rather than settings.json. It is offered here because
+					// this is where people look for a switch, not because it lives here.
+					onReviewAutoFixChange: (enabled) => {
+						saveReviewSettings({ autoFix: enabled });
+					},
+					onReviewWatchChange: (enabled) => {
+						saveReviewSettings({ watch: enabled });
 					},
 					onCollapseChangelogChange: (collapsed) => {
 						this.settingsManager.setCollapseChangelog(collapsed);
@@ -5385,7 +5462,9 @@ export class InteractiveMode {
 		this.showSelector((done) => {
 			const selector = new SessionSelectorComponent(
 				(onProgress) =>
-					SessionManager.list(this.sessionManager.getCwd(), this.sessionManager.getSessionDir(), onProgress),
+					SessionManager.list(this.sessionManager.getCwd(), this.sessionManager.getSessionDir(), onProgress, {
+						includeHidden: this.settingsManager.getShowHiddenChats(),
+					}),
 				(onProgress) =>
 					this.sessionManager.usesDefaultSessionDir()
 						? SessionManager.listAll(onProgress)

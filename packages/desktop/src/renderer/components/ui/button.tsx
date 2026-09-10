@@ -23,7 +23,7 @@ const buttonVariants = cva(
 			},
 		},
 		// Quiet chrome buttons only: a filled icon button keeps its variant's
-		// own foreground, so a salmon send arrow stays dark ink, not faint.
+		// own foreground, so a blue send arrow stays white ink, not faint.
 		compoundVariants: [
 			{ variant: "ghost", size: "icon", class: "text-faint hover:text-foreground" },
 			{ variant: "outline", size: "icon", class: "text-faint hover:text-foreground" },

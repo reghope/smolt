@@ -7,7 +7,7 @@
 
 import type { AgentMessage, ThinkingLevel } from "@smolt/agent-core";
 import type { ImageContent, Model } from "@smolt/ai";
-import type { SessionStats } from "../../core/agent-session.ts";
+import type { ProviderUsageSnapshot, SessionStats } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
@@ -24,7 +24,7 @@ export type RpcCommand =
 	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "abort" }
 	| { id?: string; type: "clear_queue" }
-	| { id?: string; type: "new_session"; parentSession?: string }
+	| { id?: string; type: "new_session"; parentSession?: string; temporary?: boolean }
 
 	// State
 	| { id?: string; type: "get_state" }
@@ -46,14 +46,29 @@ export type RpcCommand =
 	// Compaction
 	| { id?: string; type: "compact"; customInstructions?: string }
 	| { id?: string; type: "set_auto_compaction"; enabled: boolean }
+	| { id?: string; type: "set_show_throughput"; enabled: boolean }
 
 	// Retry
 	| { id?: string; type: "set_auto_retry"; enabled: boolean }
 	| { id?: string; type: "abort_retry" }
 
+	// Provider sign-in: the same flows /login runs, with the prompts relayed
+	// as extension UI requests and the browser step as an open_url request.
+	| { id?: string; type: "login"; provider: string; method: "oauth" | "api_key" }
+
 	// Extensions
 	| { id?: string; type: "list_extensions" }
 	| { id?: string; type: "set_extension_enabled"; extensionId: string; enabled: boolean }
+
+	// Advisor
+	| { id?: string; type: "get_advisor_settings" }
+	/** `model` is "provider/model-id"; omitted or empty means follow the session model. */
+	| { id?: string; type: "set_advisor_model"; model?: string }
+	| { id?: string; type: "set_advisor_settings"; settings: RpcAdvisorSettingsUpdate }
+
+	// Review
+	| { id?: string; type: "get_review_settings" }
+	| { id?: string; type: "set_review_settings"; settings: RpcReviewSettingsUpdate }
 
 	// Bash
 	| { id?: string; type: "bash"; command: string; excludeFromContext?: boolean }
@@ -61,6 +76,7 @@ export type RpcCommand =
 
 	// Session
 	| { id?: string; type: "get_session_stats" }
+	| { id?: string; type: "get_provider_usage" }
 	| { id?: string; type: "export_html"; outputPath?: string }
 	| { id?: string; type: "switch_session"; sessionPath: string }
 	| { id?: string; type: "fork"; entryId: string }
@@ -99,6 +115,63 @@ export interface RpcSlashCommand {
 // RPC State
 // ============================================================================
 
+/** What the advisor's settings file says, with its defaults filled in, as the settings page shows it. */
+export interface RpcAdvisorSettings {
+	/** Whether advisor.json turns the advisor on for every session. */
+	enabled: boolean;
+	/** "provider/model-id" when set; undefined when the advisor follows the session model. */
+	model?: string;
+	/** "deep" is the usual review; "quick" is a shallow, cheap pass. */
+	mode: "quick" | "deep";
+	/** How many primary steps pass between in-progress reviews. */
+	reviewEvery: number;
+	/** How hard a review thinks. */
+	thinking: string;
+	/** Session token budget for the advisor; undefined when there is none. */
+	tokenBudget?: number;
+	/** Primary turns after a delivered interrupt during which further interrupts become asides. */
+	immuneTurns: number;
+	/** Hold the primary turn while advisor backlog is at or above this; "off" never holds. */
+	syncBacklog: "off" | 1 | 3 | 5;
+}
+
+/** A change to advisor.json: fields left out stay as they are; null clears. */
+export interface RpcAdvisorSettingsUpdate {
+	enabled?: boolean;
+	/** "provider/model-id", or null to follow the session model. */
+	model?: string | null;
+	mode?: "quick" | "deep";
+	reviewEvery?: number;
+	thinking?: string;
+	tokenBudget?: number | null;
+	immuneTurns?: number;
+	syncBacklog?: "off" | 1 | 3 | 5;
+}
+
+/** What review.json says, with its defaults filled in, as the settings page shows it. */
+export interface RpcReviewSettings {
+	/** "provider/model-id" when set; undefined when reviews run on the session model. */
+	model?: string;
+	/** Cap on findings in a posted comment. */
+	maxFindings: number;
+	/** Repos, as "owner/name", whose pull requests are reviewed as they arrive. */
+	watchRepos: string[];
+	/** Whether those repos are watched at all. Off until setup turns it on. */
+	watch: boolean;
+	/** Whether a finished review hands its findings to a hidden chat that fixes them. */
+	autoFix: boolean;
+}
+
+/** A change to review.json: fields left out stay as they are. */
+export interface RpcReviewSettingsUpdate {
+	/** "provider/model-id", or null to run reviews on the session model. */
+	model?: string | null;
+	maxFindings?: number;
+	watchRepos?: string[];
+	watch?: boolean;
+	autoFix?: boolean;
+}
+
 /** One extension as the settings UI sees it: built-in or on disk, on or off. */
 export interface RpcExtensionInfo {
 	/** Stable id used to switch it on and off. */
@@ -122,6 +195,8 @@ export interface RpcSessionState {
 	sessionId: string;
 	sessionName?: string;
 	autoCompactionEnabled: boolean;
+	/** Whether surfaces show the model's live tokens-per-second rate. */
+	showThroughput: boolean;
 	messageCount: number;
 	pendingMessageCount: number;
 	/** Active extension thinking entry ("auto"), when one is engaged. */
@@ -198,10 +273,14 @@ export type RpcResponse =
 	// Compaction
 	| { id?: string; type: "response"; command: "compact"; success: true; data: CompactionResult }
 	| { id?: string; type: "response"; command: "set_auto_compaction"; success: true }
+	| { id?: string; type: "response"; command: "set_show_throughput"; success: true }
 
 	// Retry
 	| { id?: string; type: "response"; command: "set_auto_retry"; success: true }
 	| { id?: string; type: "response"; command: "abort_retry"; success: true }
+
+	// Provider sign-in
+	| { id?: string; type: "response"; command: "login"; success: true; data: { type: string } }
 
 	// Extensions
 	| {
@@ -213,12 +292,40 @@ export type RpcResponse =
 	  }
 	| { id?: string; type: "response"; command: "set_extension_enabled"; success: true }
 
+	// Advisor
+	| {
+			id?: string;
+			type: "response";
+			command: "get_advisor_settings";
+			success: true;
+			data: RpcAdvisorSettings;
+	  }
+	| { id?: string; type: "response"; command: "set_advisor_model"; success: true }
+	| { id?: string; type: "response"; command: "set_advisor_settings"; success: true }
+
+	// Review
+	| {
+			id?: string;
+			type: "response";
+			command: "get_review_settings";
+			success: true;
+			data: RpcReviewSettings;
+	  }
+	| { id?: string; type: "response"; command: "set_review_settings"; success: true }
+
 	// Bash
 	| { id?: string; type: "response"; command: "bash"; success: true; data: BashResult }
 	| { id?: string; type: "response"; command: "abort_bash"; success: true }
 
 	// Session
 	| { id?: string; type: "response"; command: "get_session_stats"; success: true; data: SessionStats }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_provider_usage";
+			success: true;
+			data: ProviderUsageSnapshot | null;
+	  }
 	| { id?: string; type: "response"; command: "export_html"; success: true; data: { path: string } }
 	| { id?: string; type: "response"; command: "switch_session"; success: true; data: { cancelled: boolean } }
 	| { id?: string; type: "response"; command: "fork"; success: true; data: { text: string; cancelled: boolean } }
@@ -279,6 +386,16 @@ export type RpcExtensionUIRequest =
 	| {
 			type: "extension_ui_request";
 			id: string;
+			method: "multiselect";
+			title: string;
+			options: string[];
+			/** Options ticked when the dialog opens. */
+			selected: string[];
+			timeout?: number;
+	  }
+	| {
+			type: "extension_ui_request";
+			id: string;
 			method: "input";
 			title: string;
 			placeholder?: string;
@@ -310,6 +427,8 @@ export type RpcExtensionUIRequest =
 			widgetDetails?: unknown;
 	  }
 	| { type: "extension_ui_request"; id: string; method: "setTitle"; title: string }
+	/** A sign-in step that happens in the browser: the client opens the URL. */
+	| { type: "extension_ui_request"; id: string; method: "open_url"; url: string; instructions?: string }
 	| { type: "extension_ui_request"; id: string; method: "set_editor_text"; text: string };
 
 // ============================================================================
@@ -319,6 +438,7 @@ export type RpcExtensionUIRequest =
 /** Response to an extension UI request */
 export type RpcExtensionUIResponse =
 	| { type: "extension_ui_response"; id: string; value: string }
+	| { type: "extension_ui_response"; id: string; values: string[] }
 	| { type: "extension_ui_response"; id: string; confirmed: boolean }
 	| { type: "extension_ui_response"; id: string; cancelled: true };
 

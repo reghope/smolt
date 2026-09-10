@@ -13,6 +13,19 @@ export interface SessionSummary {
 	messageCount: number;
 	/** The working directory the chat ran in, from its own opening record. */
 	cwd: string;
+	/**
+	 * What the chat was last set to, as "provider/id", and its thinking level.
+	 *
+	 * Read from the chat's own records so opening one paints its model at once.
+	 * Asking the agent instead meant the composer showed the previous chat's
+	 * model for the seconds the switch took, which reads as the wrong chat.
+	 */
+	model: string;
+	thinking: string;
+	/** The chat this one continues from, when it was forked or resumed out of another. */
+	parent: string;
+	/** When the chat was opened, from its own first record. */
+	created: number;
 }
 
 export function sessionsDir(): string {
@@ -46,6 +59,9 @@ export function listSessions(root: string = sessionsDir(), limit = 50): SessionS
 }
 
 /** Every stored transcript file under the root, newest first. */
+/** Folder name holding hidden chats, kept in step with the coding agent's session store. */
+const HIDDEN_SESSION_DIR = "hidden";
+
 function collectSessionFiles(root: string): { path: string; mtime: number }[] {
 	const files: { path: string; mtime: number }[] = [];
 	const walk = (dir: string): void => {
@@ -59,8 +75,14 @@ function collectSessionFiles(root: string): { path: string; mtime: number }[] {
 			const full = join(dir, name);
 			try {
 				const st = statSync(full);
-				if (st.isDirectory()) walk(full);
-				else if (name.endsWith(".jsonl")) files.push({ path: full, mtime: st.mtimeMs });
+				// A `hidden` folder inside a project's session directory holds chats an
+				// extension ran on the reader's behalf — the one /review auto-fix uses.
+				// They are kept and readable, but they are not conversations the reader
+				// had, so they stay out of the sidebar. This walker recurses, so unlike
+				// the coding agent's listers it has to be told.
+				if (st.isDirectory()) {
+					if (name !== HIDDEN_SESSION_DIR) walk(full);
+				} else if (name.endsWith(".jsonl")) files.push({ path: full, mtime: st.mtimeMs });
 			} catch {
 				// unreadable entry
 			}
@@ -94,24 +116,29 @@ function listSessionsIn(root: string, limit: number): SessionSummary[] {
 		const summary = summarize(file.path, file.mtime);
 		if (summary && folderExists(summary.cwd)) out.push(summary);
 	}
-	return out;
+	// Editing a message forks the chat: a new transcript that continues an old
+	// one, listed beside it under the same title, which reads as a duplicate.
+	// The parent is hidden only when the fork truly replaced it — nothing was
+	// said in the parent after the fork was taken. A parent still being used is
+	// a conversation of its own and stays listed, however many forks came off
+	// it. Hidden or not, it stays on disk and search still finds it.
+	const superseded = new Set<string>();
+	for (const summary of out) {
+		if (summary.parent === "") continue;
+		const parent = out.find((candidate) => candidate.path === summary.parent);
+		if (parent && parent.lastActive <= summary.created) superseded.add(parent.path);
+	}
+	return superseded.size === 0 ? out : out.filter((summary) => !superseded.has(summary.path));
 }
 
 /**
- * A subject line from the first message, for sessions nothing named.
+ * What an unnamed chat is called: nothing about it, rather than a guess.
  *
- * The first sentence, kept to whole words: a cut-off opening reads like a
- * leaked prompt rather than a chat's title, and gives nothing back when the
- * list is scanned later.
+ * The opening words used to stand in as a title, which listed chats as "hi"
+ * and as half-finished prompts. A chat is named once the session-name
+ * extension works out what it is about; until then it is a new session.
  */
-function titleFromPreview(preview: string): string {
-	const sentence = (preview.split(/(?<=[.!?])\s/)[0] ?? preview).replace(/\s+/g, " ").trim();
-	if (sentence === "") return "(untitled)";
-	if (sentence.length <= 48) return sentence;
-	const cut = sentence.slice(0, 48);
-	const lastSpace = cut.lastIndexOf(" ");
-	return `${(lastSpace > 24 ? cut.slice(0, lastSpace) : cut).replace(/[,;:.]$/, "")}…`;
-}
+const UNNAMED_TITLE = "New session";
 
 /**
  * Summaries by path, keyed off mtime. The sidebar relists sessions on every
@@ -140,6 +167,10 @@ function summarizeUncached(path: string, mtime: number): SessionSummary | undefi
 	let cwd = "";
 	let title = "";
 	let preview = "";
+	let model = "";
+	let thinking = "";
+	let parent = "";
+	let created = mtime;
 	let messageCount = 0;
 	for (const line of raw.split("\n")) {
 		if (line.trim() === "") continue;
@@ -148,6 +179,11 @@ function summarizeUncached(path: string, mtime: number): SessionSummary | undefi
 			id?: string;
 			cwd?: string;
 			name?: string;
+			timestamp?: string;
+			parentSession?: string;
+			provider?: string;
+			modelId?: string;
+			thinkingLevel?: string;
 			message?: { role?: string; content?: unknown };
 		};
 		try {
@@ -158,7 +194,13 @@ function summarizeUncached(path: string, mtime: number): SessionSummary | undefi
 		if (entry.type === "session") {
 			id = entry.id ?? "";
 			cwd = entry.cwd ?? "";
+			parent = entry.parentSession ?? "";
+			const opened = entry.timestamp ? Date.parse(entry.timestamp) : Number.NaN;
+			created = Number.isNaN(opened) ? mtime : opened;
 		} else if (entry.type === "session_info") title = entry.name || title;
+		else if (entry.type === "model_change") {
+			model = entry.provider && entry.modelId ? `${entry.provider}/${entry.modelId}` : model;
+		} else if (entry.type === "thinking_level_change") thinking = entry.thinkingLevel || thinking;
 		else if (entry.type === "message" && entry.message) {
 			const role = entry.message.role;
 			if (role === "user" || role === "assistant") {
@@ -172,10 +214,14 @@ function summarizeUncached(path: string, mtime: number): SessionSummary | undefi
 		path,
 		id,
 		cwd,
-		title: title || titleFromPreview(preview),
+		title: title || UNNAMED_TITLE,
 		preview,
 		lastActive: mtime,
 		messageCount,
+		model,
+		thinking,
+		parent,
+		created,
 	};
 }
 
@@ -282,4 +328,21 @@ export function readSessionMessages(path: string, options: { limit?: number; bef
 		}
 	}
 	return { messages: held, start: before === undefined ? total - held.length : first, userStart };
+}
+
+/**
+ * The folder a stored chat ran in, from its own opening record.
+ *
+ * A chat belongs to the project it was started in, so opening one has to be
+ * able to ask where that was rather than assume the folder on screen. Reads
+ * through the same mtime-keyed cache as the listing, so asking on every
+ * switch costs nothing after the first.
+ */
+export function sessionCwd(path: string): string {
+	try {
+		return summarize(path, statSync(path).mtimeMs)?.cwd ?? "";
+	} catch {
+		// An unreadable or missing transcript names no folder of its own.
+		return "";
+	}
 }

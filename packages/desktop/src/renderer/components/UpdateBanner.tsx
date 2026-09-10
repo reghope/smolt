@@ -1,6 +1,7 @@
 import { api } from "../lib/api.ts";
 import { useApp } from "../state/useApp.ts";
 import { Icon } from "./ui/icon.tsx";
+import { Tip } from "./ui/tooltip.tsx";
 
 /**
  * The update notice, above the settings row.
@@ -23,9 +24,9 @@ export function UpdateBanner() {
 	if (state.status === "installing") {
 		return (
 			<div className="mb-1 flex w-full items-center gap-2 rounded-lg border bg-card px-3 py-2 text-xs">
-				<Icon name="spinner" className="flex-none animate-spin text-salmon" />
+				<Icon name="spinner" className="flex-none animate-spin text-tint" />
 				<span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
-					Updating to v{state.version} — restarting
+					Updating to v{state.version}, restarting
 				</span>
 			</div>
 		);
@@ -33,7 +34,7 @@ export function UpdateBanner() {
 	if (state.status === "ready" && state.hotfix) {
 		return (
 			<div className="mb-1 flex w-full items-center gap-2 rounded-lg border bg-card px-3 py-2 text-xs">
-				<Icon name="update" className="flex-none text-salmon" />
+				<Icon name="update" className="flex-none text-tint" />
 				<span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
 					v{state.version} installs when this chat is done
 				</span>
@@ -46,7 +47,7 @@ export function UpdateBanner() {
 			<div className="mb-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-xs text-faint">
 				<Icon name="spinner" className="animate-spin" />
 				<span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
-					Fetching update{state.percent > 0 ? ` — ${state.percent}%` : "…"}
+					Fetching update{state.percent > 0 ? `: ${state.percent}%` : "…"}
 				</span>
 			</div>
 		);
@@ -54,21 +55,22 @@ export function UpdateBanner() {
 
 	const ready = state.status === "ready";
 	return (
+		<Tip label={ready ? "Restart to finish updating" : "An update is available"}>
 		<button
 			type="button"
-			title={ready ? "Restart to finish updating" : "An update is available"}
 			className="mb-1 flex w-full items-center gap-2.5 rounded-lg border bg-card px-3 py-2 text-left transition-colors hover:border-border-strong"
 			onClick={() => {
 				if (ready) void api.updateInstall();
 				else void api.updateCheck();
 			}}
 		>
-			<Icon name="update" className="flex-none text-salmon" />
+			<Icon name="update" className="flex-none text-tint" />
 			<span className="min-w-0 flex-1">
 				<span className="block text-sm leading-tight">{ready ? "Relaunch to update" : "Update available"}</span>
 				<span className="block text-[11px] text-faint">v{state.version}</span>
 			</span>
 			<Icon name="chevron" className="flex-none text-faint" />
 		</button>
+		</Tip>
 	);
 }

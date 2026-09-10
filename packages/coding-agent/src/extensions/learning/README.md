@@ -30,7 +30,7 @@ A self-contained extension giving the agent durable memory across sessions:
   is never imported statically — this folder's boundary stays Node
   built-ins — but located at load, from `SMOLT_EMBEDDINGS_MODULE` (the
   desktop app names its own bundled copy to every agent it spawns) or the
-  package installed beside smolt, and imported on first use. No module
+  package installed beside Smolt, and imported on first use. No module
   means no embedder, and search stays lexical. It is listed in settings as
   an extension of its own, `semantic-recall`, so the model can be switched
   off without losing memory, skills, or lexical search: the extension does

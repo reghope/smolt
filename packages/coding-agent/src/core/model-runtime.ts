@@ -5,6 +5,7 @@ import {
 	type AssistantMessage,
 	type AssistantMessageEventStream,
 	type AuthCheck,
+	type AuthContext,
 	type AuthInteraction,
 	type AuthOperationOptions,
 	type AuthResult,
@@ -17,6 +18,7 @@ import {
 	type DeferredCancelOptions,
 	type DeferredFetchOptions,
 	type DeferredHandle,
+	fetchProviderUsage,
 	lazyStream,
 	type Model,
 	type Models,
@@ -33,6 +35,7 @@ import {
 	type Provider,
 	type ProviderHeaders,
 	type ProviderRequestOptions,
+	type ProviderUsage,
 	type SimpleStreamOptions,
 	type StreamOptions,
 } from "@smolt/ai";
@@ -42,6 +45,7 @@ import { operationSignal, raceWithAbortSignal } from "../utils/abort.ts";
 import { AuthStorage as DefaultAuthStorage } from "./auth-storage.ts";
 import { ModelConfig } from "./model-config.ts";
 import { FileModelsStore, InMemoryCodingAgentModelsStore } from "./models-store.ts";
+import { getSessionHeaders } from "./provider-attribution.ts";
 import {
 	type AuthStatus,
 	type CompatibilityRequestConfig,
@@ -54,6 +58,23 @@ import {
 } from "./provider-composer.ts";
 import { withRemoteCatalog } from "./remote-catalog-provider.ts";
 import { RuntimeCredentials } from "./runtime-credentials.ts";
+
+/**
+ * "Stored credentials only": a provider counts as available only through a
+ * credential the reader put in the shared auth or pool files, never through
+ * a key that happens to sit in the environment or an ambient config file.
+ * The desktop runs its agents this way, so its model list is exactly the
+ * providers set up in the app; the TUI opts in with the same variable.
+ */
+function storedCredentialsOnly(): boolean {
+	return process.env.SMOLT_STORED_CREDENTIALS_ONLY === "1";
+}
+
+/** An auth context with no ambient anything: every env lookup misses, every file is absent. */
+const STORED_CREDENTIALS_ONLY_CONTEXT: AuthContext = {
+	env: async () => undefined,
+	fileExists: async () => false,
+};
 
 interface ModelRuntimeSnapshot {
 	all: readonly Model<Api>[];
@@ -165,7 +186,11 @@ export class ModelRuntime implements Models {
 		this.modelNetworkEnabled = modelNetworkEnabled;
 		this.defaultBuiltins = new Map(providers.map((provider) => [provider.id, provider]));
 		for (const [providerId, provider] of this.defaultBuiltins) this.builtins.set(providerId, provider);
-		this.models = createModels({ credentials, modelsStore });
+		this.models = createModels({
+			credentials,
+			modelsStore,
+			...(storedCredentialsOnly() ? { authContext: STORED_CREDENTIALS_ONLY_CONTEXT } : {}),
+		});
 		this.rebuildProviders();
 	}
 
@@ -401,6 +426,21 @@ export class ModelRuntime implements Models {
 		return this.models.checkAuth(providerId, options);
 	}
 
+	/**
+	 * Subscription usage for a provider, polled live. Undefined when the
+	 * provider exposes no usage endpoint or has no stored credential.
+	 */
+	async getProviderUsage(providerId: string, options?: AuthOperationOptions): Promise<ProviderUsage | undefined> {
+		const credential = await this.credentials.read(providerId, options);
+		if (!credential) return undefined;
+		return fetchProviderUsage(providerId, credential);
+	}
+
+	/** The stored credential for a provider, for callers that fetch usage themselves. */
+	getCredential(providerId: string, options?: AuthOperationOptions): Promise<Credential | undefined> {
+		return this.credentials.read(providerId, options);
+	}
+
 	async getAvailable(providerId?: string, options?: AuthOperationOptions): Promise<readonly Model<Api>[]> {
 		if (providerId) {
 			const errorSeq = ++this.availabilityErrorSeq;
@@ -589,7 +629,13 @@ export class ModelRuntime implements Models {
 
 		const { transformHeaders, ...rawProviderOptions } = options ?? {};
 		const providerOptions = rawProviderOptions as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions;
-		let headers = mergeHeaders(resolution.auth.headers, providerOptions.headers);
+		// Session-affinity headers (x-opencode-session) apply to every request path,
+		// not just the ones that go through the Agent's transformHeaders hook.
+		const sessionId = (options as { sessionId?: string } | undefined)?.sessionId;
+		let headers = mergeHeaders(
+			mergeHeaders(getSessionHeaders(model, sessionId), resolution.auth.headers),
+			providerOptions.headers,
+		);
 		if (transformHeaders) headers = await transformHeaders(headers ?? {});
 		const env =
 			resolution.env || providerOptions.env

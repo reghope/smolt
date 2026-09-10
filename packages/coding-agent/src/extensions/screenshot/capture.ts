@@ -17,6 +17,9 @@ export interface CaptureOptions {
 	display?: number;
 	/** Milliseconds to wait before capturing, e.g. to let a window settle. */
 	delayMs?: number;
+	/** Capture a single window instead of the screen: "active" for the foreground
+	 * window, or a case-insensitive title substring. Windows only. */
+	window?: string;
 }
 
 export interface CaptureResult {
@@ -65,20 +68,58 @@ $graphics.Dispose()
 $bitmap.Dispose()`;
 }
 
+/** PowerShell capture of one window: the foreground window, or the first
+ * visible main window whose title contains the given text (case-insensitive). */
+function windowsWindowScript(outputPath: string, window: string): string {
+	const findWindow =
+		window === "active"
+			? `$hwnd = [Win]::GetForegroundWindow()
+if ($hwnd -eq [IntPtr]::Zero) { Write-Error 'no foreground window'; exit 2 }`
+			: `$needle = '${window.replace(/'/g, "''").toLowerCase()}'
+$proc = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle.ToLower().Contains($needle) } | Select-Object -First 1
+if (-not $proc) { Write-Error ("no window title containing: " + $needle); exit 2 }
+$hwnd = $proc.MainWindowHandle`;
+	return `Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public class Win {
+	[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+	[DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+	[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+	[StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+}
+'@
+[void][Win]::SetProcessDPIAware()
+${findWindow}
+$r = New-Object Win+RECT
+[void][Win]::GetWindowRect($hwnd, [ref]$r)
+$w = $r.Right - $r.Left
+$h = $r.Bottom - $r.Top
+if ($w -le 0 -or $h -le 0) { Write-Error 'window has no size'; exit 2 }
+$bitmap = New-Object System.Drawing.Bitmap $w, $h
+$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+$graphics.CopyFromScreen($r.Left, $r.Top, 0, 0, $bitmap.Size)
+$bitmap.Save('${outputPath.replace(/'/g, "''")}', [System.Drawing.Imaging.ImageFormat]::Png)
+$graphics.Dispose()
+$bitmap.Dispose()`;
+}
+
 /** Candidate commands per platform, tried in order until one succeeds. */
-function candidates(platform: string, outputPath: string, display?: number): { command: string; args: string[] }[] {
+function candidates(
+	platform: string,
+	outputPath: string,
+	display?: number,
+	window?: string,
+): { command: string; args: string[] }[] {
 	if (platform === "darwin") {
 		const args = ["-x", "-t", "png"];
 		if (display && display > 0) args.push("-D", String(display));
 		return [{ command: "screencapture", args: [...args, outputPath] }];
 	}
 	if (platform === "win32") {
-		return [
-			{
-				command: "powershell.exe",
-				args: ["-NoProfile", "-NonInteractive", "-Command", windowsScript(outputPath, display)],
-			},
-		];
+		const script = window ? windowsWindowScript(outputPath, window) : windowsScript(outputPath, display);
+		return [{ command: "powershell.exe", args: ["-NoProfile", "-NonInteractive", "-Command", script] }];
 	}
 	// Linux and the BSDs: Wayland first, then the common X11 tools.
 	return [
@@ -104,10 +145,14 @@ export async function captureScreen(
 		await new Promise((resolve) => setTimeout(resolve, Math.min(options.delayMs ?? 0, 10_000)));
 	}
 
+	if (options.window && platform !== "win32") {
+		throw new CaptureUnavailableError("Window capture is currently only supported on Windows.");
+	}
+
 	const dir = mkdtempSync(join(tmpdir(), "smolt-shot-"));
 	const outputPath = join(dir, "screen.png");
 	try {
-		const attempts = candidates(platform, outputPath, options.display);
+		const attempts = candidates(platform, outputPath, options.display, options.window);
 		const failures: string[] = [];
 		for (const attempt of attempts) {
 			const { code, stderr } = await run(attempt.command, attempt.args, 20_000);

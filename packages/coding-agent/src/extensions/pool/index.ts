@@ -15,12 +15,15 @@ import type { ExtensionAPI, ExtensionCommandContext } from "../../core/extension
 import type { ModelRegistry } from "../../core/model-registry.ts";
 import { isLimitError, isModelUnavailableError, markUntil } from "./errors.ts";
 import {
+	appendPoolCredential,
+	isProviderPooled,
 	orderedChain,
 	POOL_PRIMARY_ID,
 	type PoolCredential,
 	type PoolData,
 	PoolStore,
 	providerPoolOf,
+	removePoolCredential,
 	type WindowKind,
 } from "./storage.ts";
 import { describeUsage, PLAN_PRESETS, recordUsage } from "./windows.ts";
@@ -74,7 +77,7 @@ export function createPoolExtension(options: PoolExtensionOptions = {}): (smolt:
 		};
 
 		const hasPoolEntries = (data: PoolData, providerId: string): boolean =>
-			providerPoolOf(data, providerId).credentials.length > 0;
+			isProviderPooled(data, providerId) && providerPoolOf(data, providerId).credentials.length > 0;
 
 		const syncWrappers = (modelRegistry: ModelRegistry): void => {
 			const data = store.read();
@@ -96,22 +99,7 @@ export function createPoolExtension(options: PoolExtensionOptions = {}): (smolt:
 
 		const appendCredential = (providerId: string, credential: Omit<PoolCredential, "id" | "addedAt">): string => {
 			const id = randomUUID();
-			store.modify((data) => ({
-				result: id,
-				next: {
-					...data,
-					providers: {
-						...data.providers,
-						[providerId]: {
-							...providerPoolOf(data, providerId),
-							credentials: [
-								...providerPoolOf(data, providerId).credentials,
-								{ ...credential, id, addedAt: Date.now() },
-							],
-						},
-					},
-				},
-			}));
+			store.modify((data) => ({ result: id, next: appendPoolCredential(data, providerId, credential, id) }));
 			return id;
 		};
 
@@ -341,27 +329,7 @@ export function createPoolExtension(options: PoolExtensionOptions = {}): (smolt:
 				)) !== true
 			)
 				return;
-			store.modify((current) => {
-				const currentPool = providerPoolOf(current, providerId);
-				const remaining = currentPool.credentials.filter((entry) => entry.id !== target.id);
-				// No ghosts: an empty provider disappears, an activeId pointing at
-				// the removed credential falls back to the primary, and the
-				// credential's ledger and marks go with it.
-				const providers = { ...current.providers };
-				if (remaining.length === 0) delete providers[providerId];
-				else {
-					providers[providerId] = {
-						...currentPool,
-						credentials: remaining,
-						activeId: currentPool.activeId === target.id ? undefined : currentPool.activeId,
-					};
-				}
-				const ledger = { ...current.ledger };
-				delete ledger[target.id];
-				const unavailable = { ...current.unavailable };
-				delete unavailable[target.id];
-				return { result: undefined, next: { ...current, providers, ledger, unavailable } };
-			});
+			store.modify((current) => ({ result: undefined, next: removePoolCredential(current, providerId, target.id) }));
 			syncWrappers(ctx.modelRegistry);
 			ctx.ui.notify(`Removed ${sourceLabel(target)} from the ${providerId} pool.`, "info");
 		};

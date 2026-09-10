@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -58,6 +58,107 @@ describe("listSessions", () => {
 		expect(titles.slice().sort()).toEqual(["mine", "theirs"]);
 	});
 
+	test("leaves hidden chats out of the sidebar", () => {
+		writeSession(project, "mine", "an ordinary chat");
+		const hidden = join(root, projectDirName(project), "hidden");
+		mkdirSync(hidden, { recursive: true });
+		const lines = [
+			JSON.stringify({ type: "session", id: "id-autofix", cwd: project }),
+			JSON.stringify({ type: "session_info", name: "autofix" }),
+			JSON.stringify({ type: "message", message: { role: "user", content: "fixing what the review found" } }),
+		];
+		writeFileSync(join(hidden, "autofix.jsonl"), `${lines.join("\n")}\n`);
+
+		expect(listSessions(root, 50).map((row) => row.title)).toEqual(["mine"]);
+	});
+
+	test("hides a chat a fork replaced, and keeps one still being used", () => {
+		const dir = join(root, projectDirName(project));
+		mkdirSync(dir, { recursive: true });
+		const write = (name: string, entry: object): string => {
+			const path = join(dir, `${name}.jsonl`);
+			writeFileSync(
+				path,
+				`${JSON.stringify(entry)}\n${JSON.stringify({ type: "session_info", name: "Fix the retry logic" })}\n`,
+			);
+			return path;
+		};
+		const forkedAt = "2026-01-02T12:00:00.000Z";
+		// Abandoned at the fork: its file has not been touched since.
+		const abandoned = write("abandoned", {
+			type: "session",
+			id: "abandoned",
+			cwd: project,
+			timestamp: "2026-01-02T11:00:00.000Z",
+		});
+		utimesSync(abandoned, new Date(forkedAt), new Date(forkedAt));
+		write("fork-of-abandoned", {
+			type: "session",
+			id: "fork-of-abandoned",
+			cwd: project,
+			timestamp: forkedAt,
+			parentSession: abandoned,
+		});
+		// Carried on after the fork was taken, so it is a conversation of its own.
+		const carriedOn = write("carried-on", {
+			type: "session",
+			id: "carried-on",
+			cwd: project,
+			timestamp: "2026-01-02T11:00:00.000Z",
+		});
+		write("fork-of-carried-on", {
+			type: "session",
+			id: "fork-of-carried-on",
+			cwd: project,
+			timestamp: forkedAt,
+			parentSession: carriedOn,
+		});
+
+		const ids = listSessions(root, 50).map((row) => row.id);
+		expect(ids).not.toContain("abandoned");
+		expect(ids).toContain("carried-on");
+		expect(ids).toContain("fork-of-abandoned");
+		expect(ids).toContain("fork-of-carried-on");
+	});
+
+	test("keeps a chat whose parent is not listed", () => {
+		const dir = join(root, projectDirName(project));
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(
+			join(dir, "forked.jsonl"),
+			`${JSON.stringify({
+				type: "session",
+				id: "id-2",
+				cwd: project,
+				parentSession: join(dir, "deleted.jsonl"),
+			})}\n${JSON.stringify({ type: "session_info", name: "kept" })}\n`,
+		);
+
+		expect(listSessions(root, 50).map((row) => row.title)).toEqual(["kept"]);
+	});
+
+	test("carries the chat's own model and thinking level, latest wins", () => {
+		const dir = join(root, projectDirName(project));
+		mkdirSync(dir, { recursive: true });
+		const lines = [
+			JSON.stringify({ type: "session", id: "id-1", cwd: project }),
+			JSON.stringify({ type: "model_change", provider: "anthropic", modelId: "claude-opus-5" }),
+			JSON.stringify({ type: "thinking_level_change", thinkingLevel: "high" }),
+			JSON.stringify({ type: "model_change", provider: "llama.cpp", modelId: "qwen3" }),
+			JSON.stringify({ type: "thinking_level_change", thinkingLevel: "low" }),
+		];
+		writeFileSync(join(dir, "switched.jsonl"), `${lines.join("\n")}\n`);
+
+		const row = listSessions(root, 50)[0];
+		expect(row?.model).toBe("llama.cpp/qwen3");
+		expect(row?.thinking).toBe("low");
+	});
+
+	test("leaves the model empty for a chat that never named one", () => {
+		writeSession(project, "mine", "hello");
+		expect(listSessions(root, 50)[0]?.model).toBe("");
+	});
+
 	test("carries the folder each chat ran in", () => {
 		writeSession(project, "mine", "hello");
 		expect(listSessions(root, 50)[0]?.cwd).toBe(project);
@@ -71,7 +172,7 @@ describe("listSessions", () => {
 		expect(listSessions(root, 50).map((row) => row.title)).toEqual(["mine"]);
 	});
 
-	test("falls back to the first user message when a session is unnamed", () => {
+	test("titles an unnamed session and keeps the first user message as its preview", () => {
 		const dir = join(root, projectDirName(project));
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(
@@ -81,7 +182,9 @@ describe("listSessions", () => {
 				message: { role: "user", content: "explain the retry logic" },
 			})}\n`,
 		);
-		expect(listSessions(root, 50)[0]?.title).toBe("explain the retry logic");
+		const row = listSessions(root, 50)[0];
+		expect(row?.title).toBe("New session");
+		expect(row?.preview).toBe("explain the retry logic");
 	});
 
 	test("honours the limit", () => {

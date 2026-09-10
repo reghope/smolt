@@ -8,7 +8,7 @@
  *
  * Setup:
  *   cd packages/coding-agent/examples/extensions/gondolin
- *   npm install --ignore-scripts
+ *   npm install
  *
  * Usage:
  *   cd /path/to/project

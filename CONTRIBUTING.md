@@ -1,6 +1,6 @@
-# Contributing to smolt
+# Contributing to Smolt
 
-Thank you for your interest in smolt — genuinely.
+Thank you for your interest in Smolt — genuinely.
 
 At this early stage, **we are not accepting external contributions**: no
 pull requests, and no feature-request issues. The core is still taking
@@ -12,7 +12,7 @@ What you can do today:
 - **Report bugs.** A clear, reproducible bug report is always welcome and
   will be read.
 - **Star and watch the repo** to follow along — things are moving quickly.
-- **Build extensions.** smolt's core is minimal by design; most ideas
+- **Build extensions.** Smolt's core is minimal by design; most ideas
   belong in an extension, and you don't need our permission to write one.
 
 When the project is ready to take contributions we'll say so here, along

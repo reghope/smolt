@@ -1,36 +1,44 @@
 import { api } from "../lib/api.ts";
-import { app, bump, toast } from "./app.ts";
-import { dropSamples, freshWords, isEcho, isStockAnswer, planRun, renderRun, tailWords } from "./voice-core.ts";
+import { app, appendToChatDraft, bump, toast } from "./app.ts";
+import { collapseRepeats, isRunaway, isStockAnswer, renderRun, shouldCutSegment } from "./voice-core.ts";
 
 /**
- * Dictation: capture 16 kHz mono, re-read the clip as fast as the model can
- * manage, and write recognised words into the composer draft as they land.
+ * Dictation: capture 16 kHz mono for as long as the microphone is open, in
+ * segments cut at the pauses between sentences.
  *
- * Whisper is not a streaming model, so live text comes from re-reading a
- * clip — but never the whole sitting. Speech is cut into segments at the
- * natural pauses: once a pause ends a sentence, its words are committed,
- * its audio is dropped, and the next pass starts fresh. Each pass therefore
- * reads seconds of audio no matter how long the microphone has been open,
- * which is what keeps the text close behind the voice. (Re-reading the
- * whole sitting made every pass slower than the last, and past thirty
- * seconds Whisper's window silently cut the end off.)
+ * A sitting has no length limit. Someone can talk for hours: the audio is
+ * never held whole, never sent whole, and never decoded whole. Every half
+ * minute or so, at the next pause in speech, the audio in hand is closed
+ * off and handed to the decoder, which works through the segments one at a
+ * time and writes each one into the draft as it lands. So memory, the size
+ * of a message to the main process, and the length of a single decode all
+ * stay flat however long the microphone is open, and stopping only has to
+ * wait for whatever is left rather than for the whole sitting.
  *
- * Two rules keep the model honest, because Whisper invents words when it
- * is handed quiet: a pass only runs when speech has actually arrived since
- * the last one, and the clip it reads is cut just after the last spoken
- * word, so trailing room noise never reaches the model at all.
+ * The segments are still far larger than a streaming recogniser's, which is
+ * what keeps a bigger and more accurate model affordable: a decode that
+ * runs twice a minute can take seconds, where one running every second
+ * could not.
+ *
+ * Two rules keep the model honest, because a speech model invents words
+ * when it is handed quiet: a sitting whose loudest moment is under the
+ * dead-microphone line is never transcribed at all, and the auto-stop
+ * watchdog only counts a chunk as speech when it clears the room's own
+ * learned floor.
  */
 
 interface VoiceSession {
 	stream: MediaStream;
 	context: AudioContext;
 	analyser: AnalyserNode;
-	/** Audio for the current segment only, at 16 kHz mono. */
+	/** The segment being captured now, at 16 kHz mono, in capture order. */
 	samples: Float32Array[];
 	total: number;
-	/** The next scheduled pass, if one is waiting rather than running. */
-	timer: ReturnType<typeof setTimeout> | null;
-	/** The idle watchdog, which is the only thing still on a fixed interval. */
+	/** Loudest sample of that segment, so a segment of pure room is never decoded. */
+	segmentPeak: number;
+	/** Unbroken quiet at the end of it, in samples, which is where a cut goes. */
+	quiet: number;
+	/** The idle watchdog, which is the only thing on a timer. */
 	watchdog: ReturnType<typeof setInterval> | null;
 	/** Loudest sample of the whole sitting, which is how a dead microphone is recognised. */
 	peak: number;
@@ -39,32 +47,11 @@ interface VoiceSession {
 	 *
 	 * A laptop microphone in a quiet room boosts its gain until the noise
 	 * floor alone clears any fixed threshold — which read as someone talking
-	 * forever, so pauses never registered and Whisper was fed the hiss. The
+	 * forever, and kept the microphone from ever switching itself off. The
 	 * estimate snaps down to any quiet chunk instantly and rises only slowly,
-	 * so speech never drags it up, and "loud enough to be speech" means loud
-	 * against this room rather than loud in the abstract.
+	 * so speech never drags it up.
 	 */
 	noiseFloor: number;
-	/**
-	 * The room's sustained level, or -1 until a chunk of room has been heard.
-	 *
-	 * Kept separately from `noiseFloor` because it is measured on a different
-	 * scale: that one follows the peak of a chunk and answers "did something
-	 * happen", this one follows what a chunk holds and answers "was it
-	 * speech".
-	 *
-	 * It starts unknown rather than at a level, because a guess here fails in
-	 * the worst direction. Seeded high, and with someone talking from the
-	 * first chunk, the estimate has no silence to learn from and settles on
-	 * the quietest part of their voice — and then asks speech to be several
-	 * times louder than itself, which nothing can be. That is silent
-	 * dictation with a full meter, and it is what this used to do.
-	 */
-	levelFloor: number;
-	/** Where in the buffer the last heard speech ended; 0 while the segment holds none. */
-	speechEnd: number;
-	/** How far the last completed pass had heard; a new pass needs speech beyond it. */
-	passSpeechEnd: number;
 	/** The device this clip came from, for saying which one heard nothing. */
 	device: string;
 	/** When the microphone last heard something loud enough to be speech. */
@@ -84,53 +71,14 @@ const SILENCE_PEAK = 0.02;
 /**
  * Speech must clear the room by this much.
  *
- * Multiplying the learned noise floor separates talking from the hiss of the
- * room it is spoken in, so "loud enough to be speech" means loud against
- * this room rather than loud in the abstract.
+ * Multiplying the learned noise floor separates talking from the hiss of
+ * the room it is spoken in, so "loud enough to be speech" means loud
+ * against this room rather than loud in the abstract.
  */
 const SPEECH_ABOVE_FLOOR = 3;
-/**
- * The bounds on that threshold, measured on the peak of a chunk.
- *
- * The cap matters most: a room noisy enough to push the estimate past it
- * would otherwise raise the bar above speech itself and hear nobody at all.
- */
+/** Absolute bounds on that threshold, so a very quiet or loud room cannot pin it. */
 const SPEECH_PEAK_FLOOR = 0.02;
 const SPEECH_PEAK_CAP = 0.25;
-
-/**
- * A clip must sustain this much level to be worth transcribing.
- *
- * This is the one that stops the model inventing words. A tap, a click or a
- * door is loud for a millisecond and quiet either side, so it trips the peak
- * but leaves the clip's sustained level down among the room's — and a clip
- * of a tap is what came back as "You you Okay." Speech measured on the same
- * scale sits around 0.05 and up, so the bar sits between the two, low enough
- * that a quiet talker still clears it.
- */
-/**
- * How far a clip must rise above the room to count as speech.
- *
- * This was a fixed level once, picked off measurements of one synthesised
- * voice — and a fixed level is only ever right for the microphone it was
- * measured on. A quieter input sat under it and dictation heard nothing at
- * all. A multiple of the room works on any microphone, at any gain: a tap
- * barely doubles the level it interrupts, where speech is several times it.
- *
- * The absolute minimum below is a floor for a room so silent that a multiple
- * of it would be a rounding error, not a bar.
- */
-const CLIP_ABOVE_ROOM = 2.5;
-const CLIP_LEVEL_MINIMUM = 0.006;
-
-/** The bar a clip must clear to be worth handing to the model. */
-function clipThreshold(session: VoiceSession): number {
-	// Nothing heard of the room yet: take the lowest bar there is. Erring
-	// towards hearing costs a stray word; erring the other way is a
-	// microphone that does not work.
-	if (session.levelFloor < 0) return CLIP_LEVEL_MINIMUM;
-	return Math.max(CLIP_LEVEL_MINIMUM, session.levelFloor * CLIP_ABOVE_ROOM);
-}
 
 /** Loud enough to be speech, in this room, on this microphone. */
 function speechThreshold(session: VoiceSession): number {
@@ -138,388 +86,144 @@ function speechThreshold(session: VoiceSession): number {
 }
 
 let voice: VoiceSession | null = null;
-/**
- * The words of the current segment already written into the composer.
- *
- * Whisper re-reads the segment each pass, and a later pass will happily
- * rephrase what an earlier one produced — so writing its output straight
- * to the draft made the text rewrite itself every couple of seconds. These
- * are kept instead, and only ever added to: a word that has been shown
- * stays put, and each pass appends whatever it has found beyond it.
- */
+/** Segments captured but not yet decoded, oldest first. */
+const queue: Float32Array[] = [];
+/** The text of every segment already written into the draft this sitting. */
 let settled: string[] = [];
-/** True while a transcription is in flight, so passes never overlap. */
-let voiceBusy = false;
-
-/** Whisper wants 16 kHz mono; asking the context for it does the resampling. */
-const SPEECH_RATE = 16000;
-/**
- * The pause between one pass finishing and the next starting.
- *
- * Passes used to run on a fixed 1200 ms timer, and a tick that landed while
- * the model was busy was dropped rather than queued — so the real cadence
- * was often nearer two and a half seconds, and words arrived in clumps.
- * Chaining each pass off the end of the last instead means the text is only
- * ever as far behind the voice as one decode, and this gap exists solely to
- * leave the machine a breath between them.
- */
-const SPEECH_GAP_MS = 80;
-/**
- * How long to wait before looking again when there is nothing new to hear.
- *
- * A pass over audio the last one already read would spend a few hundred
- * milliseconds to produce the same words, so silence is checked cheaply
- * instead — often enough that the first word after a pause is not held up.
- */
-const SPEECH_IDLE_MS = 150;
-/** Audio kept past the last spoken word, so a final consonant is not clipped. */
-const SPEECH_PAD_SAMPLES = SPEECH_RATE * 0.3;
-/**
- * Quiet for this long and the sentence is over.
- *
- * Nothing more is coming to revise the tail, so the segment is committed
- * whole and its audio dropped — the pause is what keeps every later pass
- * short, and what puts the last word or two on screen while they are
- * still useful.
- */
-const SETTLE_AFTER_SILENCE_MS = 900;
-/**
- * A segment is never allowed past this, pause or no pause.
- *
- * Whisper reads thirty-second windows; someone who talks straight through
- * every pause would otherwise grow a clip the model silently truncates.
- * Cutting mid-flow can smudge one word at the seam, which is the lesser
- * evil by a distance.
- */
-const SEGMENT_LIMIT_SAMPLES = SPEECH_RATE * 25;
-/**
- * Quiet for this long and the microphone switches itself off.
- *
- * Long enough that a thinking pause mid-prompt never trips it — it only
- * fires when dictation has plainly been forgotten about, so an open
- * microphone is never left listening to the room.
- */
-const AUTO_STOP_AFTER_SILENCE_MS = 60_000;
-
-/**
- * Dictation's own words, in the three states they pass through.
- *
- * A pass hands back two or three words at once — the ones spoken while it
- * was decoding — and writing them together made the composer jump in
- * clumps. They are queued instead and revealed one at a time, so the text
- * arrives at something like the rate it was spoken. Nothing is decoded any
- * sooner; what changes is that the words are spread across the wait for the
- * next pass rather than landing on top of each other.
- */
-/** Every word this sitting has settled, across segments. */
-let committed: string[] = [];
-/** The dictated words currently on screen. */
-let shownWords: string[] = [];
-/** Decoded, still waiting their turn. */
-let queued: string[] = [];
-/** Exactly what dictation has written at the end of the draft. */
-let rendered = "";
-let revealTimer: ReturnType<typeof setTimeout> | null = null;
-
-/**
- * How long the next pass is expected to take, learned as it goes.
- *
- * The reveal is paced to empty the queue just as the next pass refills it,
- * so words keep coming at a steady rate instead of stalling and then
- * rushing. A rough estimate is enough, and it must be a moving one: a pass
- * over a long segment takes longer than one over a short one.
- */
-let passGapMs = 700;
-let lastPassAt = 0;
-
-/**
- * Never slower than this, however few words are waiting.
- *
- * Set below the gap between passes rather than far below it: at 190 ms a
- * pass's two or three words were spent in half a second and then nothing
- * moved until the next one landed, which read as a stutter. Spreading them
- * nearer the full gap costs the last word of each pass a fraction of a
- * second and buys text that simply keeps coming.
- */
-const MAX_REVEAL_MS = 340;
-/** Never faster than this, or the words are a blur rather than a reveal. */
-const MIN_REVEAL_MS = 45;
-/**
- * How many words may wait their turn before the reveal gives up and shows
- * them all. Roughly what a fast speaker produces between two passes.
- */
-const REVEAL_BACKLOG = 8;
-
-/** Put the words currently revealed at the end of the draft. */
-function paint(): void {
-	const text = shownWords.join(" ");
-	const next = renderRun(app.draft, rendered, text);
-	if (!next.reclaimed) {
-		// The user has typed since, or sent: those words are theirs now, and
-		// the run starts again after whatever the composer holds. Everything
-		// this sitting had settled goes with it — left standing, the next pass
-		// would offer the whole run again and dictation would retype the
-		// message from the beginning.
-		shownWords = [];
-		queued = [];
-		committed = [];
-		rendered = "";
-		app.voiceSpoken = "";
-		return;
-	}
-	app.draft = next.draft;
-	rendered = next.rendered;
-	app.voiceSpoken = next.rendered;
-}
-
-/** Reveal one waiting word, and line up the next. */
-function revealNext(): void {
-	revealTimer = null;
-	const word = queued.shift();
-	if (word === undefined) return;
-	shownWords.push(word);
-	paint();
-	bump();
-	scheduleReveal();
-}
-
-function scheduleReveal(): void {
-	if (revealTimer !== null || queued.length === 0) return;
-	// Spread what is waiting across the gap the next pass is expected in.
-	const spacing = Math.round(passGapMs / queued.length);
-	revealTimer = setTimeout(revealNext, Math.max(MIN_REVEAL_MS, Math.min(MAX_REVEAL_MS, spacing)));
-}
-
-/**
- * Take a pass's view of the run and fit it to what is already on screen.
- *
- * The first word of a pass appears at once — the reveal is there to spread
- * the clump behind it, not to hold the whole thing up.
- */
-function offerRun(target: string[]): void {
-	const now = Date.now();
-	if (lastPassAt !== 0) passGapMs = Math.round(passGapMs * 0.6 + (now - lastPassAt) * 0.4);
-	lastPassAt = now;
-
-	const plan = planRun(shownWords, queued, target);
-	if (plan.kind === "rewrite") {
-		// The pass contradicted words already shown, so the run is redrawn
-		// whole; this is the rare case, and cheaper than leaving it wrong.
-		queued = [];
-		shownWords = plan.words;
-		paint();
-		bump();
-		return;
-	}
-	if (plan.kind === "requeue") queued = plan.words;
-	else queued = queued.concat(plan.words);
-	// A backlog means the reveal has lost the race with the speaker. Trickling
-	// it out would only fall further behind, so past this much the words go up
-	// together: being a beat behind is worse than arriving in a clump.
-	if (queued.length > REVEAL_BACKLOG) {
-		flushRun();
-		bump();
-		return;
-	}
-	if (revealTimer === null) revealNext();
-	else scheduleReveal();
-}
-
-/** Show everything at once: dictation is over and nothing more is coming. */
-function flushRun(): void {
-	if (revealTimer !== null) {
-		clearTimeout(revealTimer);
-		revealTimer = null;
-	}
-	if (queued.length > 0) {
-		shownWords = shownWords.concat(queued);
-		queued = [];
-		paint();
-	}
-}
-
-/** Give up words that were only ever a guess, and end the run. */
-function clearRun(): void {
-	if (revealTimer !== null) {
-		clearTimeout(revealTimer);
-		revealTimer = null;
-	}
-	queued = [];
-	shownWords = [];
-	committed = [];
-	// Take the shown words back off the draft, if they are still ours to take.
-	const next = renderRun(app.draft, rendered, "");
-	if (next.reclaimed) app.draft = next.draft;
-	rendered = "";
-	app.voiceSpoken = "";
-}
-
-/**
- * End the run without taking anything back.
- *
- * The microphone is shut, so the words stop being grey italics and read as
- * anything else the user has written — which is what they will look like in
- * the message once it is sent.
- */
-function settleRun(): void {
-	if (revealTimer !== null) {
-		clearTimeout(revealTimer);
-		revealTimer = null;
-	}
-	queued = [];
-	shownWords = [];
-	committed = [];
-	rendered = "";
-	lastPassAt = 0;
-	app.voiceSpoken = "";
-}
+/** Runs while the queue drains, so senders can wait the words out. */
+let decoding: Promise<void> | null = null;
+/** The stop in progress, so a second stop joins it rather than repeating it. */
+let stopping: Promise<void> | null = null;
 
 export function voiceRunning(): boolean {
 	return voice !== null;
 }
 
-/** The first `limit` samples of the segment, as one buffer for the model. */
-function joinSamples(session: VoiceSession, limit: number): Float32Array {
-	const all = new Float32Array(limit);
+/** True while segments are being decoded; their words are not in the draft yet. */
+export function voiceTranscribing(): boolean {
+	return decoding !== null;
+}
+
+/** Resolves once every captured segment has landed (or failed). */
+export function whenVoiceSettled(): Promise<void> {
+	return decoding ?? Promise.resolve();
+}
+
+/** The segment in hand, as one buffer for the model. */
+function joinSamples(session: VoiceSession): Float32Array {
+	const all = new Float32Array(session.total);
 	let offset = 0;
 	for (const chunk of session.samples) {
-		if (offset >= limit) break;
-		const take = Math.min(chunk.length, limit - offset);
-		all.set(take === chunk.length ? chunk : chunk.subarray(0, take), offset);
-		offset += take;
+		all.set(chunk, offset);
+		offset += chunk.length;
 	}
 	return all;
 }
 
-/** The sustained level of a clip: what it holds, not what it spiked to. */
-function clipLevel(samples: Float32Array): number {
-	if (samples.length === 0) return 0;
-	let energy = 0;
-	for (const sample of samples) energy += sample * sample;
-	return Math.sqrt(energy / samples.length);
+/**
+ * Close the segment in hand and hand it to the decoder.
+ *
+ * A segment the microphone barely registered is dropped here rather than
+ * decoded: a pause between two sentences is not worth a pass, and a speech
+ * model given quiet invents words to fill it.
+ */
+function cutSegment(session: VoiceSession): void {
+	const clip = joinSamples(session);
+	const heard = session.segmentPeak >= SILENCE_PEAK;
+	session.samples = [];
+	session.total = 0;
+	session.segmentPeak = 0;
+	session.quiet = 0;
+	if (heard) enqueue(clip);
 }
 
-/**
- * Re-read the current segment and show the text.
- *
- * A partial pass over the segment gives coherent text where decoding only
- * the newest slice would fragment words at the boundaries. The clip ends
- * just after the last spoken word — Whisper handed trailing quiet answers
- * with the last word again, which is where a composer full of one repeated
- * word came from. When the pass lands on a pause — or the segment hits its
- * length limit — the segment is finished: every word committed, its audio
- * dropped, the next one begun.
- *
- * Every pass writes twice over: the words it has settled, which stay, and
- * the tail it is still unsure of, which the next pass replaces. Returns
- * whether the model was actually asked, so the caller knows whether to come
- * straight back or wait for more speech.
- */
-async function refreshTranscript(session: VoiceSession, final = false): Promise<boolean> {
-	if (voiceBusy) return false;
-	if (!final && voice !== session) return false;
-	// No speech in the segment, or none since the last pass: there is
-	// nothing new to hear, and passing quiet to the model invents words.
-	if (session.speechEnd === 0) return false;
-	if (!final && session.speechEnd <= session.passSpeechEnd) return false;
-	const clipEnd = Math.min(session.total, Math.round(session.speechEnd + SPEECH_PAD_SAMPLES));
-	if (clipEnd < SPEECH_RATE * 0.4) return false;
-	voiceBusy = true;
-	try {
-		// Audio keeps arriving while the pass runs; remember where this clip
-		// ended so only what was actually transcribed is dropped afterwards.
-		const consumed = clipEnd;
-		const heard = session.speechEnd;
-		const clip = joinSamples(session, clipEnd);
-		// Something was loud enough to open this clip, but a clip has to hold
-		// its level to be speech. Below the bar it is a tap or a door, and
-		// handing it over is what made the model answer with a word nobody
-		// said. Note where it reached anyway, so the pass is not retried
-		// forever over the same quiet audio.
-		const heardLevel = clipLevel(clip);
-		const bar = clipThreshold(session);
-		if (heardLevel < bar) {
-			// Worth being able to see: a microphone that hears nothing and a
-			// bar set too high look identical from the outside.
-			console.debug(`dictation: clip refused, level ${heardLevel.toFixed(4)} under bar ${bar.toFixed(4)}`);
-			session.passSpeechEnd = heard;
-			return true;
+/** Put a segment in the queue, starting the decoder if it is not running. */
+function enqueue(clip: Float32Array): void {
+	queue.push(clip);
+	if (decoding) return;
+	decoding = drainQueue().finally(() => {
+		decoding = null;
+		bump();
+	});
+	bump();
+}
+
+/** One decode at a time, in capture order, until nothing is waiting. */
+async function drainQueue(): Promise<void> {
+	for (;;) {
+		const clip = queue.shift();
+		if (!clip) return;
+		try {
+			await decodeSegment(clip);
+		} catch (error) {
+			// A pass that threw rather than answering must not take the segments
+			// behind it down with it: the rest of the sitting still decodes.
+			app.voiceError = error instanceof Error ? error.message : String(error);
+			toast(app.voiceError, "error");
+			bump();
 		}
-		const result = await api.speechTranscribe(clip.buffer as ArrayBuffer);
-		if (!final && voice !== session) return true;
-		if (!result.ok) {
-			if (final) toast(result.error ?? "Could not transcribe that", "error");
-			return true;
-		}
-		session.passSpeechEnd = heard;
-		// A pause is as good as an ending for the words already spoken.
-		const quiet = Date.now() - session.lastSpokeAt > SETTLE_AFTER_SILENCE_MS;
-		const done = final || quiet || consumed >= SEGMENT_LIMIT_SAMPLES;
-		const text = String(result.value ?? "").trim();
-		// Something crossed the threshold, but what came back is what the
-		// model says when it has heard nothing worth saying. Take the pass
-		// as the invention it is rather than typing it at the user.
-		if (isStockAnswer(text, settled)) return true;
-		const fresh = freshWords(settled, text, done);
-		// Both are measured against the words settled before this pass: what
-		// it adds for good, and what it is still only guessing at.
-		const tail = tailWords(settled, text, done);
-		// A pass that only says the last word again is the model echoing,
-		// not the user repeating themselves; a real repeat still lands when
-		// the segment commits whole.
-		if (!done && isEcho(settled, fresh)) return true;
-		const guess = !done && isEcho(settled, tail) ? [] : tail;
-		settled = settled.concat(fresh);
-		committed = committed.concat(fresh);
-		// Hand the composer the run as this pass hears it: everything settled
-		// so far, plus the words it is still unsure of. What of that is not yet
-		// on screen is revealed a word at a time.
-		offerRun(committed.concat(guess));
-		if (done && !final) {
-			// The segment is complete: let its audio go so the next pass reads
-			// seconds, not the sitting, and start the word count over.
-			dropSamples(session, consumed);
-			session.speechEnd = Math.max(0, session.speechEnd - consumed);
-			session.passSpeechEnd = Math.max(0, session.passSpeechEnd - consumed);
-			settled = [];
-		}
-		return true;
-	} finally {
-		voiceBusy = false;
 	}
 }
 
-/**
- * Run passes back to back for as long as the microphone is open.
- *
- * Each pass schedules the next itself rather than sharing a fixed timer, so
- * the text follows the voice at whatever speed the machine can manage: a
- * short gap after a pass that heard something, a slightly longer one when
- * there was nothing new, and no possibility of a tick being thrown away
- * because the model happened to be busy.
- */
-function schedulePass(session: VoiceSession, delay: number): void {
-	session.timer = setTimeout(() => {
-		session.timer = null;
-		if (voice !== session) return;
-		void refreshTranscript(session).then((ran) => {
-			if (voice !== session) return;
-			schedulePass(session, ran ? SPEECH_GAP_MS : SPEECH_IDLE_MS);
-		});
-	}, delay);
+/** Decode one segment and put its words at the end of the draft. */
+async function decodeSegment(clip: Float32Array): Promise<void> {
+	const result = await api.speechTranscribe(clip.buffer as ArrayBuffer);
+	if (!result.ok) {
+		// One segment failing is not the sitting failing. Say so, and carry on
+		// with the rest: losing a sentence out of an hour beats losing the hour.
+		app.voiceError = result.error ?? "Could not transcribe that";
+		toast(app.voiceError, "error");
+		bump();
+		return;
+	}
+	const raw = String(result.value ?? "").trim();
+	// A decode that fell into a loop comes back as one word repeated; a
+	// segment that is mostly that is thrown away, and a shorter run inside
+	// otherwise sound text is folded to a single copy.
+	if (isRunaway(raw)) {
+		console.debug(`dictation: transcription refused as a runaway repeat: ${raw.slice(0, 80)}`);
+		return;
+	}
+	const text = collapseRepeats(raw);
+	// Something crossed the threshold, but what came back is what the model
+	// says when it has heard nothing worth saying. Take the pass as the
+	// invention it is rather than typing it at the user.
+	if (isStockAnswer(text, settled)) return;
+	if (text === "") return;
+	// Words go to the chat that was being dictated into, not to whichever chat
+	// is on screen when the decode lands. Switching chats mid-sentence used to
+	// type the rest of it into the chat just opened.
+	settled.push(text);
+	if (dictatedInto !== "" && dictatedInto !== app.currentSessionPath) {
+		appendToChatDraft(dictatedInto, text);
+		return;
+	}
+	// Append at the end of whatever the composer holds, replacing trailing
+	// whitespace with the one separating space.
+	app.draft = renderRun(app.draft, "", text).draft;
+	bump();
 }
+
+/** The chat dictation is being typed into: fixed when the sitting starts. */
+let dictatedInto = "";
 
 export async function startVoice(): Promise<void> {
 	if (voice) return;
+	// Whichever chat is open now owns every word of this sitting.
+	dictatedInto = app.currentSessionPath;
+	// A fresh sitting starts with a clean slate: the last attempt's failure
+	// must not keep staining the button once the user tries again. Segments
+	// still coming back from the last sitting keep theirs, since what has
+	// settled decides whether the next answer is the model talking to itself.
+	app.voiceError = "";
+	if (!decoding) settled = [];
+	bump();
 	const status = (await api.speechStatus()) as { ready: boolean };
-	settled = [];
-	// Whatever is in the composer is the user's now, not a run to reclaim.
-	settleRun();
 	if (status.ready) {
 		// The weights are on disk, but that is not the same as loaded, and
-		// loading them is what the first clip used to wait on. Start it now
-		// and do not wait: capture begins immediately either way, so the load
-		// runs while the first words are still being spoken.
+		// loading them is what the stop used to wait on. Start it now and do
+		// not wait: capture begins immediately either way, so the load runs
+		// while the user is still talking.
 		void api.speechPrepare();
 	} else {
 		// No message for this: the mic button spins until the model is here.
@@ -527,9 +231,20 @@ export async function startVoice(): Promise<void> {
 		const prepared = await api.speechPrepare();
 		app.voicePreparing = false;
 		if (!prepared.ok) {
-			toast(prepared.error ?? "Could not prepare the speech model", "error");
+			app.voiceError = prepared.error ?? "Could not prepare the speech model";
+			toast(app.voiceError, "error");
+			bump();
 			return;
 		}
+	}
+
+	// The microphone API only exists in a secure context — HTTPS, or localhost.
+	// Served over plain HTTP from another machine, it is simply absent, and
+	// reaching for it crashes the window rather than saying why.
+	if (!navigator.mediaDevices?.getUserMedia) {
+		app.voiceError = "Dictation needs a secure context: open Smolt over HTTPS, or via localhost.";
+		bump();
+		return;
 	}
 
 	// Ask the operating system before asking for a stream, so a first-time
@@ -538,7 +253,9 @@ export async function startVoice(): Promise<void> {
 	const osStatus = (access.value as { status?: string })?.status;
 	if (access.ok && osStatus && osStatus !== "granted") {
 		app.voiceDenied = true;
-		toast("smolt needs microphone access. Use the mic button to open the setting.", "error");
+		app.voiceError = "Smolt needs microphone access. Use the mic button to open the setting.";
+		toast(app.voiceError, "error");
+		bump();
 		return;
 	}
 
@@ -548,13 +265,10 @@ export async function startVoice(): Promise<void> {
 		// the same WebRTC stack a voice chat runs, which is what strips a fan
 		// or a keyboard before the model ever hears it.
 		//
-		// Automatic gain stays *on*. Turning it off looked right — it is what
-		// winds a quiet room up until hiss alone reads as talking — but it is
-		// also the only thing bringing a quiet microphone up to a level worth
-		// transcribing, and without it a normal voice went unheard entirely.
-		// The gain it adds is handled where it belongs instead: every bar
-		// below is measured against the room rather than set as a number, so
-		// a loud room and a quiet one are judged the same way.
+		// Automatic gain stays *on*: it is the only thing bringing a quiet
+		// microphone up to a level worth transcribing, and the gain it adds
+		// is handled where it belongs — the room floor below is learned from
+		// what the microphone actually delivers.
 		const processing = {
 			echoCancellation: true,
 			noiseSuppression: true,
@@ -565,23 +279,21 @@ export async function startVoice(): Promise<void> {
 		});
 	} catch (error) {
 		// The failures mean different things and deserve different advice:
-		// a refusal is a setting, a missing device is a device.
+		// a refusal is a setting, a missing device is a device. Each lands on
+		// the mic button too — a console-only message is no message at all.
 		const name = error instanceof Error ? error.name : "";
-		if (name === "NotFoundError" || name === "OverconstrainedError") {
-			app.voiceDenied = true;
-			app.micDeviceId = "";
-			toast(
-				"No microphone found. Plug one in, or check Settings → Privacy → Microphone → " +
-					"'Let desktop apps access your microphone'.",
-				"error",
-			);
-		} else if (name === "NotAllowedError" || name === "SecurityError") {
-			app.voiceDenied = true;
-			toast("smolt needs microphone access. Use the mic button to open the setting.", "error");
-		} else {
-			app.voiceDenied = false;
-			toast(`Could not open the microphone (${name || "unknown error"}).`, "error");
-		}
+		const advise =
+			name === "NotFoundError" || name === "OverconstrainedError"
+				? "No microphone found. Plug one in, or check Settings → Privacy → Microphone → " +
+					"'Let desktop apps access your microphone'."
+				: name === "NotAllowedError" || name === "SecurityError"
+					? "Smolt needs microphone access. Use the mic button to open the setting."
+					: `Could not open the microphone (${name || "unknown error"}).`;
+		app.voiceError = advise;
+		app.voiceDenied = name !== "" && name !== "UnknownError";
+		if (name === "NotFoundError" || name === "OverconstrainedError") app.micDeviceId = "";
+		toast(advise, "error");
+		bump();
 		return;
 	}
 	app.voiceDenied = false;
@@ -598,13 +310,11 @@ export async function startVoice(): Promise<void> {
 		analyser,
 		samples: [],
 		total: 0,
-		timer: null,
+		segmentPeak: 0,
+		quiet: 0,
 		watchdog: null,
 		peak: 0,
 		noiseFloor: 1,
-		levelFloor: -1,
-		speechEnd: 0,
-		passSpeechEnd: 0,
 		device: stream.getAudioTracks()[0]?.label ?? "",
 		lastSpokeAt: Date.now(),
 	};
@@ -619,42 +329,32 @@ export async function startVoice(): Promise<void> {
 			if (size > loudest) loudest = size;
 			energy += sample * sample;
 		}
-		const level = Math.sqrt(energy / input.length);
 		if (loudest > session.peak) session.peak = loudest;
-		// Any quiet chunk is the room, and is believed at once; a loud one
-		// moves the estimate only a hair, so a sentence cannot drag the bar up
-		// behind it and end up measuring the speech it was meant to detect.
-		session.noiseFloor = loudest < session.noiseFloor ? loudest : session.noiseFloor * 0.995 + loudest * 0.005;
-		// Learn the room only from chunks the peak detector says are not
-		// speech. That detector runs off its own estimate, so there is no
-		// circle here — and while someone is talking this simply holds still,
-		// which is exactly right: a sentence is not evidence about the room.
-		if (loudest < speechThreshold(session)) {
-			session.levelFloor =
-				session.levelFloor < 0
-					? level
-					: level < session.levelFloor
-						? level
-						: session.levelFloor * 0.995 + level * 0.005;
-		}
-		// Where speech reaches is judged on the peak, and generously: a gap
-		// between two words is still the middle of a sentence, and a bar high
-		// enough to fall into those gaps stops passes running and puts the
-		// words back into clumps. Whether a clip is worth transcribing at all
-		// is a separate question, asked of the clip below.
+		if (loudest > session.segmentPeak) session.segmentPeak = loudest;
+		// Any quiet chunk is the room, and is believed at once. A louder one
+		// moves the estimate only a hair, so a sentence never drags it up.
+		if (loudest < session.noiseFloor) session.noiseFloor = loudest;
+		else if (loudest < speechThreshold(session)) session.noiseFloor = session.noiseFloor * 0.995 + loudest * 0.005;
 		if (loudest >= speechThreshold(session)) {
 			session.lastSpokeAt = Date.now();
-			session.speechEnd = session.total;
-		}
+			session.quiet = 0;
+		} else session.quiet += input.length;
+		if (shouldCutSegment(session.total / SPEECH_RATE, session.quiet / SPEECH_RATE)) cutSegment(session);
+		// Live level for the waveform: RMS relative to this room's speech
+		// threshold, clamped to 0..1, with a fast attack and a slower decay so
+		// the bars fall gently between syllables instead of strobing. When it
+		// settles near zero the composer shows its waiting dots again.
+		const rms = Math.sqrt(energy / input.length);
+		const now = Math.min(1, rms / speechThreshold(session));
+		const level = Math.max(now, app.voiceLevel * 0.82);
+		// The waveform reads the level straight off the store (outside React,
+		// via a rAF loop), so a store bump is only needed to switch the strip
+		// between its dots and its rolling bars — not for every wiggle.
+		const wasAudible = app.voiceLevel >= 0.05;
+		app.voiceLevel = level;
+		if (wasAudible !== level >= 0.05) bump();
 		if (session.peak >= SILENCE_PEAK && app.voiceSilent !== "") {
 			app.voiceSilent = "";
-			bump();
-		}
-		// A coarse meter, so the button can show that sound is arriving and a
-		// dead microphone is visible while speaking rather than afterwards.
-		const meter = Math.min(1, loudest * 4);
-		if (Math.abs(meter - app.voiceLevel) > 0.12) {
-			app.voiceLevel = meter;
 			bump();
 		}
 	};
@@ -669,11 +369,10 @@ export async function startVoice(): Promise<void> {
 
 	voice = session;
 	app.voiceActive = true;
-	schedulePass(session, SPEECH_GAP_MS);
+	// A fresh sitting starts silent until the microphone proves otherwise.
+	app.voiceLevel = 0;
 	// A microphone forgotten about switches itself off rather than listening
-	// to the room; a thinking pause is far too short to trip it. This is its
-	// own timer because the passes no longer run on one, and because it must
-	// still fire during a long decode.
+	// to the room; a thinking pause is far too short to trip it.
 	session.watchdog = setInterval(() => {
 		if (voice !== session) return;
 		if (Date.now() - session.lastSpokeAt > AUTO_STOP_AFTER_SILENCE_MS) {
@@ -684,64 +383,94 @@ export async function startVoice(): Promise<void> {
 	bump();
 }
 
+/** Whisper wants 16 kHz mono; asking the context for it does the resampling. */
+const SPEECH_RATE = 16000;
+/**
+ * Quiet for this long and the microphone switches itself off.
+ *
+ * Long enough that a thinking pause mid-prompt never trips it — it only
+ * fires when dictation has plainly been forgotten about, so an open
+ * microphone is never left listening to the room.
+ */
+const AUTO_STOP_AFTER_SILENCE_MS = 60_000;
+
+/**
+ * How long to keep capturing after a stop, waiting for the last block.
+ *
+ * The capture node hands audio over in 4096-sample blocks, so when a stop
+ * arrives the block still being filled — up to 256 ms, which is a whole
+ * short word — has never been delivered. One more block is waited for
+ * before the graph comes down, which is why the end of a sentence spoken
+ * straight into Enter still makes it into the clip.
+ */
+const TAIL_FLUSH_MS = 400;
+
+/** Wait for the block in flight, or for the deadline, whichever comes first. */
+async function flushTail(session: VoiceSession): Promise<void> {
+	const blocks = session.samples.length;
+	const until = Date.now() + TAIL_FLUSH_MS;
+	while (session.samples.length === blocks && Date.now() < until) {
+		await new Promise((resolve) => setTimeout(resolve, 20));
+	}
+}
+
 /** Stop capture and tear the audio graph down. */
 function stopCapture(): VoiceSession | null {
 	const session = voice;
 	if (!session) return null;
 	voice = null;
 	app.voiceActive = false;
-	if (session.timer) clearTimeout(session.timer);
 	if (session.watchdog) clearInterval(session.watchdog);
-	app.voiceLevel = 0;
 	for (const track of session.stream.getTracks()) track.stop();
 	void session.context.close();
 	return session;
 }
 
-export async function finishVoice(insert: boolean): Promise<void> {
+/**
+ * Stop dictation and finish decoding what was captured.
+ *
+ * Most of the sitting has usually been decoded already, while it was being
+ * spoken. What is left is the segment in hand and anything still queued, so
+ * this returns once every word is in the draft (or its pass has failed) —
+ * however long the microphone was open.
+ */
+export function finishVoice(insert: boolean): Promise<void> {
+	if (stopping) return stopping;
+	if (!voice) return whenVoiceSettled();
+	stopping = finishVoiceNow(insert).finally(() => {
+		stopping = null;
+	});
+	return stopping;
+}
+
+async function finishVoiceNow(insert: boolean): Promise<void> {
+	if (voice && insert) await flushTail(voice);
 	const session = stopCapture();
 	if (!session) return;
 	if (!insert) {
-		// Words that were only ever a guess should not be left behind as
-		// though they had been said.
-		// Words that were only ever a guess should not be left behind as
-		// though they had been said.
-		clearRun();
-		settled = [];
-		bump();
+		// Thrown away rather than typed out: segments waiting on the decoder
+		// are dropped with the one in hand.
+		queue.length = 0;
 		return;
 	}
 	// A sitting with nothing in it is not transcribed at all. Saying so, and
 	// naming the device, is the difference between a mystery and a setting:
 	// the machine may have several inputs and only one of them live.
 	if (session.peak < SILENCE_PEAK) {
-		clearRun();
-		settled = [];
 		const which = session.device.trim();
 		app.voiceSilent = which === "" ? "the microphone" : which;
 		bump();
 		return;
 	}
-	// Only a segment that still holds speech needs a last pass — stopping
-	// after a pause has nothing left to commit and is instant.
-	if (session.speechEnd > 0) {
-		voiceBusy = false;
-		app.voiceFinishing = true;
-		bump();
-		// One last pass, so the tail of the sentence is not lost.
-		await refreshTranscript(session, true);
-		app.voiceFinishing = false;
-	}
-	// Nothing more is coming, so anything still waiting its turn is shown at
-	// once: a stop — or an Enter, which stops first — must not drop words
-	// merely because they had not been revealed yet.
-	flushRun();
-	settled = [];
-	// If a last pass could not run, or failed, the words already shown stay in
-	// the composer and stop being ours to take back. Either way the microphone
-	// is shut, so they read as ordinary text.
-	settleRun();
+	cutSegment(session);
+	app.voiceFinishing = true;
 	bump();
+	try {
+		await whenVoiceSettled();
+	} finally {
+		app.voiceFinishing = false;
+		bump();
+	}
 }
 
 export function toggleVoice(): void {

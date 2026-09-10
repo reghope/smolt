@@ -276,7 +276,9 @@ async function findLocalSessionByExactId(
 	cwd: string,
 	sessionDir?: string,
 ): Promise<{ type: "local"; path: string } | undefined> {
-	const localSessions = await SessionManager.list(cwd, sessionDir);
+	// Hidden sessions included: naming one by id is asking for that session,
+	// not browsing a list it should stay out of.
+	const localSessions = await SessionManager.list(cwd, sessionDir, undefined, { includeHidden: true });
 	const localMatch = localSessions.find((s) => s.id === sessionId);
 	return localMatch ? { type: "local", path: localMatch.path } : undefined;
 }
@@ -288,7 +290,7 @@ async function resolveSessionPath(sessionArg: string, cwd: string, sessionDir?: 
 	}
 
 	// Try to match as session ID in current project first
-	const localSessions = await SessionManager.list(cwd, sessionDir);
+	const localSessions = await SessionManager.list(cwd, sessionDir, undefined, { includeHidden: true });
 	const localMatch =
 		localSessions.find((s) => s.id === sessionArg) ?? localSessions.find((s) => s.id.startsWith(sessionArg));
 
@@ -442,7 +444,10 @@ export async function createSessionManager(
 	if (parsed.resume) {
 		try {
 			const selectedPath = await selectSession(
-				(onProgress) => SessionManager.list(cwd, sessionDir, onProgress),
+				(onProgress) =>
+					SessionManager.list(cwd, sessionDir, onProgress, {
+						includeHidden: settingsManager.getShowHiddenChats(),
+					}),
 				(onProgress) => SessionManager.listAll(sessionDir, onProgress),
 				settingsManager,
 			);

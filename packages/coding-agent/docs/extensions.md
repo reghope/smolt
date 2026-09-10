@@ -1,8 +1,8 @@
-> smolt can create extensions. Ask it to build one for your use case.
+> Smolt can create extensions. Ask it to build one for your use case.
 
 # Extensions
 
-Extensions are TypeScript modules that extend smolt's behavior. They can subscribe to lifecycle events, register custom tools callable by the LLM, add commands, and more.
+Extensions are TypeScript modules that extend Smolt's behavior. They can subscribe to lifecycle events, register custom tools callable by the LLM, add commands, and more.
 
 > **Placement for /reload:** Put extensions in `~/.smolt/agent/extensions/` (global) or `.smolt/extensions/` (project-local) for auto-discovery. Use `smolt -e ./path.ts` only for quick tests. Extensions in auto-discovered locations can be hot-reloaded with `/reload`.
 
@@ -106,6 +106,30 @@ Test with `--extension` (or `-e`) flag:
 smolt -e ./my-extension.ts
 ```
 
+## Built-in Extensions
+
+Smolt ships these extensions itself. Each one can be switched off by listing its name in `disabledExtensions` in the global `settings.json`, or from the desktop app; the interactive `/settings` dialog does not list extensions. The commands they register are listed in [Usage](usage.md#slash-commands).
+
+| Name | What it does |
+|------|--------------|
+| `llama.cpp` | Local models through a llama.cpp server, with downloads and loading |
+| `degeneration` | Catches a looping response mid-stream and resamples it once |
+| `tools` | Built-in tools with narrower habits: read only the part of a file needed, search with rg first |
+| `semantic-recall` | Finds past sessions by meaning with a small embedding model that runs on this machine |
+| `learning` | Curated memory, agent-written skills, and search over past sessions |
+| `screenshot` | Lets the agent capture and look at your screen |
+| `permissions` | Permission modes that limit what the agent may change unasked |
+| `auto-thinking` | Picks how much thinking each message needs, instead of one fixed level |
+| `goal` | Holds one objective and keeps the session working until it is met |
+| `wayfinder` | Maps work too big for one session into decision tickets |
+| `subagents` | Background agent threads that keep their own context |
+| `battletest` | Simulated users run the app and file what they find as tickets |
+| `research` | A team of investigators works a subject and stops at nothing short of the answer |
+| `review` | Reads the pending diff, or any target you name, for defects |
+| `pool` | Several credentials per provider, with failover when one hits a limit |
+| `telegram` | Two-way bridge between this session and your own Telegram bot |
+| `cues` | House notes that enter the prompt only when their subject comes up |
+
 ## Extension Locations
 
 > **Security:** Extensions run with your full system permissions and can execute arbitrary code. Only install from sources you trust.
@@ -134,7 +158,7 @@ Additional paths via `settings.json`:
 }
 ```
 
-To share extensions via npm or git as smolt packages, see [packages.md](packages.md).
+To share extensions via npm or git as Smolt packages, see [packages.md](packages.md).
 
 ## Available Imports
 
@@ -147,7 +171,7 @@ To share extensions via npm or git as smolt packages, see [packages.md](packages
 
 npm dependencies work too. Add a `package.json` next to your extension (or in a parent directory), run `npm install`, and imports from `node_modules/` are resolved automatically.
 
-For distributed smolt packages installed with `smolt install` (npm or git), runtime deps must be in `dependencies`. Package installation uses production installs (`npm install --omit=dev`) by default, so `devDependencies` are not available at runtime; when `npmCommand` is configured, git packages use plain `install` for compatibility with wrappers.
+For distributed Smolt packages installed with `smolt install` (npm or git), runtime deps must be in `dependencies`. Package installation uses production installs (`npm install --omit=dev`) by default, so `devDependencies` are not available at runtime; when `npmCommand` is configured, git packages use plain `install` for compatibility with wrappers.
 
 Node.js built-ins (`node:fs`, `node:path`, etc.) are also available.
 
@@ -178,7 +202,7 @@ export default function (smolt: ExtensionAPI) {
 
 Extensions are loaded via [jiti](https://github.com/unjs/jiti), so TypeScript works without compilation.
 
-If the factory returns a `Promise`, smolt awaits it before continuing startup. That means async initialization completes before `session_start`, before `resources_discover`, and before provider registrations queued via `smolt.registerProvider()` are flushed.
+If the factory returns a `Promise`, Smolt awaits it before continuing startup. That means async initialization completes before `session_start`, before `resources_discover`, and before provider registrations queued via `smolt.registerProvider()` are flushed.
 
 ### Async factory functions
 
@@ -352,7 +376,7 @@ exit (Ctrl+C, Ctrl+D, SIGHUP, SIGTERM)
 
 #### project_trust
 
-Fired before smolt decides whether to trust a project with dynamic configs (`.smolt` or `.agents/skills`). It runs during startup and when session replacement (for example `/resume`) enters a cwd whose trust has not been resolved in the current process. Only user/global extensions and CLI `-e` extensions participate; project-local extensions are not loaded until after trust is resolved.
+Fired before Smolt decides whether to trust a project with dynamic configs (`.smolt` or `.agents/skills`). It runs during startup and when session replacement (for example `/resume`) enters a cwd whose trust has not been resolved in the current process. Only user/global extensions and CLI `-e` extensions participate; project-local extensions are not loaded until after trust is resolved.
 
 ```typescript
 smolt.on("project_trust", async (event, ctx) => {
@@ -365,7 +389,7 @@ smolt.on("project_trust", async (event, ctx) => {
 });
 ```
 
-A `project_trust` handler must return `{ trusted: "yes" | "no" | "undecided" }`. A user/global or CLI extension that returns `"yes"` or `"no"` owns the decision; the first yes/no decision wins and suppresses the built-in trust prompt. Use `remember: true` to persist a yes/no decision; otherwise it applies only to the current process. Return `"undecided"` to let later handlers or the built-in trust flow decide. Check `ctx.hasUI` before prompting. If no handler returns yes/no, normal trust resolution continues: saved `trust.json` decisions apply first, then `defaultProjectTrust` controls whether smolt asks, trusts, or declines by default.
+A `project_trust` handler must return `{ trusted: "yes" | "no" | "undecided" }`. A user/global or CLI extension that returns `"yes"` or `"no"` owns the decision; the first yes/no decision wins and suppresses the built-in trust prompt. Use `remember: true` to persist a yes/no decision; otherwise it applies only to the current process. Return `"undecided"` to let later handlers or the built-in trust flow decide. Check `ctx.hasUI` before prompting. If no handler returns yes/no, normal trust resolution continues: saved `trust.json` decisions apply first, then `defaultProjectTrust` controls whether Smolt asks, trusts, or declines by default.
 
 ### Resource Events
 
@@ -429,7 +453,7 @@ smolt.on("session_before_switch", async (event, ctx) => {
 });
 ```
 
-After a successful switch or new-session action, smolt emits `session_shutdown` for the old extension instance, reloads and rebinds extensions for the new session, then emits `session_start` with `reason: "new" | "resume"` and `previousSessionFile`.
+After a successful switch or new-session action, Smolt emits `session_shutdown` for the old extension instance, reloads and rebinds extensions for the new session, then emits `session_start` with `reason: "new" | "resume"` and `previousSessionFile`.
 Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `session_start`.
 
 #### session_before_fork
@@ -446,7 +470,7 @@ smolt.on("session_before_fork", async (event, ctx) => {
 });
 ```
 
-After a successful fork or clone, smolt emits `session_shutdown` for the old extension instance, reloads and rebinds extensions for the new session, then emits `session_start` with `reason: "fork"` and `previousSessionFile`.
+After a successful fork or clone, Smolt emits `session_shutdown` for the old extension instance, reloads and rebinds extensions for the new session, then emits `session_start` with `reason: "fork"` and `previousSessionFile`.
 Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `session_start`.
 
 #### session_before_compact / session_compact / session_compact_failed
@@ -779,7 +803,7 @@ Use this to update extension UI when `smolt.setThinkingLevel()`, model changes, 
 
 Fired after `tool_execution_start`, before the tool executes. **Can block.** Use `isToolCallEventType` to narrow and get typed inputs.
 
-Before `tool_call` runs, smolt waits for previously emitted Agent events to finish draining through `AgentSession`. This means `ctx.sessionManager` is up to date through the current assistant tool-calling message.
+Before `tool_call` runs, Smolt waits for previously emitted Agent events to finish draining through `AgentSession`. This means `ctx.sessionManager` is up to date through the current assistant tool-calling message.
 
 In the default parallel tool execution mode, sibling tool calls from the same assistant message are preflighted sequentially, then executed concurrently. `tool_call` is not guaranteed to see sibling tool results from that same assistant message in `ctx.sessionManager`.
 
@@ -1026,7 +1050,7 @@ Use this for abort-aware nested work started by extension handlers, for example:
 - file or process helpers that accept `AbortSignal`
 
 `ctx.signal` is typically defined during active turn events such as `tool_call`, `tool_result`, `message_update`, and `turn_end`.
-It is usually `undefined` in idle or non-turn contexts such as session events, extension commands, and shortcuts fired while smolt is idle.
+It is usually `undefined` in idle or non-turn contexts such as session events, extension commands, and shortcuts fired while Smolt is idle.
 
 ```typescript
 smolt.on("tool_result", async (event, ctx) => {
@@ -1047,7 +1071,7 @@ Control flow helpers. `ctx.isIdle()` is false while Smolt is processing an agent
 
 ### ctx.shutdown()
 
-Request a graceful shutdown of smolt.
+Request a graceful shutdown of Smolt.
 
 - **Interactive mode:** Deferred until the agent becomes idle (after processing all queued steering and follow-up messages).
 - **RPC mode:** Deferred until the next idle state (after completing the current command response, when waiting for the next command).
@@ -1526,7 +1550,7 @@ Labels persist in the session and survive restarts. Use them to mark important p
 
 Register a command.
 
-If multiple extensions register the same command name, smolt keeps them all and assigns numeric invocation suffixes in load order, for example `/review:1` and `/review:2`.
+If multiple extensions register the same command name, Smolt keeps them all and assigns numeric invocation suffixes in load order, for example `/review:1` and `/review:2`.
 
 ```typescript
 smolt.registerCommand("stats", {
@@ -1674,7 +1698,7 @@ const result = await smolt.exec("git", ["status"], { signal, timeout: 5000 });
 // result.stdout, result.stderr, result.code, result.killed
 ```
 
-### smolt.getActiveTools() / smolt.getAllTools() / smolt.setActiveTools(names)
+### smolt.getActiveTools() / Smolt.getAllTools() / Smolt.setActiveTools(names)
 
 Manage active tools. This works for both built-in tools and dynamically registered tools. `smolt.getActiveTools()` returns the active tool names as `string[]`; `smolt.getAllTools()` returns metadata for all configured tools.
 
@@ -1715,7 +1739,7 @@ if (model) {
 }
 ```
 
-### smolt.getThinkingLevel() / smolt.setThinkingLevel(level)
+### smolt.getThinkingLevel() / Smolt.setThinkingLevel(level)
 
 Get or set the thinking level. Level is clamped to model capabilities (non-reasoning models always use "off"). Changes emit `thinking_level_select`.
 
@@ -2028,7 +2052,7 @@ async execute(toolCallId, params) {
 
 **Important:** Use `StringEnum` from `@smolt/ai` for string enums. `Type.Union`/`Type.Literal` doesn't work with Google's API.
 
-**Argument preparation:** `prepareArguments(args)` is optional. If defined, it runs before schema validation and before `execute()`. Use it to mimic an older accepted input shape when smolt resumes an older session whose stored tool call arguments no longer match the current schema. Return the object you want validated against `parameters`. Keep the public schema strict. Do not add deprecated compatibility fields to `parameters` just to keep old resumed sessions working.
+**Argument preparation:** `prepareArguments(args)` is optional. If defined, it runs before schema validation and before `execute()`. Use it to mimic an older accepted input shape when Smolt resumes an older session whose stored tool call arguments no longer match the current schema. Return the object you want validated against `parameters`. Keep the public schema strict. Do not add deprecated compatibility fields to `parameters` just to keep old resumed sessions working.
 
 Example: an older session may contain an `edit` tool call with top-level `oldText` and `newText`, while the current schema only accepts `edits: [{ oldText, newText }]`.
 
@@ -2139,7 +2163,7 @@ smolt.registerTool({
 
 **Operations interfaces:** `ReadOperations`, `WriteOperations`, `EditOperations`, `BashOperations`, `PowerShellOperations`, `LsOperations`, `GrepOperations`, `FindOperations`
 
-For `user_bash`, extensions can reuse smolt's local shell backend via `createLocalBashOperations()` instead of reimplementing local process spawning, shell resolution, and process-tree termination.
+For `user_bash`, extensions can reuse Smolt's local shell backend via `createLocalBashOperations()` instead of reimplementing local process spawning, shell resolution, and process-tree termination.
 
 The `bash` and `powershell` tools also support a spawn hook to adjust the command, cwd, or env before execution:
 

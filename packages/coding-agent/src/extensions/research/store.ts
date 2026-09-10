@@ -6,9 +6,9 @@ import type { Researcher } from "./angles.ts";
 
 /**
  * Research: a team of investigators works a subject and everything they
- * learn is recorded as markdown under the project's `.smolt/research/`
- * directory, so a run's evidence travels with the repo the same way code
- * does.
+ * learn is recorded as markdown in this project's research store —
+ * `~/.smolt/projects/<project>/research/`, outside the repo, so a run's
+ * evidence never arrives as hundreds of files to review.
  *
  * A run holds the subject, the team, one notes file per researcher (their
  * raw investigation diary, written as they go), the findings they filed, the
@@ -46,7 +46,7 @@ export const CLAIM_TTL_MS = 2 * 60 * 60 * 1000;
 
 export type ResearchResult = Record<string, unknown>;
 
-/** One researcher's end-of-run record: who they were, what they found, what it cost. */
+/** One researcher's end-of-run record: who they were, what they found, what they spent. */
 export interface ResearcherPerformance {
 	slug: string;
 	name: string;
@@ -59,6 +59,7 @@ export interface ResearcherPerformance {
 	points: number;
 	questionsAnswered: number;
 	actions: number;
+	/** Every token billed, the re-read context included. */
 	tokens: number;
 	wallMs: number;
 	/** The full brief this researcher ran under. */
@@ -729,8 +730,7 @@ export class ResearchStore {
 		if (question.closed) fm.closed = question.closed;
 		if (question.gist) fm.gist = question.gist;
 		if (question.answeredBy) fm.answeredBy = question.answeredBy;
-		const body =
-			`## Question\n\n${question.question}\n` + (question.answer ? `\n## Answer\n\n${question.answer}\n` : "");
+		const body = `## Question\n\n${question.question}\n${question.answer ? `\n## Answer\n\n${question.answer}\n` : ""}`;
 		atomicWrite(join(this.questionsDir(runSlug), `${question.slug}.md`), `---\n${stringify(fm)}---\n\n${body}`);
 	}
 

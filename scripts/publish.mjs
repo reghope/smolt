@@ -42,7 +42,7 @@ function assertBuildOutputExists(directory) {
 }
 
 function validatePack(directory) {
-	const result = run("npm", ["pack", "--dry-run", "--ignore-scripts", "--json"], { capture: true, cwd: directory });
+	const result = run("npm", ["pack", "--dry-run", "--json"], { capture: true, cwd: directory });
 	const packed = JSON.parse(result.stdout)[0];
 	console.log(`  ${packed.filename}: ${packed.files.length} files, ${packed.size} bytes packed, ${packed.unpackedSize} bytes unpacked`);
 }
@@ -105,6 +105,6 @@ for (const pkg of packageStates) {
 		continue;
 	}
 
-	run("npm", ["publish", "--access", "public", "--provenance", "--ignore-scripts"], { cwd: pkg.directory });
+	run("npm", ["publish", "--access", "public", "--provenance"], { cwd: pkg.directory });
 	console.log();
 }

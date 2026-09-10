@@ -1,9 +1,11 @@
+import type { ThinkingLevel } from "@smolt/agent-core";
 import { Type } from "typebox";
 import { getAgentDir } from "../../config.ts";
 import { ActionMetrics } from "../../core/action-metrics.ts";
 // Type-only import: a standalone install of this module outside the smolt
 // tree switches this single line to `from "smolt"`.
 import type { ExtensionAPI, ExtensionContext } from "../../core/extensions/types.ts";
+import type { AgentsSettings } from "../../core/settings-manager.ts";
 import { type AgentDefinition, discoverAgents } from "./agents.ts";
 import { describe, isFinished, type Thread, type ThreadDriver, ThreadPool } from "./threads.ts";
 
@@ -31,17 +33,29 @@ const DEFAULT_MAX_CONCURRENT = 4;
 /** Longest a wait will block before reporting the thread is still going. */
 const DEFAULT_WAIT_SECONDS = 60;
 
-interface AgentsSettings {
-	enabled?: boolean;
-	maxConcurrentThreadsPerSession?: number;
-	defaultSubagentModel?: string;
-	defaultSubagentThinking?: string;
-	/** Write child sessions to disk like before temporary chats. Default false: children are in-memory. */
-	persistChildSessions?: boolean;
-}
+/**
+ * The thinking level a thread runs at when neither its definition nor the
+ * `agents` settings say. Not the parent's: that is often the user's ceiling
+ * for their own work, and a thread at it spent most of its budget thinking.
+ */
+const SUBAGENT_THINKING: ThinkingLevel = "medium";
+
+/** How much of a thread's transcript a 'read' shows: the tail, not the whole. */
+const READ_ENTRIES = 12;
+const READ_ENTRY_CHARS = 1200;
+
+/** Longest summary relayed to the parent; everything relayed lands in its context for good. */
+const SUMMARY_CHARS = 4000;
 
 function textResult(text: string) {
 	return { content: [{ type: "text" as const, text }], details: {} };
+}
+
+/** A thread's answer as the parent sees it: whole when short, its head when not. */
+function summaryOf(thread: Thread): string {
+	if (thread.summary === "") return "(no output)";
+	if (thread.summary.length <= SUMMARY_CHARS) return thread.summary;
+	return `${thread.summary.slice(0, SUMMARY_CHARS)}\n…(${thread.summary.length - SUMMARY_CHARS} more chars; 'read' the thread for the rest)`;
 }
 
 /** The last thing a thread said, which is its answer to the task. */
@@ -67,52 +81,62 @@ export type Spawner = (
 	onFinish: (status: "completed" | "errored", detail: string) => void,
 ) => Promise<ThreadDriver>;
 
+/** Whether an agent can change files, and so needs the project's conventions in its prompt. */
+function canEdit(agent: AgentDefinition): boolean {
+	return agent.tools === undefined || agent.tools.some((tool) => tool === "edit" || tool === "write");
+}
+
+/** The model a thread runs on: its definition's, else the settings default, else the parent's. */
+function resolveModel(ref: string | undefined, ctx: ExtensionContext) {
+	if (!ref) return ctx.model;
+	return (
+		ctx.modelRegistry.getAvailable().find((candidate) => {
+			const id = `${candidate.provider}/${candidate.id}`;
+			return id === ref || candidate.id === ref;
+		}) ?? ctx.model
+	);
+}
+
 /**
  * Threads run in temporary sessions by default: in-memory, never on disk, so
  * spawning a fleet of subagents does not clog the session list, /resume, or
  * session search. The parent carries the summary; the transcript is scratch.
  * `agents.persistChildSessions: true` restores the old persistent behavior.
  */
-function persistChildSessions(ctx: ExtensionContext): boolean {
-	const raw = (ctx as unknown as { settings?: { agents?: AgentsSettings } }).settings?.agents;
-	return raw?.persistChildSessions === true;
-}
-
 const defaultSpawner: Spawner = async (agent, task, ctx, onFinish) => {
 	const { createAgentSession } = await import("../../core/sdk.ts");
-	const { DefaultResourceLoader } = await import("../../core/resource-loader.ts");
 	const { SettingsManager } = await import("../../core/settings-manager.ts");
 	const { getDefaultSessionDir, SessionManager } = await import("../../core/session-manager.ts");
+	const { createChildResourceLoader, persistChildSessions } = await import("../battletest/spawn.ts");
 
 	const agentDir = getAgentDir();
 	const settingsManager = SettingsManager.create(ctx.cwd, agentDir);
-	// noExtensions is the recursion guard: a child has no subagent tool, so
-	// nothing below this level can spawn anything.
-	const resourceLoader = new DefaultResourceLoader({
+	const defaults = settingsManager.getAgentsSettings();
+	// The lean child loader battletest and research run on: no extensions
+	// (the recursion guard — a child has no subagent tool, so nothing below
+	// this level spawns anything), no skills catalogue (the task is in the
+	// brief), tool results budgeted and shed as the thread goes. Measured on
+	// this repository, the full loader put six thousand tokens of skills and
+	// AGENTS.md on every turn of every thread. An explorer that never edits
+	// keeps neither; a worker keeps the conventions it edits under.
+	const resourceLoader = createChildResourceLoader({
 		cwd: ctx.cwd,
 		agentDir,
 		settingsManager,
-		noExtensions: true,
 		appendSystemPrompt: [agent.instructions],
+		contextFiles: canEdit(agent),
 	});
 	await resourceLoader.reload();
-
-	const model = agent.model
-		? (ctx.modelRegistry.getAvailable().find((candidate) => {
-				const id = `${candidate.provider}/${candidate.id}`;
-				return id === agent.model || candidate.id === agent.model;
-			}) ?? ctx.model)
-		: ctx.model;
 
 	const { session } = await createAgentSession({
 		cwd: ctx.cwd,
 		agentDir,
-		model,
-		thinkingLevel: agent.thinking ?? ctx.thinkingLevel,
+		model: resolveModel(agent.model ?? defaults.defaultSubagentModel, ctx),
+		thinkingLevel: agent.thinking ?? defaults.defaultSubagentThinking ?? SUBAGENT_THINKING,
 		tools: agent.tools,
 		resourceLoader,
 		settingsManager,
-		sessionManager: persistChildSessions(ctx)
+		sessionManager: persistChildSessions(settingsManager)
 			? SessionManager.create(ctx.cwd, getDefaultSessionDir(ctx.cwd, agentDir))
 			: SessionManager.inMemory(ctx.cwd),
 	});
@@ -181,14 +205,14 @@ export function createSubagentsExtension(smolt: ExtensionAPI, spawn: Spawner = d
 		ctx.ui.setWidget("subagents", pool.open.map(describe).slice(0, 6));
 	};
 
-	const settings = (ctx: ExtensionContext): AgentsSettings => {
-		const raw = (ctx as unknown as { settings?: { agents?: AgentsSettings } }).settings?.agents;
-		return raw ?? {};
+	const settings = async (ctx: ExtensionContext): Promise<AgentsSettings> => {
+		const { SettingsManager } = await import("../../core/settings-manager.ts");
+		return SettingsManager.create(ctx.cwd, getAgentDir()).getAgentsSettings();
 	};
 
 	smolt.on("session_start", async (_event, ctx) => {
 		agents = discoverAgents(ctx.cwd, getAgentDir());
-		const config = settings(ctx);
+		const config = await settings(ctx);
 		enabled = config.enabled !== false;
 		pool.setLimits({ maxConcurrent: config.maxConcurrentThreadsPerSession ?? DEFAULT_MAX_CONCURRENT });
 		paint(ctx);
@@ -196,6 +220,12 @@ export function createSubagentsExtension(smolt: ExtensionAPI, spawn: Spawner = d
 
 	// Threads outlive a turn but never the session that owns them.
 	smolt.on("session_shutdown", async () => {
+		for (const thread of pool.closeAll()) void thread.driver?.abort();
+	});
+
+	// Nor do they outlive the reader pressing stop. A thread is an agent of its
+	// own, running work the reader has just asked to end.
+	smolt.on("agent_abort", async () => {
 		for (const thread of pool.closeAll()) void thread.driver?.abort();
 	});
 
@@ -214,7 +244,7 @@ export function createSubagentsExtension(smolt: ExtensionAPI, spawn: Spawner = d
 		if (ctx.mode !== "tui" && ctx.mode !== "rpc") return;
 		if (ctx.hasPendingMessages()) return;
 		const lines = done.map((thread) => {
-			const body = thread.status === "errored" ? `failed: ${thread.error}` : thread.summary || "(no output)";
+			const body = thread.status === "errored" ? `failed: ${thread.error}` : summaryOf(thread);
 			return `## ${thread.id} (${thread.nickname}) — ${thread.agent}\nTask: ${thread.task}\n\n${body}`;
 		});
 		smolt.sendUserMessage(
@@ -238,6 +268,32 @@ export function createSubagentsExtension(smolt: ExtensionAPI, spawn: Spawner = d
 			"a long build, several independent changes at once. Spawn several and carry on; their results " +
 			"arrive when they finish. Do NOT delegate work that needs what you already know but they do " +
 			"not: a thread starts fresh and only sees the task you write for it.\n\n" +
+			"RESTRAINT: threads multiply cost and time. Each one re-establishes context, re-explores, and " +
+			"reports back, and you then re-read its report. Delegate only when the payoff clearly exceeds " +
+			"that overhead. Do the work inline when it is a small, bounded sub-task — a few file reads, one " +
+			"search, a short edit, a single check. Do not fan out multiple threads on a single small task: " +
+			"parallel threads are for genuinely independent, sizeable tracks, not for splitting one modest " +
+			"job into pieces. Do not spawn a thread to review, re-verify, or double-check work you can " +
+			"verify inline — verification that fits in your own loop belongs in your own loop. If you " +
+			"delegate, commit to the delegation: do not redo the thread's work while waiting, and do not " +
+			"re-derive its findings once it reports. If you find yourself repeating what a thread is " +
+			"doing, you should not have spawned it. Keep spawn counts low: one well-briefed thread for a " +
+			"large independent chunk is worth more than several loosely-briefed ones, so brief it precisely " +
+			"the first time rather than launching, waiting, and re-briefing. Delegate for work that is " +
+			"genuinely independent, large enough to justify a fresh context, or naturally parallel. " +
+			"Otherwise, do it yourself.\n\n" +
+			"WRITING THE TASK: brief the thread like a smart colleague who just walked into the room. It " +
+			"has not seen this conversation, does not know what you have tried, and does not understand " +
+			"why this task matters. Explain what you are trying to accomplish and why. Describe what you " +
+			"have already learned or ruled out. Give enough context about the surrounding problem that it " +
+			"can make judgment calls rather than just following a narrow instruction. If you need a short " +
+			'response, say so, as in "report in under 200 words". For lookups, hand over the exact ' +
+			"command; for investigations, hand over the " +
+			"question, because prescribed steps become dead weight when the premise is wrong. Terse " +
+			"command-style prompts produce shallow, generic work. Never delegate understanding: do not " +
+			"write 'based on your findings, fix the bug', which pushes synthesis onto the thread instead " +
+			"of doing it yourself. Write prompts that prove you understood, with file paths, line numbers, " +
+			"and what specifically to change.\n\n" +
 			"A finished thread keeps its slot until you close it, so read the result first.",
 		parameters: Type.Object({
 			action: Type.Union(
@@ -314,9 +370,13 @@ export function createSubagentsExtension(smolt: ExtensionAPI, spawn: Spawner = d
 			if (params.action === "read") {
 				const transcript = thread.driver?.transcript() ?? [];
 				if (transcript.length === 0) return textResult(`${describe(thread)}\n\nNothing yet.`);
+				// The tail, not the whole: a read is for seeing where a thread is,
+				// and everything it returns sits in the parent's context for good.
+				const shown = transcript.slice(-READ_ENTRIES);
+				const skipped = transcript.length - shown.length;
 				return textResult(
-					`${describe(thread)}\n\n${transcript
-						.map((entry) => `[${entry.role}] ${entry.text.slice(0, 2000)}`)
+					`${describe(thread)}\n\n${skipped > 0 ? `(${skipped} earlier entries not shown)\n\n` : ""}${shown
+						.map((entry) => `[${entry.role}] ${entry.text.slice(0, READ_ENTRY_CHARS)}`)
 						.join("\n\n")}`,
 				);
 			}
@@ -346,7 +406,7 @@ export function createSubagentsExtension(smolt: ExtensionAPI, spawn: Spawner = d
 				return textResult(
 					thread.status === "errored"
 						? `${thread.id} failed: ${thread.error}`
-						: `${thread.id} ${thread.status}.\n\n${thread.summary || "(no output)"}\n\nClose it with action 'close' when you are done with it.`,
+						: `${thread.id} ${thread.status}.\n\n${summaryOf(thread)}\n\nClose it with action 'close' when you are done with it.`,
 				);
 			}
 

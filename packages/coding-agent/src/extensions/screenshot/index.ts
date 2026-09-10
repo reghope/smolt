@@ -45,17 +45,29 @@ export default function screenshotExtension(smolt: ExtensionAPI): void {
 						"Wait this many milliseconds before capturing, to let a window open or an animation settle. Max 10000.",
 				}),
 			),
+			window: Type.Optional(
+				Type.String({
+					description:
+						"Capture a single window instead of the whole screen (Windows only). Pass 'active' for the " +
+						"current foreground window, or a window-title substring such as 'smolt'. Much smaller image " +
+						"and fewer tokens — prefer this over full-desktop captures whenever the question is about one app.",
+				}),
+			),
 		}),
 		async execute(_toolCallId, params) {
-			const { display, delay_ms } = params as { display?: number; delay_ms?: number };
+			const { display, delay_ms, window } = params as { display?: number; delay_ms?: number; window?: string };
 			const failed: ScreenshotDetails = { via: "", display: display ?? 0 };
 			try {
-				const capture = await captureScreen({ display, delayMs: delay_ms });
+				const capture = await captureScreen({ display, delayMs: delay_ms, window });
 				const processed = await processImage(capture.png, "image/png");
 				if (!processed.ok) {
 					return { content: [{ type: "text" as const, text: processed.message }], details: failed, isError: true };
 				}
-				const scope = display && display > 0 ? `display ${display}` : "full desktop";
+				const scope = window
+					? `window '${window}'`
+					: display && display > 0
+						? `display ${display}`
+						: "full desktop";
 				return {
 					content: [
 						{ type: "text" as const, text: `Screenshot of the ${scope} (via ${capture.via}).` },

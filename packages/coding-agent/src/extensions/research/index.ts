@@ -8,14 +8,23 @@ import { describeSummary } from "../../core/action-metrics.ts";
 // tree switches this single line to `from "smolt"`.
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "../../core/extensions/types.ts";
 import { defineTool } from "../../core/extensions/types.ts";
+import { projectStore } from "../../core/project-store.ts";
 import {
 	type BrowseDriver,
 	type BrowseDriverFactory,
 	defaultBrowseDriverFactory,
 	VIEWPORT_PRESETS,
 } from "../battletest/cdp.ts";
+import type { LeanChildOptions } from "../battletest/lean.ts";
 import { parseBattletestInvocation, pickAmbiguousModel, resolveModelOverride } from "../battletest/parse.ts";
-import { CHILD_SHELL_TIMEOUT_SECONDS, type ChildDriver, spawnChildSession } from "../battletest/spawn.ts";
+import {
+	CHILD_SHELL_TIMEOUT_SECONDS,
+	type ChildDriver,
+	type ChildTokens,
+	childSpendLabel,
+	childTokenTotal,
+	spawnChildSession,
+} from "../battletest/spawn.ts";
 import {
 	ANGLE_NAMES,
 	type AnglePick,
@@ -65,17 +74,36 @@ import { DEFAULT_MAX_CHARS, type FetchAs, type FetchImpl, fetchPage, webSearch }
 /** More researchers than this stops being a team and starts being a crawler farm. */
 const MAX_RESEARCHERS = 25;
 
-const DEFAULT_RESEARCHERS = 3;
+const DEFAULT_RESEARCHERS = 1;
+/**
+ * The most angles a supervisor may pick for one wave. Team size is the
+ * wave's cost multiplier and the plan prompt says one to three; a fourth
+ * picked anyway is dropped, with a note, rather than dispatched. A count the
+ * user typed is not capped here.
+ */
+const MAX_PICKED_ANGLES = 3;
 
 /** Longest a single `wait` blocks before reporting researchers still at it. */
-const DEFAULT_WAIT_SECONDS = 120;
+const DEFAULT_WAIT_SECONDS = 300;
+/**
+ * A wait returns early on news — a finding, a closed question, a finished
+ * researcher — but not before this much of it has passed: each return is
+ * a parent turn re-reading the whole session, so news is batched, and a
+ * quiet stretch costs no turn at all until the deadline.
+ */
+const NEWS_SETTLE_MS = 90_000;
 const MAX_WAIT_SECONDS = 600;
 
 /** Base for per-researcher debugging ports, offset by index; clear of battletest's range. */
 const DEBUG_PORT_BASE = 9433;
 
 /** Waves beyond this on one run mean the subject is not converging; the supervisor reports instead. */
-const MAX_WAVES = 4;
+/**
+ * A run's ceiling on waves. Each wave is a fresh team at full budget, so the
+ * cap is the run's cost multiplier; three is where the runs that reached it
+ * had settled their maps or hit walls no further wave would get around.
+ */
+const MAX_WAVES = 3;
 
 /**
  * Researchers run at medium thinking by default: unlike a tester clicking
@@ -86,10 +114,17 @@ const MAX_WAVES = 4;
 const RESEARCHER_THINKING: ThinkingLevel = "medium";
 
 /** Action budget per tenacity — tool actions, one per step of the investigation. */
+/**
+ * The action budget is the run's cost multiplier: every action is a model
+ * turn that re-reads the whole context. These were 70 / 100 / 140, and a
+ * three-researcher wave spent most of a million tokens before anyone judged
+ * the map; a researcher whose questions are answered now stops on that,
+ * and the supervisor sends the next wave for what is left.
+ */
 const ACTION_BUDGETS: Record<Researcher["traits"]["tenacity"], number> = {
-	dogged: 70,
-	relentless: 100,
-	obsessive: 140,
+	dogged: 40,
+	relentless: 60,
+	obsessive: 80,
 };
 
 /** Confidence weighting for the end-of-run score: what a researcher's findings are worth. */
@@ -146,6 +181,21 @@ export type ResearcherSpawner = (
 ) => Promise<ResearcherDriver>;
 
 /**
+ * How lean a researcher's context is kept.
+ *
+ * Measured on a three-researcher wave: 19-20k tokens re-read on each of
+ * 35-60 turns per researcher, 2.7 million for the wave. The fixed part of
+ * a turn — brief, tools, prompt — is six thousand; the rest was the window
+ * of whole results (four, at up to six thousand tokens each), a screenshot
+ * on every browse action, and every notebook filing's prose riding along
+ * for good. Three recent results at four thousand tokens is enough to read
+ * a page (a fetch is about two thousand by default) and act on it; the
+ * diary holds the rest, shed calls are trimmed with their results, and the
+ * browse tool now shows a page only when asked to.
+ */
+const RESEARCHER_LEAN: LeanChildOptions = { keepRecentToolResults: 3, outputTokenLimit: 4_000, shedBatchSize: 3 };
+
+/**
  * The real spawner: one background AgentSession per researcher. `edit` is
  * excluded — a researcher never patches the project it runs in; everything
  * it builds or clones lives under its own scratch directory, where `write`
@@ -163,6 +213,7 @@ const defaultSpawner: ResearcherSpawner = (options, onFinish) =>
 			metricsPath: options.metricsPath,
 			excludeTools: ["edit"],
 			shellTimeoutSeconds: CHILD_SHELL_TIMEOUT_SECONDS,
+			lean: RESEARCHER_LEAN,
 		},
 		onFinish,
 	);
@@ -314,7 +365,7 @@ function researcherPrompt(
 			: `\nThe subject names ${targets.length === 1 ? "a site" : "sites"} directly — ${targets.join(", ")} — so that is where the answer lives: use it, read it, read its source, watch its traffic. Launch nothing locally unless you are reproducing something.`;
 	const fogLine =
 		run.fog.length === 0 ? "" : `\nThings sensed but not yet sharp enough to be questions: ${run.fog.join("; ")}.`;
-	return `You are ${researcher.name}, an investigator on a research team. Someone needs a real answer and has asked this team to find it, whatever it takes. You are not writing an essay from what you already know: you go and look.
+	return `You are ${researcher.name}, an investigator on a research team. Someone needs a real answer and asked this team to find it. You do not write from what you already know: you go and look.
 
 THE SUBJECT
 ${run.subject}${notes}${targetLine}${fogLine}
@@ -322,58 +373,54 @@ ${run.subject}${notes}${targetLine}${fogLine}
 WHO YOU ARE
 ${researcher.description}
 You especially look for: ${researcher.lens}.
-You are ${traits.tenacity} (${traits.tenacity === "dogged" ? "you keep going past the first wall" : traits.tenacity === "relentless" ? "a blocked route is a reason to find another, not to stop" : "you do not stop until the thing is nailed down or every route is on record as exhausted"}); you are ${traits.rigor} about evidence (${traits.rigor === "accepting" ? "a credible source is enough for a 'likely'" : traits.rigor === "careful" ? "two independent sources, or one primary source, before you call anything confirmed" : "nothing is confirmed until you have seen it yourself — the code, the request, the behavior"}); and your scope is ${traits.scope} (${traits.scope === "narrow" ? "you go deep on your own angle and leave the rest to the team" : traits.scope === "wide" ? "you sweep the whole subject before going deep anywhere" : "you balance breadth and depth"}). Stay in character for the whole session — your traits should be visible in what you chase, how long you persist, and how you grade what you find.${resume === undefined ? "" : resumeSection(resume, profileDir)}${priorKnowledge}
+You are ${traits.tenacity} (${traits.tenacity === "dogged" ? "you keep going past the first wall" : traits.tenacity === "relentless" ? "a blocked route is a reason to find another, not to stop" : "you do not stop until the thing is nailed down or every route is on record as exhausted"}); ${traits.rigor} about evidence (${traits.rigor === "accepting" ? "a credible source is enough for a 'likely'" : traits.rigor === "careful" ? "two independent sources, or one primary source, before anything is confirmed" : "nothing is confirmed until you have seen it yourself — the code, the request, the behavior"}); your scope is ${traits.scope} (${traits.scope === "narrow" ? "deep on your own angle, the rest left to the team" : traits.scope === "wide" ? "the whole subject swept before going deep anywhere" : "breadth and depth balanced"}). Stay in character: it shows in what you chase, how long you persist, and how you grade what you find.${resume === undefined ? "" : resumeSection(resume, profileDir)}${priorKnowledge}
 
-THE QUESTION MAP — HOW THE TEAM DIVIDES THE WORK
-The subject decomposes into sharp sub-questions, kept on a shared map with blocking edges and claims. You are researcher #${index + 1} of ${teamSize}. The map right now:
+THE QUESTION MAP
+The subject decomposes into sharp sub-questions on a shared map with blocking edges and claims. You are researcher #${index + 1} of ${teamSize}. The map now:
 ${questionMap}
-Rules of the map:
-- Before working a question, CLAIM it (notebook action 'claim', question = its slug). A fresh claim by someone else means it is theirs: take another. If the frontier is empty, ask new sharp questions or work leads from findings.
-- When the subject's map is thin, ADD questions (notebook action 'question': title, text, blocked_by?). A good question is one whose answer would settle part of the subject and can be stated precisely now; vague hunches go in your diary, not on the map. Prefer questions from your own angle — that is why you are on the team.
-- When you have the answer, ANSWER it (notebook action 'answer': question, answer, gist). The answer carries the substance AND the URLs, files, or commands that back it; the gist is one line the report's index shows. If a question turns out unanswerable by any route, answer it with status 'dead-end' and the record of everything you tried.
-- Every finding you file should name the question it bears on when it bears on one.
+- CLAIM a question before working it (notebook 'claim', question = its slug); one freshly claimed by someone else is theirs. Empty frontier: ask new sharp questions, or work leads from findings.
+- ADD questions when the map is thin (notebook 'question': title, text, blocked_by?) — precise ones whose answer settles part of the subject; hunches go in your diary. Prefer your own angle: that is why you are on the team.
+- ANSWER (notebook 'answer': question, answer, gist) with the substance and the URLs, files or commands behind it; the gist is one line for the report's index. Unanswerable by any route: status 'dead-end', with everything you tried.
+- A finding names the question it bears on.
 
-YOUR TOOLS AND THE LADDER YOU CLIMB — STOP AT NOTHING
-You have four tools beyond the shell, and a ladder of escalation. A route that fails is a reason to take the next rung, never a reason to stop:
-1. search (query): find where things live — docs, repos, packages, discussions, archived pages. Vary the query; search the exact error text, the exact phrase, the site: operator (site:github.com), the product plus "source", "api", "changelog", "reverse engineer".
-2. fetch (url, as = text | html | json | links | scripts | headers): the raw page as a crawler sees it. 'text' to read it; 'html' for the markup; 'scripts' for the bundle URLs a page loads (then fetch each bundle as 'text' and read the code); 'links' to map a site; 'json' for APIs; 'headers' for server, caching, and security headers. Big pages truncate — pass max_chars, or fetch the specific page you need.
-3. browse: your own real Chrome, headless, on port ${port} with a profile under '${profileDir}' (the other ${teamSize - 1} researchers have their own). 'goto' a URL and STUDY the screenshot; 'text' for the rendered content (what fetch cannot see on a script-built page); 'html' for the live DOM; 'links'; 'network' for every request the page has made since you last asked — endpoints, methods, status codes, types: this is how you see the API behind a UI; 'eval' to read page state (window.__DATA__, localStorage, performance.getEntries()); 'click' / 'type' / 'press' / 'scroll' to use the thing the way its users do; 'viewport' to resize.
-4. When a site refuses you — 403, 429, a "just a moment" page, an empty shell, content that only appears for a real browser — do NOT give up and do NOT hammer it. Climb: fetch blocked → browse it headless. Headless refused → browse action 'relaunch' with headed = true: a visible Chrome window, which most bot checks accept, then carry on exactly as before. Still refused → the shell: curl with a browser user agent and the right Accept headers, the site's public API if one exists, its sitemap, its RSS, web.archive.org/web/2025/<url> for an archived copy, a cached copy in a search engine, a mirror, the same content in the product's public repository or package. Something always shows the mechanism; find it. Never solve or bypass a CAPTCHA, never log in, never pay, never pretend to be someone — those are walls you record, not walls you climb.
-5. The shell is for what the web tools cannot do: git clone public repositories into '${profileDir}', download and unpack packages (npm pack, pip download, a release tarball), grep a bundle for the strings you saw in the UI, follow a //# sourceMappingURL to the source map and read its sourcesContent, run code to reproduce a behavior, call an endpoint with curl and compare with what the browser sent, time things. Keep every file under '${profileDir}'.
-6. Cross-check. A claim in a blog post is 'unverified' until the code, the traffic, or an independent source agrees; then it is 'likely' or 'confirmed'. Two sources that disagree are a 'contradiction' finding — file it, do not pick a side silently.
-A lead is exhausted only when your diary says WHY, and a route you could not take is a 'dead-end' finding with what you tried, so the supervisor can send someone else down it.
+TOOLS AND THE LADDER — STOP AT NOTHING
+A route that fails means the next rung, never stopping:
+1. search (query): where things live. Vary it — exact phrases in quotes, the exact error text, site:github.com, the product plus "source", "api", "changelog", "reverse engineer".
+2. fetch (url, as = text | html | json | links | scripts | headers): the page as a crawler sees it. 'scripts' lists the bundles a page loads; fetch each as 'text' and read the code. Big pages truncate — pass max_chars, or fetch the specific page you need.
+3. browse: your own headless Chrome on port ${port}, profile under '${profileDir}' (the other ${teamSize - 1} have their own). 'goto', then 'text' for the rendered content — a page is text to you; 'screenshot' only when layout or a visual matters. 'html' the live DOM; 'links'; 'network' every request since you last asked (method, URL, status, type — the API behind a UI); 'eval' page state; 'click' / 'type' / 'press' / 'scroll' to use it as its users do; 'viewport'.
+4. Refused — 403, 429, a "just a moment" page, an empty shell, content only a real browser gets? Do not hammer, do not give up: fetch blocked → browse it headless → 'relaunch' with headed = true (a visible window, which most bot checks accept) → the shell: curl with a browser user agent and the right Accept headers, the site's public API, its sitemap, its RSS, web.archive.org/web/2025/<url>, a search engine's cache, a mirror, the same content in the product's public repository or package. Something always shows the mechanism. Never solve or bypass a CAPTCHA, never log in, never pay, never pretend to be someone — those walls are recorded, not climbed.
+5. The shell for what the web tools cannot do: git clone public repositories into '${profileDir}', download and unpack packages (npm pack, pip download, a release tarball), grep a bundle for the strings you saw in the UI, follow a //# sourceMappingURL and read its sourcesContent, run code to reproduce a behavior, curl an endpoint and compare with what the browser sent, time things. Every file under '${profileDir}'.
+6. Cross-check. A claim in a blog post is 'unverified' until the code, the traffic, or an independent source agrees; then 'likely' or 'confirmed'. Two sources that disagree are a 'contradiction' finding — file it, never pick a side silently.
+A lead is exhausted only when your diary says why; a route you could not take is a 'dead-end' finding with what you tried, so the supervisor can send someone else down it.
 
-RECORD EVERYTHING with the notebook tool as you go:
-- action 'note' (topic, text): your running diary in your own voice — what you tried, what you found, what it means, what you will try next. Note after every meaningful step, not in one dump at the end. The topic is where in the subject you are; it is shown live to the person watching.
-- action 'finding' (title, confidence, kind, topic, what, evidence, sources, question?): one finding per distinct thing learned. confidence: confirmed (you saw it yourself: the code, the request, the behavior, or two independent primary sources agree) / likely (one primary source, or several credible secondary ones) / unverified (a single claim you could not check) / contradicted (sources disagree, or you disproved it). kind: fact / mechanism (how it works) / source (where the code or data lives) / observation (what you saw it do) / lead (worth chasing, not yet chased) / dead-end (what could not be reached, and why) / contradiction. 'sources' is a list of the URLs, files, or commands the evidence came from — a finding without sources is an opinion. 'what' says the thing; 'evidence' quotes it: the line of code, the request, the exact text, the number you measured.
-- One thing, one finding, across the whole team: if your filing comes back with duplicate_of, another researcher has it. Add what is new with action 'append' (finding, text, sources?) and move on. Refile with force = true only when yours is really a different thing.
-- Cite as you go: exact URLs, not "the docs". The report is only as good as its sources.
+RECORD with the notebook tool as you go:
+- 'note' (topic, text): your diary, in your own voice — tried, found, what it means, next — after every meaningful step, not one dump at the end. The topic is where in the subject you are; it is shown live to whoever is watching.
+- 'finding' (title, confidence, kind, topic, what, evidence, sources, question?): one per distinct thing learned. 'what' says it; 'evidence' quotes it — the line of code, the request, the exact text, the number; 'sources' lists the URLs, files or commands it came from. A finding without sources is an opinion.
+- One thing, one finding, across the team: a filing that comes back with duplicate_of is someone else's — 'append' (finding, text, sources?) what is new and move on; refile with force = true only when yours is truly a different thing.
+- Cite exact URLs, never "the docs".
 
-YOUR BUDGET
-About ${budget} tool actions, fitting how ${traits.tenacity} you are. Two stop rules, whichever comes first: the budget runs low, or your last ~12 actions taught you nothing new AND every route you can think of is on record. Then file outstanding findings, answer or release your claimed questions, write the closing note, and finish — the supervisor dispatches another wave if questions remain, so an honest handoff beats a heroic overrun.
+BUDGET
+About ${budget} tool actions, fitting how ${traits.tenacity} you are. Every action re-reads everything you have seen, so spend them on looking: batch independent reads into one turn, search with rg before opening a file, read the range you need, never re-read. Stop at the first of: the budget runs low; your claimed questions are answered and the frontier holds nothing for your angle; your last ~8 actions taught nothing new and every route you can think of is on record. Then file outstanding findings, answer or release your claims, write the closing note, and finish — the supervisor dispatches another wave if questions remain, so an honest handoff beats a heroic overrun. Do not spend the budget for its own sake.
 
 SAY WHAT YOU ARE DOING, IN THE CALL ITSELF
-The run's live roster shows what each researcher is doing right now, straight from your tool calls:
-- Every browse, fetch, and search call: fill the 'doing' argument with 2-5 present-tense words ("reading the checkout bundle", "watching login requests").
-- Every shell command: start it with a comment line naming the intent, e.g. \`# cloning the SDK repo\` then the command. Same for powershell.
-Keep it honest and specific — a person watching the run reads it.
+The live roster reads your tool calls: fill 'doing' on every browse, fetch and search call (2-5 present-tense words, "reading the checkout bundle"); start every shell command with a comment line naming the intent, e.g. \`# cloning the SDK repo\`. Honest and specific — a person reads it.
 
 HARD RULES
 - Never modify this project's source, config, or data. You are investigating, not building; everything you make lives under '${profileDir}'.
-- Be a polite visitor: one request at a time to a host, a pause between them, back off when a site rate-limits you, never parallel-bomb a site from the shell. Research reads; it never floods.
-- Never sleep longer than 5 seconds in one call: poll in short calls so the supervisor sees you moving. Shell calls are stopped after ${CHILD_SHELL_TIMEOUT_SECONDS} seconds unless you pass a timeout.
+- A polite visitor: one request at a time to a host, a pause between them, back off when rate-limited, never parallel-bomb a site from the shell. Research reads; it never floods.
+- Never sleep longer than 5 seconds in one call: poll in short calls so the supervisor sees you moving. Shell calls stop after ${CHILD_SHELL_TIMEOUT_SECONDS} seconds unless you pass a timeout.
 - Do not pad findings with what you already believed. If you did not look, you do not know.
 
 SAFETY — JUDGE EVERY ACTION YOURSELF, NEVER ASK A HUMAN
-No human watches this run, and it must not stop for permission. Before every action, judge it yourself; when you are genuinely unsure whether an action crosses a line, request clearance (notebook action 'clearance': topic, text = the exact action, risk = why it might be unsafe) — a supervising agent rules on it, your session pauses until the ruling arrives, and you obey it either way. Forbidden outright, never escalated:
-- Logging in anywhere, creating accounts, entering credentials, personal data, or payment details; using anyone's session or cookies but your own fresh profile's.
-- Solving, bypassing, or automating past CAPTCHAs, bot checks, paywalls, or authentication — a wall like that is a dead-end finding, and the ladder goes AROUND it (public API, archive, repository, mirror), never through it.
+No human watches this run, and it must not stop for permission. When you are genuinely unsure whether an action crosses a line, request clearance (notebook 'clearance': topic, text = the exact action, risk = why it might be unsafe): a supervising agent rules, your session pauses until the ruling, and you obey it either way. Forbidden outright, never escalated:
+- Logging in anywhere, creating accounts, entering credentials, personal data, or payment details; using any session or cookies but your own fresh profile's.
+- Solving, bypassing, or automating past CAPTCHAs, bot checks, paywalls, or authentication — such a wall is a dead-end finding, and the ladder goes AROUND it, never through.
 - Sending anything that reaches a real person or service: forms, messages, sign-ups, uploads, orders, comments.
 - Collecting private or personal information about individuals; the subject is a thing, not a person.
 - Anything destructive or disruptive: no deleting or changing data anywhere, no load that could hurt a site, no probing for vulnerabilities.
-Reading what a site serves to any visitor, in a real browser if it insists on one, is research; everything above is not.
+Reading what a site serves any visitor, in a real browser if it insists on one, is research; everything above is not.
 
-When you have taken the subject as far as your angle can, file any remaining findings, answer or release your claimed questions, write one final 'note' (topic 'overall') with your closing view, then finish. Your final reply is read by another agent: three to five sentences — the answer to the subject as you now see it and how confident you are, how many findings you filed and questions you answered, and the biggest thing still open.`;
+When your angle is spent: file remaining findings, answer or release your claims, one final 'note' (topic 'overall') with your closing view, then finish. Your final reply is read by another agent: three to five sentences — the answer to the subject as you now see it and how confident you are, how many findings you filed and questions you answered, and the biggest thing still open.`;
 }
 
 /** `/research` with no count: the supervising agent picks the team first. */
@@ -383,7 +430,7 @@ function teamPlanPrompt(subject: string, modelRef?: string): string {
 The subject: ${subject}
 
 1. Scout for a minute — what kind of question is this? A site or product whose mechanism is wanted (then the answer is in its pages, source, and traffic), a technology or practice (docs, repos, discussions), a market or comparison (many sources, cross-checked), or something in this repository (read it first). If the subject names a URL, open it once yourself with the fetch tool to see what you are dealing with. A look, not a study.
-2. Pick the team from the angle deck, one to three researchers, each an angle chosen for THIS subject: ${ANGLE_NAMES.join(", ")}. Match angles to the kind of question — a site or product's mechanism wants an observer (uses it and watches), a network-sleuth (reads its traffic) and a source-diver (reads its code); a technology or practice wants a documentarian, a source-diver and an experimenter; a market or comparison wants a documentarian, a community-listener and a comparator; a "how did it get this way" wants a historian. Add a verifier whenever the answer will rest on claims that need checking against each other. Narrow an angle to the subject with a focus after a colon: 'network-sleuth: the checkout flow'. One well-aimed researcher is enough for a narrow question; three when the subject has distinct halves. Past runs' form is in .smolt/research/form.jsonl if it exists — weigh which angles have actually found things before.
+2. Pick the team from the angle deck. Default to a single researcher on the best-aimed angle — one focused researcher answers most subjects, and every extra one multiplies the wave's spend. Add a second or third only when the subject has genuinely distinct halves that one angle cannot cover. Each pick is an angle chosen for THIS subject: ${ANGLE_NAMES.join(", ")}. Match angles to the kind of question — a site or product's mechanism wants an observer (uses it and watches), a network-sleuth (reads its traffic) and a source-diver (reads its code); a technology or practice wants a documentarian, a source-diver and an experimenter; a market or comparison wants a documentarian, a community-listener and a comparator; a "how did it get this way" wants a historian. Add a verifier whenever the answer will rest on claims that need checking against each other. Narrow an angle to the subject with a focus after a colon: 'network-sleuth: the checkout flow'. One well-aimed researcher is enough for a narrow question; three when the subject has distinct halves. Past runs' form is in form.jsonl at the root of the research store if it exists — weigh which angles have actually found things before.
 3. Optionally seed the question map: pass 'questions' — up to 6 sharp sub-questions whose answers would settle the subject — so the team starts on the frontier instead of decomposing from scratch. Only questions you can state precisely now; the team adds the rest.
 4. Start the run: research action 'start' with your angles array, subject: '${subject.replace(/'/g, "\\'")}'${modelRef ? `, model: '${modelRef}'` : ""}. ${modelRef ? "" : "Do NOT pass a model — researchers run on the session's own model unless the user names one. "}The kickoff brief for supervising the run arrives as a follow-up message.`;
 }
@@ -477,18 +524,15 @@ function makeNotebookTool(
 		name: "notebook",
 		label: "Notebook",
 		description:
-			"Your record of the investigation and your line to the shared question map. Action 'note' (topic, " +
-			"text) appends to your running diary — use it after every meaningful step. Action 'finding' " +
-			"(title, confidence, kind, topic, what, evidence, sources, question?) files one distinct thing " +
-			"learned, with the URLs/files/commands it came from; a filing that matches an existing finding is " +
-			"bounced with its slug — 'append' (finding, text, sources?) what is new and move on, or refile with " +
-			"force=true only if yours is truly different. Action 'question' (title, text, blocked_by?) adds a " +
-			"sharp sub-question to the map; 'claim' (question) takes one before you work it; 'release' " +
-			"(question) gives it back; 'answer' (question, answer, gist, status? answered|dead-end) closes it " +
-			"with the substance and its sources. Action 'clearance' (topic, text = the exact action, risk) " +
-			"asks the supervising agent to rule on a gray-zone action BEFORE you take it; the call blocks " +
-			"until the ruling arrives, and you obey it. Never escalate the outright-forbidden (logins, " +
-			"CAPTCHAs, payments, real submissions) — those are always denied.",
+			"Your diary and your line to the shared question map. 'note' (topic, text) after every meaningful " +
+			"step. 'finding' (title, confidence, kind, topic, what, evidence, sources, question?) files one " +
+			"distinct thing learned; a match to an existing finding bounces with its slug — 'append' (finding, " +
+			"text, sources?) what is new, or refile with force=true only if truly different. 'question' (title, " +
+			"text, blocked_by?) adds a sub-question; 'claim' (question) before working one; 'release' " +
+			"(question); 'answer' (question, answer, gist, status? answered|dead-end). 'clearance' (topic, text " +
+			"= the exact action, risk) asks the supervisor to rule BEFORE a gray-zone action; the call blocks " +
+			"until the ruling. Never escalate the outright-forbidden (logins, CAPTCHAs, payments, real " +
+			"submissions).",
 		parameters: Type.Object({
 			action: Type.Union(
 				[
@@ -520,7 +564,7 @@ function makeNotebookTool(
 					CONFIDENCES.map((confidence) => Type.Literal(confidence)),
 					{
 						description:
-							"confirmed = seen yourself or two independent primary sources; likely = one primary or several credible secondary; unverified = a single unchecked claim; contradicted = sources disagree or disproved",
+							"confirmed = seen yourself or two primary sources; likely = one primary or several credible secondary; unverified = one unchecked claim; contradicted",
 					},
 				),
 			),
@@ -788,8 +832,9 @@ function makeBrowseTool(options: {
 		label: "Browse",
 		description:
 			"Your own real Chrome (headless until you relaunch it visible), on your own port and profile. " +
-			"One call = one action. Navigation and interaction actions return a screenshot of the page NOW " +
-			"plus its URL/title and console errors — study each image.\n\n" +
+			"One call = one action. Navigation and interaction actions return the page's URL, title and " +
+			"console errors; read the page with 'text', and ask for a 'screenshot' only when layout or a " +
+			"visual matters.\n\n" +
 			"ACTIONS: 'goto' (url) — call this first; 'text' (selector?) — the rendered text of the page or " +
 			"one element, what a crawler cannot see; 'html' (selector?) — the live DOM; 'links'; 'network' — " +
 			"every request the page has made since you last asked (method, URL, status, type: the API " +
@@ -955,7 +1000,10 @@ function makeBrowseTool(options: {
 					}
 				}
 				const state = await driver.state();
-				const shot = await driver.screenshot();
+				// A researcher reads pages as text; the picture rides only when
+				// asked for. Every look was ~1.4k tokens carried for several turns,
+				// on a goto whose next call was 'text' anyway.
+				const shot = params.action === "screenshot" ? await driver.screenshot() : undefined;
 				const consoleBlock =
 					state.console.length > 0 ? `\nConsole since last action:\n${state.console.join("\n")}` : "";
 				const wall = /just a moment|attention required|access denied|verify you are human|are you a robot/i.test(
@@ -969,7 +1017,7 @@ function makeBrowseTool(options: {
 							type: "text" as const,
 							text: `${note ? `${note} · ` : ""}${state.url} — ${state.title}${slot.headed ? " (visible browser)" : ""}${consoleBlock}${wall}`,
 						},
-						{ type: "image" as const, data: shot, mimeType: "image/jpeg" },
+						...(shot === undefined ? [] : [{ type: "image" as const, data: shot, mimeType: "image/jpeg" }]),
 					],
 					details: {},
 				};
@@ -1109,7 +1157,7 @@ function readPicks(raw: string[] | undefined): AnglePick[] | undefined | string 
 		}
 		picks.push(pick);
 	}
-	return picks;
+	return picks.slice(0, MAX_PICKED_ANGLES);
 }
 
 export interface ResearchPaths {
@@ -1118,7 +1166,7 @@ export interface ResearchPaths {
 }
 
 export default function researchExtension(smolt: ExtensionAPI): void {
-	createResearchExtension(smolt, { root: join(process.cwd(), ".smolt", "research") });
+	createResearchExtension(smolt, { root: projectStore(process.cwd(), "research") });
 }
 
 export interface ResearchHandle {
@@ -1212,7 +1260,7 @@ export function createResearchExtension(
 							answered * QUESTION_POINTS,
 						questionsAnswered: answered,
 						actions: timing?.actions ?? slot.driver?.actions?.() ?? 0,
-						tokens: tokens ? tokens.input + tokens.output : 0,
+						tokens: tokens ? childTokenTotal(tokens) : 0,
 						wallMs: timing?.wallMs ?? 0,
 						brief: slot.task ?? "",
 					};
@@ -1226,16 +1274,30 @@ export function createResearchExtension(
 	let reportedFindings = new Set<string>();
 	let reportedAnswers = new Set<string>();
 	const reportedActions = new Map<string, number>();
-	const reportedTokens = { input: 0, output: 0, cost: 0 };
+	/** Researchers whose finish a wait has already reported. */
+	const reportedFinishes = new Set<string>();
+	/** Whether a wait has something to say that the last one did not. */
+	const hasNews = (): boolean => {
+		if (activeRun === undefined) return false;
+		if (researchers.some((slot) => slot.status !== "researching" && !reportedFinishes.has(slot.researcher.slug))) {
+			return true;
+		}
+		if (store.listFindings(activeRun).some((finding) => !reportedFindings.has(finding.slug))) return true;
+		return store
+			.listQuestions(activeRun)
+			.some((question) => question.status !== "open" && !reportedAnswers.has(question.slug));
+	};
+	const reportedTokens: ChildTokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
-	const tokenTotals = (): { input: number; output: number; cost: number } => {
-		const totals = { input: 0, output: 0, cost: 0 };
+	const tokenTotals = (): ChildTokens => {
+		const totals: ChildTokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 		for (const slot of researchers) {
 			const tokens = slot.driver?.tokens?.();
 			if (!tokens) continue;
 			totals.input += tokens.input;
 			totals.output += tokens.output;
-			totals.cost += tokens.cost;
+			totals.cacheRead += tokens.cacheRead;
+			totals.cacheWrite += tokens.cacheWrite;
 		}
 		return totals;
 	};
@@ -1243,12 +1305,7 @@ export function createResearchExtension(
 	const running = (): ResearcherSlot[] => researchers.filter((slot) => slot.status === "researching");
 	const allFinished = (): boolean => researchers.length > 0 && running().length === 0;
 
-	const tokenLabel = (slot: ResearcherSlot): string => {
-		const tokens = slot.driver?.tokens?.();
-		if (!tokens) return "";
-		const total = tokens.input + tokens.output;
-		return total > 0 ? `${(total / 1000).toFixed(1)}k tokens` : "";
-	};
+	const tokenLabel = (slot: ResearcherSlot): string => childSpendLabel(slot.driver?.tokens?.());
 
 	const shorten = (raw: string): string => {
 		const text = raw.replace(/^https?:\/\//, "").trim();
@@ -1350,9 +1407,8 @@ export function createResearchExtension(
 		const map = store.questionMap(activeRun);
 		const live = running().length;
 		const pending = clearances.size > 0 ? `, ${clearances.size} clearance pending` : "";
-		const totals = tokenTotals();
-		const spentTokens = totals.input + totals.output;
-		const spentLabel = spentTokens > 0 ? `, ${(spentTokens / 1000).toFixed(1)}k researcher tokens` : "";
+		const spend = childSpendLabel(tokenTotals());
+		const spentLabel = spend === "" ? "" : `, ${spend.replace("tokens", "researcher tokens")}`;
 		const questions = `${map.answered}/${map.answered + map.open} questions`;
 		ctx.ui.setStatus(
 			"research",
@@ -1391,9 +1447,14 @@ export function createResearchExtension(
 				` · ${filed.length} finding${filed.length === 1 ? "" : "s"} · ${doing}`;
 			lines.push(slot.status === "errored" ? `${line} — ${slot.error.split("\n")[0]?.slice(0, 50) ?? ""}` : line);
 			details.testers.push({
-				tickets: filed.map(
-					(finding) => `[${finding.confidence}/${finding.kind}] ${finding.title} — ${finding.topic}`,
-				),
+				// The topic carries the finding's first source URL as a markdown
+				// link so the desktop roster can render it clickable.
+				tickets: filed.map((finding) => {
+					const url = finding.sources.find((source) => /^https?:\/\//i.test(source));
+					const topic = finding.topic || (url !== undefined ? "source" : "");
+					const tail = url !== undefined ? `[${topic}](${url})` : topic;
+					return `[${finding.confidence}/${finding.kind}] ${finding.title}${tail ? ` — ${tail}` : ""}`;
+				}),
 				actions: (slot.driver?.recentActions?.() ?? []).map(
 					(action) => actionLabels.get(action) ?? humanizeAction(action) ?? action,
 				),
@@ -1524,6 +1585,7 @@ export function createResearchExtension(
 		thinkingLevel?: ThinkingLevel,
 	): Promise<void> => {
 		synthesisDue = false;
+		reportedFinishes.clear();
 		reportedFindings = new Set(store.listFindings(run.slug).map((finding) => finding.slug));
 		reportedAnswers = new Set(
 			store
@@ -1532,9 +1594,7 @@ export function createResearchExtension(
 				.map((question) => question.slug),
 		);
 		reportedActions.clear();
-		reportedTokens.input = 0;
-		reportedTokens.output = 0;
-		reportedTokens.cost = 0;
+		Object.assign(reportedTokens, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 		wrappedUp.clear();
 		const team = run.researchers.filter((researcher) => (researcher.wave ?? 1) === run.wave);
 		researchers = team.map((researcher) => ({ researcher, status: "researching" as const, summary: "", error: "" }));
@@ -1620,6 +1680,13 @@ export function createResearchExtension(
 		paint(ctx);
 	});
 
+	// Stopping the chat stops the team. The researchers are agents of their
+	// own, so the session's abort never reached them: the reader pressed stop,
+	// the turn in front of them ended, and the team carried on working.
+	smolt.on("agent_abort", async () => {
+		await stopAll(true);
+	});
+
 	smolt.on("session_shutdown", async () => {
 		await stopAll(true);
 	});
@@ -1670,26 +1737,22 @@ export function createResearchExtension(
 		name: "research",
 		label: "Research",
 		description:
-			"Inspect and manage research runs: investigator teams whose diaries, findings, question maps and " +
-			"reports live under the project's .smolt/research/ directory.\n\n" +
-			"ACTIONS: 'list' all runs; 'view' one run (team, question map, findings by confidence, notes paths — " +
-			"omit 'run' for the latest); 'view_finding' (finding, run?) and 'view_question' (question, run?) for " +
-			"full bodies; 'add_finding' (title, what, confidence?, kind?, topic?, evidence?, sources?, question?); " +
-			"'update_finding' (finding, status open/verified/refuted/duplicate, duplicate_of?, confidence?); " +
-			"'add_question' (title, text?, blocked_by?) to put a sharp sub-question on the map; 'update_question' " +
-			"(question, blocked_by?, text?, status open/dead-end/out-of-scope, reason?); 'answer' (question, answer, " +
-			"gist?) to close a question with its answer; 'update_run' (notes?, add_fog?, remove_fog?); " +
-			"'write_report' (content, run?) writes the synthesized report and completes the run; 'wait' (seconds?) " +
-			"blocks while this session's researchers are working and reports the deltas when it returns — it also " +
-			"returns early whenever a researcher requests clearance; 'decide' (clearance, verdict allow|deny, " +
-			"guidance?) rules on such a request — rule promptly, deny when in doubt; 'wrap_up' (researcher?) tells " +
-			"stragglers to file what they have and finish; 'continue' (run?, angles?, count?, model?) dispatches " +
-			"the next wave at the open frontier — this is how a run stops at nothing: keep going while questions " +
-			`remain takeable, up to ${MAX_WAVES} waves.\n\n` +
-			"WHEN: after /research dispatches a run (wait for it, then synthesize or continue), or when the user " +
-			"asks about earlier research, wants findings triaged, or wants a subject taken further. Start new runs " +
-			"with action 'start' (subject, angles? or count?, questions?, notes?, model?) or the /research " +
-			"command in plain language; resume interrupted ones with 'resume'.",
+			"Research runs: investigator teams whose diaries, findings, question maps and reports live in this " +
+			"project's research store.\n\n" +
+			"RUN: 'start' (subject, angles? or count?, questions?, notes?, model?); 'wait' (seconds?) blocks while " +
+			"this session's researchers work and returns the deltas — early on news or a clearance request; " +
+			"'decide' (clearance, verdict allow|deny, guidance?) — promptly, deny when in doubt; 'continue' (run?, " +
+			`angles?, count?, model?) dispatches the next wave at the open frontier, up to ${MAX_WAVES} waves; ` +
+			"'wrap_up' (researcher?); 'resume' (run?) for an interrupted run.\n" +
+			"RECORD: 'list'; 'view' (run?) — team, map, findings, notes paths; 'view_finding' (finding); " +
+			"'view_question' (question); 'add_finding' (title, what, confidence?, kind?, topic?, evidence?, " +
+			"sources?, question?); 'update_finding' (finding, status open|verified|refuted|duplicate, " +
+			"duplicate_of?, confidence?); 'add_question' (title, text?, blocked_by?); 'update_question' " +
+			"(question, blocked_by?, text?, status open|dead-end|out-of-scope, reason?); 'answer' (question, " +
+			"answer, gist?); 'update_run' (notes?, add_fog?, remove_fog?); 'write_report' (content, run?) " +
+			"completes the run.\n\n" +
+			"WHEN: after /research dispatches a run (wait, then synthesize or continue), or when the user asks " +
+			"about earlier research or wants a subject taken further.",
 		parameters: Type.Object({
 			action: Type.Union(
 				[
@@ -1872,8 +1935,9 @@ export function createResearchExtension(
 					params.questions?.slice(0, 6),
 					params.notes,
 				);
+				const dropped = (params.angles?.length ?? 0) > MAX_PICKED_ANGLES;
 				return textResult(
-					`Run '${run.slug}' started: ${count} researcher(s) dispatched; the kickoff brief arrives as a follow-up message. Call 'wait' to follow the run.`,
+					`Run '${run.slug}' started: ${count} researcher(s) dispatched${dropped ? ` (angles beyond the first ${MAX_PICKED_ANGLES} were dropped: team size is the wave's spend multiplier)` : ""}; the kickoff brief arrives as a follow-up message. Call 'wait' to follow the run.`,
 				);
 			}
 
@@ -1921,11 +1985,13 @@ export function createResearchExtension(
 					);
 				}
 				const limit = Math.max(1, Math.min(params.seconds ?? DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS)) * 1000;
-				const deadline = Date.now() + limit;
+				const started = Date.now();
+				const deadline = started + limit;
 				let polls = 0;
 				while (!allFinished() && clearances.size === 0 && Date.now() < deadline && signal?.aborted !== true) {
 					await new Promise((resolve) => setTimeout(resolve, 500));
 					if (++polls % 8 === 0) paint(ctx);
+					if (polls % 10 === 0 && Date.now() - started >= NEWS_SETTLE_MS && hasNews()) break;
 				}
 				paint(ctx);
 				if (clearances.size > 0) {
@@ -1985,6 +2051,7 @@ export function createResearchExtension(
 					: "";
 				const roster = researchers
 					.map((slot) => {
+						if (slot.status !== "researching") reportedFinishes.add(slot.researcher.slug);
 						const count = filed.get(slot.researcher.slug) ?? 0;
 						const actions = slot.driver?.actions?.() ?? 0;
 						const delta = actions - (reportedActions.get(slot.researcher.slug) ?? 0);
@@ -2006,23 +2073,22 @@ export function createResearchExtension(
 					})
 					.join("\n");
 				const totals = tokenTotals();
-				const spent = {
+				const spent: ChildTokens = {
 					input: Math.max(0, totals.input - reportedTokens.input),
 					output: Math.max(0, totals.output - reportedTokens.output),
-					cost: Math.max(0, totals.cost - reportedTokens.cost),
+					cacheRead: Math.max(0, totals.cacheRead - reportedTokens.cacheRead),
+					cacheWrite: Math.max(0, totals.cacheWrite - reportedTokens.cacheWrite),
 				};
-				reportedTokens.input = totals.input;
-				reportedTokens.output = totals.output;
-				reportedTokens.cost = totals.cost;
+				Object.assign(reportedTokens, totals);
 				const usage =
-					spent.input + spent.output > 0
+					childTokenTotal(spent) > 0
 						? {
 								input: spent.input,
 								output: spent.output,
-								cacheRead: 0,
-								cacheWrite: 0,
-								totalTokens: spent.input + spent.output,
-								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: spent.cost },
+								cacheRead: spent.cacheRead,
+								cacheWrite: spent.cacheWrite,
+								totalTokens: childTokenTotal(spent),
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, // Usage.cost is required by the type; spend is counted in tokens only
 							}
 						: undefined;
 				const total = allFindings.filter((finding) => finding.status !== "duplicate").length;

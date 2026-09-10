@@ -40,9 +40,22 @@ const BUILD_WORDS = [
 	"new",
 	"init",
 	"generate",
+	"write",
+	"put together",
+	"clone",
+	"replicate",
+	"recreate",
+	"rebuild",
 ];
 
-/** Things that are a web app when you build one. */
+/**
+ * Things that are a web app when you build one.
+ *
+ * The list covers both halves of the web: the ones you use — apps, dashboards,
+ * admin panels — and the ones you read, which are just as much a build and were
+ * missing for a while. A docs site is a web project even though nobody calls it
+ * an app.
+ */
 const WEB_WORDS = [
 	"web app",
 	"webapp",
@@ -60,6 +73,27 @@ const WEB_WORDS = [
 	"admin panel",
 	"web ui",
 	"site",
+	"blog",
+	"portfolio",
+	"microsite",
+	"storefront",
+	"web page",
+	"webpage",
+	"home page",
+	"homepage",
+	"docs portal",
+];
+
+/**
+ * A page on the web, held up as the thing to build.
+ *
+ * "Replicate what https://docs.example.com has going on" names no web word at
+ * all, and is as clear a web build as a prompt gets. A word list cannot say
+ * that shape, so this one is a pattern: a phrase about matching something,
+ * then a link, close enough together to be about each other.
+ */
+const MODELLED_ON_A_PAGE = [
+	"/(?:like|similar to|same as|version of|clone of|copy of|inspired by|based on|look of|design of|layout of|feel of|replicate|replicates|replicating|recreate|recreates|recreating)\\b[^.!?\\n]{0,60}https?://\\S/",
 ];
 
 /**
@@ -105,7 +139,7 @@ export const BUILT_IN_CUES: Cue[] = [
 		id: "web-stack",
 		summary: "Default stack for a new web app",
 		trigger: BUILD_WORDS,
-		with: WEB_WORDS,
+		with: [...WEB_WORDS, ...MODELLED_ON_A_PAGE],
 		unless: STACK_WORDS,
 		note:
 			"## Web stack\n" +
@@ -115,15 +149,34 @@ export const BUILT_IN_CUES: Cue[] = [
 	},
 ];
 
-/** Whole-word, whitespace-tolerant phrase match. */
+/**
+ * One list entry, as something to test a prompt with.
+ *
+ * A phrase by default, matched whole-word and tolerant of the whitespace
+ * between its words. An entry written `/like this/` is a regular expression
+ * instead — the escape hatch for shapes a word list cannot say, and the only
+ * way to write a trigger about a link rather than a word.
+ */
+function toMatcher(entry: string): RegExp | undefined {
+	const trimmed = entry.trim();
+	if (trimmed === "") return undefined;
+	if (trimmed.length > 2 && trimmed.startsWith("/") && trimmed.endsWith("/")) {
+		try {
+			return new RegExp(trimmed.slice(1, -1), "i");
+		} catch {
+			// A malformed pattern is one entry that never matches, never a broken
+			// session: the same bargain the rest of the module makes.
+			return undefined;
+		}
+	}
+	const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+	return new RegExp(`\\b${escaped}\\b`, "i");
+}
+
+/** Whole-word, whitespace-tolerant phrase match; `/…/` entries are patterns. */
 function mentions(text: string, phrases: string[] | undefined): boolean {
 	if (!phrases || phrases.length === 0) return false;
-	return phrases.some((phrase) => {
-		const trimmed = phrase.trim();
-		if (trimmed === "") return false;
-		const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
-		return new RegExp(`\\b${escaped}\\b`, "i").test(text);
-	});
+	return phrases.some((phrase) => toMatcher(phrase)?.test(text) === true);
 }
 
 /**
@@ -162,6 +215,9 @@ function asStringList(value: unknown): string[] {
  * ---
  * ## Tests
  * New test files go under test/ and run with vitest.
+ *
+ * Entries are phrases, matched whole-word. One written `/like this/` is a
+ * regular expression, for the rare trigger a phrase cannot describe.
  */
 export function parseCueFile(id: string, raw: string, source: string): Cue | undefined {
 	const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(raw);

@@ -27,7 +27,6 @@ import { SettingsDialog } from "./components/SettingsDialog.tsx";
 import { ShortcutsDialog } from "./components/ShortcutsDialog.tsx";
 import { Sidebar } from "./components/Sidebar.tsx";
 import { Titlebar } from "./components/Titlebar.tsx";
-import { Toaster } from "./components/Toaster.tsx";
 import { toggleAllToolOutput, Transcript } from "./components/Transcript.tsx";
 import { TooltipProvider } from "./components/ui/tooltip.tsx";
 
@@ -47,6 +46,14 @@ export function App() {
 		const onPointerDown = (event: PointerEvent): void => {
 			const target = event.target as HTMLElement | null;
 			sidebarActive = target?.closest("[data-sidebar]") != null;
+			// A click on the sidebar's blank space leaves the composer focused,
+			// and Ctrl+A then went to the text field rather than the chat list
+			// the reader had just clicked into. Let the field go, so the click
+			// means what it looks like it means.
+			if (sidebarActive && !(target instanceof HTMLInputElement) && !(target instanceof HTMLTextAreaElement)) {
+				const active = document.activeElement;
+				if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) active.blur();
+			}
 		};
 		document.addEventListener("pointerdown", onPointerDown, true);
 		return () => document.removeEventListener("pointerdown", onPointerDown, true);
@@ -102,7 +109,12 @@ export function App() {
 			if (key === "a" && !e.shiftKey) {
 				const active = document.activeElement;
 				const inField = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement;
-				if (sidebarActive && !inField) {
+				// Pointing at the list is claim enough: hovering the sidebar makes
+				// Ctrl+A mean the chat list, no prior click required — and it wins
+				// even over the composer's standing focus, which otherwise holds
+				// every keystroke.
+				const overSidebar = document.querySelector("[data-sidebar]")?.matches(":hover") === true;
+				if (overSidebar || (sidebarActive && !inField)) {
 					e.preventDefault();
 					selectAllSessions();
 				}
@@ -221,7 +233,7 @@ export function App() {
 			    composer has gone"). dvh keeps the dynamic-viewport intent. */}
 			<div className="flex h-dvh">
 				<Sidebar />
-				<main className="flex min-w-0 flex-1 flex-col pt-9 @container">
+				<main className="flex min-w-0 flex-1 flex-col pt-12 @container">
 					<Transcript />
 					<Composer />
 				</main>
@@ -233,7 +245,6 @@ export function App() {
 			<ConfirmDialog />
 			<PromptDialog />
 			<ProviderDialog />
-			<Toaster />
 		</TooltipProvider>
 	);
 }

@@ -71,4 +71,42 @@ describe("renderMarkdown", () => {
 	test("escapeHtml covers quotes and angle brackets", () => {
 		expect(escapeHtml('<a href="x">&</a>')).toBe("&lt;a href=&quot;x&quot;&gt;&amp;&lt;/a&gt;");
 	});
+
+	test("colours bracketed confidence tags at the start of a line, leaving links alone", () => {
+		const html = renderMarkdown(
+			[
+				"[confirmed/fact] sure",
+				"",
+				"- [likely/mechanism] maybe",
+				"- [unconfirmed] not yet",
+				"- [docs](https://example.com) a link",
+			].join("\n"),
+		);
+		expect(html).toContain(
+			'<span class="md-tag md-tag-ok">confirmed<span class="md-tag-kind">/fact</span></span> sure',
+		);
+		expect(html).toContain('<span class="md-tag md-tag-warn">likely');
+		expect(html).toContain('<span class="md-tag md-tag-bad">unconfirmed</span> not yet');
+		expect(html).toContain('<a href="https://example.com"');
+		expect(html).not.toContain('md-tag-note">docs');
+	});
+
+	test("turns a quoted session id into a link, bare or in code", () => {
+		const id = "01a062db-93b6-725d-9935-02f2452bf339";
+		const html = renderMarkdown(`see \`${id}\` and ${id} here`);
+		expect(html.match(/data-session="01a062db-93b6-725d-9935-02f2452bf339"/g)).toHaveLength(2);
+		expect(html).toContain(`<code><a class="md-session" data-session="${id}"`);
+	});
+
+	test("links a local path in inline code, but not a URL or a command", () => {
+		const html = renderMarkdown(
+			"wrote `.smolt/wayfinder/advisor-extension/spec.md` and `src/app.ts:42`, ran `npm run check`, see `https://x.y/z`",
+		);
+		expect(html).toContain('<a class="md-file" data-file=".smolt/wayfinder/advisor-extension/spec.md"');
+		expect(html).toContain('<a class="md-file" data-file="src/app.ts:42"');
+		expect(html).not.toContain('data-file="npm run check"');
+		expect(renderMarkdown("use `/wayfinder` then `/etc/hosts`")).not.toContain('data-file="/wayfinder"');
+		expect(renderMarkdown("use `/wayfinder` then `/etc/hosts`")).toContain('data-file="/etc/hosts"');
+		expect(html).not.toContain('data-file="https://x.y/z"');
+	});
 });

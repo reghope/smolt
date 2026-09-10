@@ -11,109 +11,12 @@
  */
 
 import { join } from "node:path";
-import type { OAuthCredential } from "@smolt/ai";
 import { getAgentDir } from "../../config.ts";
 import { FileAuthStorageBackend } from "../../core/auth-storage.ts";
 import { getFileRevision } from "../../utils/paths.ts";
-import { effectiveWindow, exceedsCap } from "./windows.ts";
+import { emptyPoolData, type PoolData, parsePoolData } from "./model.ts";
 
-export const POOL_PRIMARY_ID = "__primary__";
-
-export type WindowKind = "5h" | "weekly";
-
-/** Estimated caps for proactive rotation. Optional per credential. */
-export interface PoolPlanCaps {
-	/** Max total tokens (input+output) per window. */
-	tokens?: number;
-	/** Max requests per window. */
-	requests?: number;
-}
-
-export interface PoolCredential {
-	id: string;
-	type: "api_key" | "oauth";
-	label?: string;
-	addedAt: number;
-	/** api_key entries. */
-	key?: string;
-	env?: Record<string, string>;
-	/** oauth entries: the full stored credential, refreshed by the pool. */
-	oauth?: OAuthCredential;
-	/** Plan preset id used to seed `caps` (e.g. "anthropic-pro"). Informational. */
-	plan?: string;
-	/** Local cap estimates for proactive rotation; undefined = no proactive rotation. */
-	caps?: Partial<Record<WindowKind, PoolPlanCaps>>;
-}
-
-export interface PoolWindowUsage {
-	/** Rolling window anchor: first request inside the window. */
-	start: number;
-	requests: number;
-	tokens: number;
-}
-
-export interface PoolUnavailableMark {
-	/** Epoch ms when the credential becomes usable again. */
-	until: number;
-	reason: string;
-}
-
-export interface ProviderPool {
-	/** Additional credentials beyond the primary, in fallback order. */
-	credentials: PoolCredential[];
-	/** Active credential id; undefined = primary. */
-	activeId?: string;
-}
-
-export interface PoolData {
-	version: 1;
-	providers: Record<string, ProviderPool>;
-	/** Usage ledger by credential id (POOL_PRIMARY_ID for the primary). */
-	ledger: Record<string, Partial<Record<WindowKind, PoolWindowUsage>>>;
-	/** Reactive unavailability marks by credential id. */
-	unavailable: Record<string, PoolUnavailableMark>;
-}
-
-export function emptyPoolData(): PoolData {
-	return { version: 1, providers: {}, ledger: {}, unavailable: {} };
-}
-
-export function providerPoolOf(data: PoolData, providerId: string): ProviderPool {
-	const pool = data.providers[providerId];
-	if (pool) return pool;
-	return { credentials: [] };
-}
-
-/** Ordered fallback chain for a provider: rotated so the active credential is first. */
-export function orderedChain(data: PoolData, providerId: string): Array<{ id: string; entry?: PoolCredential }> {
-	const pool = providerPoolOf(data, providerId);
-	const chain: Array<{ id: string; entry?: PoolCredential }> = [
-		{ id: POOL_PRIMARY_ID },
-		...pool.credentials.map((entry) => ({ id: entry.id, entry })),
-	];
-	const activeId = pool.activeId;
-	if (!activeId) return chain;
-	const index = chain.findIndex((step) => step.id === activeId);
-	if (index <= 0) return chain;
-	return [...chain.slice(index), ...chain.slice(0, index)];
-}
-
-export function isMarkedUnavailable(data: PoolData, id: string, now: number): boolean {
-	const mark = data.unavailable[id];
-	return mark !== undefined && mark.until > now;
-}
-
-export function isCapExceeded(data: PoolData, selection: { id: string; entry?: PoolCredential }, now: number): boolean {
-	if (!selection.entry?.caps) return false;
-	const usage = data.ledger[selection.id];
-	for (const kind of Object.keys(selection.entry.caps) as WindowKind[]) {
-		const cap = selection.entry.caps[kind];
-		if (!cap) continue;
-		const state = effectiveWindow(usage?.[kind], kind, now);
-		if (exceedsCap(state, cap)) return true;
-	}
-	return false;
-}
+export * from "./model.ts";
 
 export interface PoolModifyResult<T> {
 	result: T;
@@ -197,43 +100,3 @@ export class PoolStore {
 }
 
 /** A stored credential the pool can actually use; anything else is line noise. */
-function isUsableCredential(entry: PoolCredential | undefined): entry is PoolCredential {
-	if (!entry || typeof entry.id !== "string" || entry.id === "") return false;
-	if (entry.type === "api_key")
-		return typeof entry.key === "string" && entry.key !== "" && !/[\s\r\n]/.test(entry.key);
-	if (entry.type === "oauth") return entry.oauth !== undefined && typeof entry.oauth === "object";
-	return false;
-}
-
-function parsePoolData(raw: string | undefined): PoolData {
-	if (!raw || !raw.trim()) return emptyPoolData();
-	const parsed: unknown = JSON.parse(raw);
-	if (!parsed || typeof parsed !== "object") return emptyPoolData();
-	const data = parsed as Partial<PoolData>;
-	// Malformed entries (a command line pasted as a key, a half-written add)
-	// are dropped LOUDLY: silence here is how a "saved" credential vanished
-	// between sessions with nobody the wiser.
-	const providers: Record<string, ProviderPool> = {};
-	let dropped = 0;
-	for (const [providerId, pool] of Object.entries(data.providers ?? {})) {
-		const credentials = (pool?.credentials ?? []).filter((entry) => {
-			const usable = isUsableCredential(entry);
-			if (!usable) dropped += 1;
-			return usable;
-		});
-		if (credentials.length === 0) continue;
-		const activeId = credentials.some((entry) => entry.id === pool?.activeId) ? pool?.activeId : undefined;
-		providers[providerId] = { credentials, activeId };
-	}
-	if (dropped > 0) {
-		console.error(
-			`smolt pool: dropped ${dropped} malformed credential entr${dropped === 1 ? "y" : "ies"} from pool.json`,
-		);
-	}
-	return {
-		version: 1,
-		providers,
-		ledger: data.ledger ?? {},
-		unavailable: data.unavailable ?? {},
-	};
-}

@@ -69,6 +69,10 @@ export interface SettingsConfig {
 	hideThinkingBlock: boolean;
 	mermaidRenderingMode: MermaidRenderingMode;
 	showCacheMissNotices: boolean;
+	showThroughput: boolean;
+	showHiddenChats: boolean;
+	reviewAutoFix: boolean;
+	reviewWatch: boolean;
 	collapseChangelog: boolean;
 	enableInstallTelemetry: boolean;
 	doubleEscapeAction: "fork" | "tree" | "none";
@@ -106,6 +110,10 @@ export interface SettingsCallbacks {
 	onHideThinkingBlockChange: (hidden: boolean) => void;
 	onMermaidRenderingModeChange: (mode: MermaidRenderingMode) => void;
 	onShowCacheMissNoticesChange: (shown: boolean) => void;
+	onShowThroughputChange: (shown: boolean) => void;
+	onShowHiddenChatsChange: (shown: boolean) => void;
+	onReviewAutoFixChange: (enabled: boolean) => void;
+	onReviewWatchChange: (enabled: boolean) => void;
 	onCollapseChangelogChange: (collapsed: boolean) => void;
 	onEnableInstallTelemetryChange: (enabled: boolean) => void;
 	onDoubleEscapeActionChange: (action: "fork" | "tree" | "none") => void;
@@ -514,6 +522,36 @@ export class SettingsSelectorComponent extends Container {
 				values: ["true", "false"],
 			},
 			{
+				id: "show-throughput",
+				label: "Show tokens per second",
+				description: "Show how fast the model is writing while a turn runs",
+				currentValue: config.showThroughput ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
+				id: "show-hidden-chats",
+				label: "Show hidden chats",
+				description: "List chats an extension ran for you and kept out of the way, such as review auto-fix",
+				currentValue: config.showHiddenChats ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
+				id: "review-watch",
+				label: "Review pull requests automatically",
+				description:
+					"While smolt runs, review pull requests as they arrive, or when someone comments @smolt review",
+				currentValue: config.reviewWatch ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
+				id: "review-autofix",
+				label: "Fix what a review finds",
+				description:
+					"After a review, a hidden chat fixes its findings in your working tree. Never commits or pushes",
+				currentValue: config.reviewAutoFix ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
 				id: "collapse-changelog",
 				label: "Collapse changelog",
 				description: "Show condensed changelog after updates",
@@ -867,6 +905,18 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "cache-miss-notices":
 						callbacks.onShowCacheMissNoticesChange(newValue === "true");
+						break;
+					case "show-throughput":
+						callbacks.onShowThroughputChange(newValue === "true");
+						break;
+					case "show-hidden-chats":
+						callbacks.onShowHiddenChatsChange(newValue === "true");
+						break;
+					case "review-watch":
+						callbacks.onReviewWatchChange(newValue === "true");
+						break;
+					case "review-autofix":
+						callbacks.onReviewAutoFixChange(newValue === "true");
 						break;
 					case "collapse-changelog":
 						callbacks.onCollapseChangelogChange(newValue === "true");

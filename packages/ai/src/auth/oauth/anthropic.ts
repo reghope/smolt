@@ -233,9 +233,20 @@ async function exchangeAuthorizationCode(
 
 async function loginAnthropic(interaction: ProviderAuthInteraction): Promise<OAuthCredential> {
 	const { verifier, challenge } = await generatePKCE();
-	const server = await startCallbackServer(verifier);
+	// The callback port is fixed by the OAuth registration, and on some
+	// machines it cannot be bound (Windows reserves whole port ranges for
+	// Hyper-V; another process may hold it). Losing the listener is not
+	// losing the login: the browser still lands on the redirect URL with the
+	// code in it, and the manual prompt below takes that URL pasted in.
+	let server: CallbackServerInfo | undefined;
+	let listenProblem: string | undefined;
+	try {
+		server = await startCallbackServer(verifier);
+	} catch (error) {
+		listenProblem = error instanceof Error ? error.message : String(error);
+	}
 	const manualAbort = new AbortController();
-	const onAbort = () => server.cancelWait();
+	const onAbort = () => server?.cancelWait();
 	interaction.signal.addEventListener("abort", onAbort, { once: true });
 	if (interaction.signal.aborted) onAbort();
 	let code: string | undefined;
@@ -257,9 +268,16 @@ async function loginAnthropic(interaction: ProviderAuthInteraction): Promise<OAu
 		interaction.notify({
 			type: "auth_url",
 			url: `${AUTHORIZE_URL}?${authParams.toString()}`,
-			instructions:
-				"Complete login in your browser. If the browser is on another machine, paste the final redirect URL here.",
+			instructions: server
+				? "Complete login in your browser. If the browser is on another machine, paste the final redirect URL here."
+				: "Complete login in your browser. It will end on a page that cannot load; copy that page's address from the address bar and paste it here.",
 		});
+		if (!server) {
+			interaction.notify({
+				type: "info",
+				message: `Could not listen on port ${CALLBACK_PORT} (${listenProblem ?? "unknown error"}), so the sign-in finishes by pasting the redirect URL.`,
+			});
+		}
 
 		const manualPromise = interaction
 			.prompt({
@@ -270,14 +288,14 @@ async function loginAnthropic(interaction: ProviderAuthInteraction): Promise<OAu
 			})
 			.then((input) => {
 				manualInput = input;
-				server.cancelWait();
+				server?.cancelWait();
 			})
 			.catch((error) => {
 				manualError = error instanceof Error ? error : new Error(String(error));
-				server.cancelWait();
+				server?.cancelWait();
 			});
 
-		const result = await server.waitForCode();
+		const result = server ? await server.waitForCode() : null;
 		if (manualError) throw manualError;
 		if (result?.code) {
 			code = result.code;
@@ -307,7 +325,7 @@ async function loginAnthropic(interaction: ProviderAuthInteraction): Promise<OAu
 	} finally {
 		interaction.signal.removeEventListener("abort", onAbort);
 		manualAbort.abort();
-		server.server.close();
+		server?.server.close();
 	}
 }
 

@@ -32,6 +32,12 @@ export interface Goal {
 	 * Reaching the audit length is what lets the model call a goal blocked.
 	 */
 	blockedRunLength: number;
+	/**
+	 * No more charges are accepted: the goal reached `complete` and the run
+	 * that completed it has ended. Open while the completing run is still
+	 * going, so its own spend still lands on the goal it finished.
+	 */
+	accountingClosed: boolean;
 }
 
 /** Turns the same wall must be hit before a goal may be called blocked. */
@@ -79,13 +85,21 @@ export function createGoal(current: Goal | null, objective: string, tokenBudget?
 		createdAt: stamp,
 		updatedAt: stamp,
 		blockedRunLength: 0,
+		accountingClosed: false,
 	};
 	return { ok: true, goal };
 }
 
-/** Whether a status can still be charged for work. */
-function chargeable(status: GoalStatus): boolean {
-	return status === "active" || status === "budget_limited";
+/**
+ * Whether this goal can still be charged for work.
+ *
+ * A `complete` goal whose finishing run has not ended yet still charges: the
+ * model marks the goal complete with a tool call mid-run, and the run's
+ * earlier spend would otherwise be thrown away at the boundary.
+ */
+function chargeable(goal: Goal): boolean {
+	if (goal.accountingClosed) return false;
+	return goal.status === "active" || goal.status === "budget_limited" || goal.status === "complete";
 }
 
 /**
@@ -97,7 +111,7 @@ function chargeable(status: GoalStatus): boolean {
  * numbers honest for the summary turn that follows.
  */
 export function chargeTokens(goal: Goal, delta: number): { goal: Goal; limitReached: boolean } {
-	if (delta <= 0 || !chargeable(goal.status)) return { goal, limitReached: false };
+	if (delta <= 0 || !chargeable(goal)) return { goal, limitReached: false };
 	const tokensUsed = goal.tokensUsed + Math.floor(delta);
 	const spent = goal.tokenBudget !== null && tokensUsed >= goal.tokenBudget;
 	const limitReached = spent && goal.status === "active";
@@ -114,7 +128,7 @@ export function chargeTokens(goal: Goal, delta: number): { goal: Goal; limitReac
 
 /** Add the seconds a goal spent active, for the report at the end. */
 export function chargeSeconds(goal: Goal, seconds: number): Goal {
-	if (seconds <= 0 || !chargeable(goal.status)) return goal;
+	if (seconds <= 0 || !chargeable(goal)) return goal;
 	return { ...goal, secondsUsed: goal.secondsUsed + seconds, updatedAt: now() };
 }
 
@@ -155,7 +169,8 @@ export function userStatus(goal: Goal | null, status: "paused" | "active" | "usa
 	}
 	// A resumed goal starts its blocked audit again: the wall may have moved.
 	const blockedRunLength = status === "active" ? 0 : goal.blockedRunLength;
-	return { ok: true, goal: { ...goal, status, blockedRunLength, updatedAt: now() } };
+	const accountingClosed = status === "active" ? false : goal.accountingClosed;
+	return { ok: true, goal: { ...goal, status, blockedRunLength, accountingClosed, updatedAt: now() } };
 }
 
 /** Raise or lift the ceiling, which is the only way out of budget_limited. */
@@ -174,6 +189,12 @@ export function setBudget(goal: Goal | null, tokenBudget: number | null): GoalRe
 			updatedAt: now(),
 		},
 	};
+}
+
+/** Stop accepting charges once the goal is settled and its run has ended. */
+export function closeAccounting(goal: Goal): Goal {
+	if (goal.status !== "complete" || goal.accountingClosed) return goal;
+	return { ...goal, accountingClosed: true, updatedAt: now() };
 }
 
 /** Note whether the turn that just ran hit the same wall as the one before. */

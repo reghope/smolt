@@ -1,4 +1,6 @@
 import type { InlineExtension } from "../core/extensions/types.ts";
+import advisorExtension from "./advisor/index.ts";
+import analystExtension from "./analyst/index.ts";
 import autoThinkingExtension from "./auto-thinking/index.ts";
 import battleTestExtension from "./battletest/index.ts";
 import cuesExtension from "./cues/index.ts";
@@ -12,8 +14,8 @@ import { poolExtension } from "./pool/index.ts";
 import researchExtension from "./research/index.ts";
 import reviewExtension from "./review/index.ts";
 import screenshotExtension from "./screenshot/index.ts";
+import sessionNameExtension from "./session-name/index.ts";
 import subagentsExtension from "./subagents/index.ts";
-import tasteExtension from "./taste/index.ts";
 import telegramExtension from "./telegram/index.ts";
 import toolsExtension from "./tools/index.ts";
 import wayfinderExtension from "./wayfinder/index.ts";
@@ -59,6 +61,12 @@ export const builtInExtensions: InlineExtension[] = [
 		description: "Lets the agent capture and look at your screen",
 	},
 	{
+		name: "session-name",
+		factory: sessionNameExtension,
+		hidden: true,
+		description: "Names each chat after what it turned out to be about, once the first turn settles",
+	},
+	{
 		name: "permissions",
 		factory: permissionsExtension,
 		hidden: true,
@@ -84,12 +92,6 @@ export const builtInExtensions: InlineExtension[] = [
 		factory: wayfinderExtension,
 		hidden: true,
 		description: "Maps work too big for one session into decision tickets",
-	},
-	{
-		name: "taste",
-		factory: tasteExtension,
-		hidden: true,
-		description: "Design doctrine that arms itself on design work, and holds the finish",
 	},
 	{
 		name: "subagents",
@@ -128,9 +130,24 @@ export const builtInExtensions: InlineExtension[] = [
 		description: "Two-way bridge between this session and your own Telegram bot",
 	},
 	{
+		name: "advisor",
+		factory: advisorExtension,
+		hidden: true,
+		description: "A second model shadows the session, reviews each turn, and steers with advisory notes",
+	},
+	{
 		name: "cues",
 		factory: cuesExtension,
 		hidden: true,
 		description: "House notes that enter the prompt only when their subject comes up",
+	},
+	// Last on purpose: the analyst records each turn's system prompt after
+	// every other extension has appended to it, so blocks can be credited to
+	// their authors.
+	{
+		name: "analyst",
+		factory: analystExtension,
+		hidden: true,
+		description: "Reads what your sessions and extensions leave behind and says where the tokens go",
 	},
 ];

@@ -1,6 +1,6 @@
 # @smolt/protocol
 
-Runtime-neutral schemas, types, CBOR encoding, and byte-stream framing for the experimental smolt protocol.
+Runtime-neutral schemas, types, CBOR encoding, and byte-stream framing for the experimental Smolt protocol.
 
 Protocol version `1` uses binary messages with this wire layout:
 

@@ -1,4 +1,4 @@
-> smolt can create themes. Ask it to build one for your setup.
+> Smolt can create themes. Ask it to build one for your setup.
 
 # Themes
 
@@ -37,7 +37,7 @@ Select a theme via `/settings` or in `settings.json`:
 }
 ```
 
-On first run, smolt detects your terminal background and defaults to `dark` or `light`.
+On first run, Smolt detects your terminal background and defaults to `dark` or `light`.
 
 ### Initial Theme
 
@@ -137,7 +137,7 @@ vim ~/.smolt/agent/themes/my-theme.json
 
 3. Select the theme via `/settings`.
 
-**Hot reload:** When you edit the currently active custom theme file, smolt reloads it automatically for immediate visual feedback.
+**Hot reload:** When you edit the currently active custom theme file, Smolt reloads it automatically for immediate visual feedback.
 
 ## Theme Format
 
@@ -293,7 +293,7 @@ Four formats are supported:
 
 ### Terminal Compatibility
 
-Smolt uses 24-bit RGB colors. Most modern terminals support this (iTerm2, Kitty, WezTerm, Windows Terminal, VS Code). For older terminals with only 256-color support, smolt falls back to the nearest approximation.
+Smolt uses 24-bit RGB colors. Most modern terminals support this (iTerm2, Kitty, WezTerm, Windows Terminal, VS Code). For older terminals with only 256-color support, Smolt falls back to the nearest approximation.
 
 Check truecolor support:
 

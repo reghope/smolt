@@ -23,6 +23,13 @@ Vite, because in both the answer is already given.
 
 Phrases match whole words, so `spa` does not fire on "space invaders".
 
+An entry written `/like this/` is a regular expression rather than a phrase.
+It is the escape hatch for shapes a word list cannot say: the web-stack cue
+uses one to notice a prompt that names no web word at all and instead points
+at a page — "replicate what https://docs.example.com has going on" — which is
+as clear a web build as a prompt gets. A malformed pattern is one entry that
+never matches, not a broken session.
+
 Once armed, a cue stays armed for the session: the web app is still being
 built three turns later.
 

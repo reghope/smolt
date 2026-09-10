@@ -4,7 +4,7 @@ Smolt uses environment variables in three ways:
 
 - Variables such as `SMOLT_OFFLINE` configure the Smolt process.
 - Smolt sets process markers so child processes can identify Smolt as the launching agent.
-- Commands run by the LLM-callable shell tools receive `PI_*` variables describing the current session.
+- Commands run by the LLM-callable shell tools receive `SMOLT_SESSION_*` and model variables describing the current session.
 
 Provider API-key variables are documented separately in [Providers](providers.md#environment-variables-or-auth-file).
 
@@ -79,6 +79,7 @@ These variables are read by Smolt itself:
 | Variable | Description |
 |----------|-------------|
 | `SMOLT_CODING_AGENT_DIR` | Override the config directory; default is `~/.smolt/agent` |
+| `SMOLT_STORED_CREDENTIALS_ONLY` | Set to `1` to ignore provider keys in the environment and ambient config files; only credentials saved by `/login`, `/pool`, or the desktop app count. The desktop sets this for its agents. |
 | `SMOLT_CODING_AGENT_SESSION_DIR` | Override session storage; overridden by `--session-dir` |
 | `SMOLT_PACKAGE_DIR` | Override the package directory, useful for Nix/Guix store paths |
 | `SMOLT_OFFLINE` | Disable startup network operations, including update checks, package updates, and install/update telemetry |
@@ -91,6 +92,14 @@ These variables are read by Smolt itself:
 | `SMOLT_IMAGE_PROTOCOL` | Override inline image detection with `kitty`, `iterm2`, `none`, or `auto` |
 | `SMOLT_TRUE_COLOR` | Override truecolor detection with `1`, `0`, or `auto` |
 | `SMOLT_TUI_ESC_TIMEOUT` | How long to wait after a lone ESC before treating it as Escape, in milliseconds; defaults to `100` over SSH and `10` otherwise. Increase if Alt-key input is misread as Escape |
+| `SMOLT_CLEAR_ON_SHRINK` | Set to `1` to clear empty rows when content shrinks, the same as the `terminal.clearOnShrink` setting |
+| `SMOLT_TELEGRAM_POLL` | `on` or `off`: whether this process polls Telegram for inbound messages. See [Telegram](usage.md#slash-commands) |
+| `SMOLT_EMBEDDINGS_MODULE` | Path to a `@huggingface/transformers` install used for semantic recall when the runtime is not already beside Smolt |
+| `SMOLT_EXPERIMENTAL` | Set to `1` to enable experimental features, including the experimental first-time setup |
+| `SMOLT_TIMING` | Set to `1` to print startup timing instrumentation |
+| `SMOLT_STARTUP_BENCHMARK` | Benchmark interactive startup; interactive mode only, Smolt exits with an error in other modes |
+| `SMOLT_MANAGED_INSTALL_ROOT` | Override the root directory of an installer-managed Smolt install |
+| `SMOLT_INSTALLER_API_BASE` | Override the base URL used to look up managed installer releases |
 | `VISUAL`, `EDITOR` | External editor fallback when `externalEditor` is unset |
 | `HTTP_PROXY`, `HTTPS_PROXY` | Proxy outbound HTTP requests |
 

@@ -89,7 +89,6 @@ async function fetchInstallerArtifact(url: string, label: string): Promise<strin
 async function runManagedNpmCi(stageDir: string): Promise<void> {
 	const args = [
 		"ci",
-		"--ignore-scripts",
 		"--min-release-age=0",
 		"--omit=dev",
 		"--include=optional",

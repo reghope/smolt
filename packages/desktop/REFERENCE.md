@@ -1,8 +1,8 @@
-# Claude Code Desktop: a feature map, and where smolt stands
+# Claude Code Desktop: a feature map, and where Smolt stands
 
 A complete inventory of the reference application — every surface, menu, and
 option — with, for each, what `@smolt/desktop` now does and what it
-deliberately does not. Written as a working spec: the "smolt" lines are the
+deliberately does not. Written as a working spec: the "Smolt" lines are the
 honest state of this package, not aspirations.
 
 Sources: the official desktop reference and its Desktop-specific pages
@@ -12,7 +12,7 @@ Sources: the official desktop reference and its Desktop-specific pages
 
 ## 1. Application shell
 
-| Element | Reference | smolt |
+| Element | Reference | Smolt |
 | --- | --- | --- |
 | Tabs | **Chat**, **Cowork**, **Code** | Single surface, equivalent to Code |
 | Platforms | macOS (universal), Windows x64 + ARM64, Linux beta (apt/deb) | Electron; developed and verified on Windows |
@@ -24,7 +24,7 @@ work in a sandboxed VM (QEMU/KVM on Linux, needing hardware virtualisation,
 `/dev/kvm` group membership and `vhost_vsock`). **Code** is the coding surface
 and the only one mapped in depth below.
 
-*smolt*: no tab switcher. Its side chat (below) covers the "ask without
+*Smolt*: no tab switcher. Its side chat (below) covers the "ask without
 touching the main thread" case that Chat serves; Cowork has no counterpart.
 
 ---
@@ -40,7 +40,7 @@ Four things are configured before the first message:
 3. **Model** — from the dropdown beside send; changeable mid-session.
 4. **Permission mode** — from the mode selector; changeable mid-session.
 
-*smolt*: local only, one folder (the process cwd), model and mode both
+*Smolt*: local only, one folder (the process cwd), model and mode both
 switchable mid-session from the composer.
 
 ### Environments in detail
@@ -62,14 +62,14 @@ switchable mid-session from the composer.
   granted per distribution *and* folder. Not available: integrated terminal,
   connectors, plugins, session forking, file browser, `@` file suggestions.
 
-*smolt*: local only. Cloud, SSH and WSL are absent — each is an execution
+*Smolt*: local only. Cloud, SSH and WSL are absent — each is an execution
 backend rather than a UI feature, and would need its own transport.
 
 ---
 
 ## 3. The prompt box
 
-| Feature | Reference | smolt |
+| Feature | Reference | Smolt |
 | --- | --- | --- |
 | Send / newline | Enter / Shift+Enter | Same |
 | Interrupt | Stop button | Stop button, Esc |
@@ -100,8 +100,8 @@ support Accept edits, Plan and Auto. `dontAsk` is CLI-only. Admins can remove
 Auto (`disableAutoMode`) or Bypass
 (`permissions.disableBypassPermissionsMode`).
 
-*smolt*: **all five implemented and enforced on the `tool_call` event** —
-Manual, Accept edits, Auto, Bypass, Plan. Because smolt has no classifier,
+*Smolt*: **all five implemented and enforced on the `tool_call` event** —
+Manual, Accept edits, Auto, Bypass, Plan. Because Smolt has no classifier,
 Auto was given a real check of its own: it stops before commands that cannot be
 undone (recursive force deletes, force pushes, hard resets, `git clean`,
 `mkfs`, `dd` to a device, dropping a database object, fork bombs, `chmod 777`
@@ -121,7 +121,7 @@ subagent**, plus the **iOS Simulator** on macOS. Panes are dragged by their
 header to reposition, dragged by an edge to resize, closed with `Cmd/Ctrl+\`,
 and opened from the **Views** menu.
 
-*smolt*: chat, changes (diff), terminal, and side chat. Changes and side chat
+*Smolt*: chat, changes (diff), terminal, and side chat. Changes and side chat
 share a right-hand rail, stacking to half-height each when both are open.
 Panes are toggled from title-bar icons rather than dragged; there is no
 free-form layout.
@@ -145,7 +145,7 @@ free-form layout.
   on external pages; `disableBrowserExternalNavigation: true` blocks external
   navigation entirely (localhost previews unaffected).
 
-*smolt*: not built. This is the largest single gap and the most substantial
+*Smolt*: not built. This is the largest single gap and the most substantial
 piece of remaining work — it needs an embedded browser view, a server
 supervisor, and a tool surface for the agent to drive the page.
 
@@ -157,7 +157,7 @@ Claude revises. **Review code** asks Claude to review its own diff, leaving
 inline comments — scoped to compile errors, definite logic errors, security
 issues and obvious bugs, explicitly not style or lint.
 
-*smolt*: changes pane lists files with per-file hunks, colourised, plus a
+*Smolt*: changes pane lists files with per-file hunks, colourised, plus a
 composer bar showing project, branch and `+n −m` with a way straight in. Line
 comments and Review code are not built.
 
@@ -167,7 +167,7 @@ Opens in the session's working directory sharing the agent's environment;
 `Ctrl+\``; multiple tabs; "Open in terminal" from a folder's context menu.
 Local sessions only.
 
-*smolt*: terminal pane runs commands in the session directory with a stop
+*Smolt*: terminal pane runs commands in the session directory with a stop
 control.
 
 ### 5.4 File pane
@@ -177,14 +177,14 @@ discard if the file changed on disk; click the header path to copy it.
 Right-click any path anywhere for **Attach as context**, **Open in** (VS Code,
 Cursor, Zed), **Show in Finder/Explorer**, **Copy path**.
 
-*smolt*: not built; files are opened by asking the agent.
+*Smolt*: not built; files are opened by asking the agent.
 
 ### 5.5 Tasks and subagent panes
 
 Tasks lists background work in the session — subagents, background shells,
 dynamic workflows — and each entry opens its output or can be stopped.
 
-*smolt*: not built.
+*Smolt*: not built.
 
 ### 5.6 iOS Simulator (macOS)
 
@@ -201,7 +201,7 @@ Consent is per device, once, covering control and screenshots; opening a URL
 and building follow the session's permission mode. Disabled by
 `disableMobileSimulatorTools` or `requireCoworkFullVmSandbox`.
 
-*smolt*: not built (macOS-only feature).
+*Smolt*: not built (macOS-only feature).
 
 ---
 
@@ -211,7 +211,7 @@ and building follow the session's permission mode. Disabled by
 (every call and intermediate step), Summary (final responses and changes only).
 `Ctrl+O` cycles.
 
-*smolt*: consecutive tool calls fold into one summary line — the call's own
+*Smolt*: consecutive tool calls fold into one summary line — the call's own
 description when it has one, otherwise "Used 5 tools" / "Ran a command, used 2
 tools" — expanding to individual calls. `Ctrl+O` expands or collapses all tool
 output. There is no three-way mode switch.
@@ -225,7 +225,7 @@ Reference shortcuts (macOS; Ctrl on Windows):
 modes · `Cmd+Shift+M` mode menu · `Cmd+Shift+I` model menu · `Cmd+Shift+E`
 effort menu · `1`–`9` select in an open menu.
 
-*smolt* implements: `Ctrl+/`, `Ctrl+N`, `Ctrl+Tab`/`Ctrl+Shift+Tab`, `Esc`,
+*Smolt* implements: `Ctrl+/`, `Ctrl+N`, `Ctrl+Tab`/`Ctrl+Shift+Tab`, `Esc`,
 `Ctrl+Shift+D`, `` Ctrl+` ``, `Ctrl+;`, `Ctrl+O`, `Ctrl+Shift+M`,
 `Ctrl+Shift+I`, `Ctrl+Shift+E`, `1`–`9`, plus its own `Ctrl+B` (sidebar),
 `Ctrl+K` (search sessions), `Ctrl+M` (dictate), `Ctrl+,` (settings), and
@@ -234,7 +234,7 @@ effort menu · `1`–`9` select in an open menu.
 **Usage ring** beside the model picker shows context usage for the session and
 plan usage for the period.
 
-*smolt*: token counts in the composer; a usage card on the home screen.
+*Smolt*: token counts in the composer; a usage card on the home screen.
 
 ---
 
@@ -252,7 +252,7 @@ plan usage for the period.
 - Compaction is automatic when context fills; `/compact` triggers it early.
 - OS notification when a session finishes while you are elsewhere.
 
-*smolt*: sessions listed from disk, scoped to the project and grouped by date
+*Smolt*: sessions listed from disk, scoped to the project and grouped by date
 (Today / Yesterday / Previous 7 days), searchable by title and first message,
 renameable. Worktree isolation is implemented (create, enter, remove, restart
 the agent inside). No split view, filters, archive, or auto-archive.
@@ -262,7 +262,7 @@ the agent inside). No split view, filters, archive, or auto-archive.
 `Cmd/Ctrl+;` or `/btw` — reads the main thread but adds nothing back. Local,
 SSH and WSL only; never saved to disk.
 
-*smolt*: implemented, as a second agent, in the right rail.
+*Smolt*: implemented, as a second agent, in the right rail.
 
 ### 7.2 Working across sessions
 
@@ -278,7 +278,7 @@ are honoured; messages are quoted and attributed.
 **Task chips**: when Claude notices out-of-scope work it offers it as a chip
 that starts a new session in its own worktree.
 
-*smolt*: not built.
+*Smolt*: not built.
 
 ### 7.3 Cloud, continuing elsewhere, Dispatch
 
@@ -289,7 +289,7 @@ IDE. **Dispatch** (Cowork) can spawn Code sessions from a phone; they appear
 with a Dispatch badge, notify on completion, and their computer-use approvals
 expire after 30 minutes.
 
-*smolt*: not built.
+*Smolt*: not built.
 
 ---
 
@@ -306,7 +306,7 @@ expire after 30 minutes.
 - **Customize** in the sidebar manages connectors, skills and plugins in one
   place, synced through the account.
 
-*smolt*: slash commands from the agent (skills, templates, extension commands).
+*Smolt*: slash commands from the agent (skills, templates, extension commands).
 No connector UI, plugin browser, or Customize surface; MCP and plugins are
 configured in files.
 
@@ -328,7 +328,7 @@ A localhost `url` must be the bare origin with a matching port; external
 addresses prompt on first open. A `url` with no command attaches to a server
 you already run. `autoVerify` sits at the top level.
 
-*smolt*: not built (no browser pane). The file format is worth keeping
+*Smolt*: not built (no browser pane). The file format is worth keeping
 compatible if that pane is ever added.
 
 ### 8.2 Scheduled tasks / Routines
@@ -349,7 +349,7 @@ why, allowed permissions, Delete (optionally removing
 `~/.claude/scheduled-tasks/<name>/SKILL.md`). A running task can reschedule
 itself through `update_scheduled_task`.
 
-*smolt*: not built.
+*Smolt*: not built.
 
 ---
 
@@ -361,7 +361,7 @@ General, Extensions, Developer; then Customize. The Claude Code panel carries a
 guest-pass card, "Classify session states", "Switch models when a message is
 flagged", and **Code appearance** (a light and a dark theme picker).
 
-*smolt*: a panel with a search box and a nav column — **Session** (General,
+*Smolt*: a panel with a search box and a nav column — **Session** (General,
 Model) and **App** (Appearance, About). General holds session name,
 auto-compaction, auto-retry, queued-message delivery, worktrees, compact and
 export. Model holds a filterable model list and effort. Appearance holds a
@@ -370,7 +370,7 @@ directory, version and shortcuts. The panel is a fixed size and scrolls.
 
 The account-shaped items — Account, Billing, Usage-as-plan, guest passes,
 referrals — have no counterpart and are **not built by choice**: they are the
-front end of a hosted subscription that does not exist behind smolt, and
+front end of a hosted subscription that does not exist behind Smolt, and
 mocking them would put fabricated account state in the product.
 
 ---
@@ -388,7 +388,7 @@ Approval is per app per session — 30 minutes in Dispatch-spawned sessions.
 Broad-reach apps carry an extra warning. Settings offer **Denied apps** and
 **Unhide apps when Claude finishes**.
 
-*smolt*: no screen control. It does have a cross-platform **screenshot** tool
+*Smolt*: no screen control. It does have a cross-platform **screenshot** tool
 (macOS `screencapture`, Windows PowerShell, Linux grim/spectacle/
 gnome-screenshot/scrot/import/xwd) returning an image the model can read.
 
@@ -414,7 +414,7 @@ gnome-screenshot/scrot/import/xwd) returning an image the model can read.
 - **Deployment**: macOS `.dmg` via MDM; Windows MSIX with silent install.
 - SSO (SAML/OIDC) for Enterprise.
 
-*smolt*: none of this exists, and none of it is UI — it is the administration
+*Smolt*: none of this exists, and none of it is UI — it is the administration
 layer of a distributed product.
 
 ---
@@ -431,7 +431,7 @@ Not available in Desktop: third-party model providers by default, inline code
 suggestions, agent teams, `--print`/SDK scripting, and terminal-dialog commands
 (`/permissions` replies that it is unavailable; `/config` opens Settings).
 
-*smolt*: the desktop package embeds the same agent as the CLI over its RPC
+*Smolt*: the desktop package embeds the same agent as the CLI over its RPC
 mode, and shares the agent directory, so memory, skills and sessions are common
 to both.
 
@@ -446,12 +446,12 @@ being inherited; Git and Git LFS required on Windows; MCP server checks on
 Windows; force-quit paths; and `git fetch origin <branch>` for a cloud-created
 branch that does not exist locally.
 
-*smolt*: surfaces agent start-up errors in the composer notice; no dedicated
+*Smolt*: surfaces agent start-up errors in the composer notice; no dedicated
 troubleshooting UI.
 
 ---
 
-## Summary of what smolt does not have
+## Summary of what Smolt does not have
 
 Grouped by why, because the reasons differ:
 
@@ -466,5 +466,5 @@ Simulator (macOS only).
 
 **Deliberately not built** — the Chat and Cowork tabs and every account-shaped
 surface (Account, Billing, plan usage, guest passes, referrals). These are the
-front end of a hosted subscription; smolt has no accounts, so building them
+front end of a hosted subscription; Smolt has no accounts, so building them
 would mean displaying invented state.

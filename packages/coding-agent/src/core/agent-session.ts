@@ -13,8 +13,8 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
-import { readFileSync } from "node:fs";
-import { basename, dirname } from "node:path";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import type {
 	Agent,
 	AgentEvent,
@@ -24,7 +24,7 @@ import type {
 	PrepareNextTurnContext,
 	ThinkingLevel,
 } from "@smolt/agent-core";
-import { contentText } from "@smolt/ai";
+import { type Credential, contentText, type ProviderUsage, supportsProviderUsage, type UsageWindow } from "@smolt/ai";
 import type {
 	AssistantMessage,
 	AuthResult,
@@ -37,6 +37,7 @@ import type {
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
+	fetchProviderUsage,
 	getSupportedThinkingLevels,
 	isContextOverflow,
 	isRecoverableLength,
@@ -46,6 +47,9 @@ import {
 	resetApiProviders,
 	streamSimple,
 } from "@smolt/ai/compat";
+import { Type } from "typebox";
+import { getAgentDir } from "../config.ts";
+import { isProviderPooled, type PoolData, PoolStore, primaryLabelOf } from "../extensions/pool/storage.ts";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { sleep } from "../utils/sleep.ts";
@@ -55,20 +59,28 @@ import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import {
 	type CompactionPreparation,
 	type CompactionResult,
+	type CompactionSettings,
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
 	compact,
+	compactionSettingsFor,
+	completeSummarization,
 	estimateContextTokens,
 	estimateTokens,
 	generateBranchSummary,
 	prepareCompaction,
 	shouldCompact,
+	shouldCompactBeforeNextStep,
 } from "./compaction/index.ts";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "./defaults.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import {
+	type ContextBreakdown,
+	type ContextBreakdownItem,
+	type ContextBreakdownPart,
 	type ContextUsage,
+	type ExtensionCommandContext,
 	type ExtensionCommandContextActions,
 	type ExtensionErrorListener,
 	type ExtensionMode,
@@ -96,6 +108,7 @@ import {
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
+import { countImages, MAX_IMAGES_PER_REQUEST } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
@@ -246,6 +259,43 @@ export interface ExtensionBindings {
 	onError?: ExtensionErrorListener;
 }
 
+/**
+ * What the one-line answer to a command is asked for.
+ *
+ * Deliberately narrow. The call exists to fill a silence, so anything beyond
+ * a single plain sentence is worse than nothing: it pushes the real work down
+ * the screen and invites the model to invent detail it was never given.
+ */
+const COMMAND_LINE_SYSTEM_PROMPT =
+	"You are the assistant in a coding chat. The user ran a command that the app carried out " +
+	"by itself. Tell them what happened in one short, plain sentence, in your own words, as if " +
+	"you had done it. Do not greet them, do not offer to help further, do not use markdown, and " +
+	"do not add anything after the sentence. If the command asked the user for something, ask " +
+	"them for it in that sentence.";
+
+/** Room for a sentence and no more; a ceiling is cheaper than a plea. */
+const COMMAND_LINE_MAX_TOKENS = 200;
+
+/** The tool the agent reaches for when it decides a slash command is what was asked for. */
+const COMMAND_TOOL_NAME = "command";
+
+/**
+ * Commands the agent must not be handed.
+ *
+ * `/telegram new` and `/telegram inbound` call `ctx.newSession()` from inside
+ * the handler. Run from a tool call that is itself inside a turn, that would
+ * be starting a session on top of the one currently executing it, so these
+ * stay on the harness's own dispatch.
+ */
+const HARNESS_ONLY_COMMANDS = new Set(["telegram"]);
+
+/** Build user content, giving image-only input a placeholder so no provider sees an empty text part. */
+function userContentOf(text: string, images?: ImageContent[]): (TextContent | ImageContent)[] {
+	const hasImages = images !== undefined && images.length > 0;
+	const body = text.trim() === "" && hasImages ? "The user has provided an image with this message" : text;
+	return [{ type: "text", text: body }, ...(images ?? [])];
+}
+
 /** Options for AgentSession.prompt() */
 export interface PromptOptions {
 	/** Whether to dispatch extension commands and expand skill commands and prompt templates (default: true) */
@@ -292,6 +342,144 @@ export interface SessionStats {
 	};
 	cost: number;
 	contextUsage?: ContextUsage;
+	/**
+	 * Spend on the session's behalf outside its own requests: a research
+	 * team's sessions reported through its tool results, an advisor's
+	 * reviews filed as custom entries. Counted in `tokens` and `cost` too.
+	 */
+	background: BackgroundSpend[];
+}
+
+export interface BackgroundSpend {
+	key: string;
+	label: string;
+	tokens: number;
+	cost: number;
+	requests: number;
+}
+
+/** What an advisor files after each review, as a custom entry. */
+export const ADVISOR_USAGE_ENTRY = "advisor-usage";
+
+/** Subscription usage for the session's provider, with a drain-rate projection. */
+export interface ProviderUsageSnapshot extends ProviderUsage {
+	/** Most-consumed window; the one that limits the session first. */
+	bindingWindow?: string;
+	/** Hours until the binding window is exhausted at the observed rate. */
+	hoursLeft?: number;
+	/** Minutes of history the projection is based on; absent when unmeasurable. */
+	rateSampleMinutes?: number;
+	/** Per-account usage when the provider has pool credentials beyond the primary. */
+	accounts?: UsageAccount[];
+	/**
+	 * Every other configured provider that reports usage, so the reader sees
+	 * the whole set of allowances they pay for, not only the one in use.
+	 */
+	others?: ProviderUsageSnapshot[];
+	/** True when this is the last good reading, kept while the endpoint is not answering. */
+	stale?: boolean;
+}
+
+/** One pool credential's own usage. */
+export interface UsageAccount {
+	label: string;
+	windows: UsageWindow[];
+}
+
+/** How far back drain-rate samples reach. */
+const RATE_SAMPLE_SPAN_MS = 30 * 60 * 1000;
+
+/** How long a provider keeps showing its last good usage reading after its endpoint stops answering. */
+const USAGE_STALE_MS = 30 * 60 * 1000;
+
+/**
+ * Last good usage reading per provider, shared across agent processes.
+ *
+ * Every chat runs its own agent process, and usage endpoints rate-limit
+ * eagerly when several of them poll at once. A process whose own poll
+ * fails — most visibly the first poll after a chat switch — used to show
+ * that provider as simply gone; the newest reading any process managed is
+ * a far better answer than nothing.
+ */
+function usageCachePath(): string {
+	return join(getAgentDir(), "usage-cache.json");
+}
+
+function readUsageCache(): Record<string, ProviderUsage & { accounts: UsageAccount[] }> {
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(usageCachePath(), "utf8"));
+		if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+			return parsed as Record<string, ProviderUsage & { accounts: UsageAccount[] }>;
+		}
+	} catch {
+		// Missing or torn file: no shared history to offer.
+	}
+	return {};
+}
+
+function writeUsageCache(reading: ProviderUsage & { accounts: UsageAccount[] }): void {
+	try {
+		const merged = readUsageCache();
+		const previous = merged[reading.providerId];
+		if (previous && previous.fetchedAt >= reading.fetchedAt) return;
+		merged[reading.providerId] = reading;
+		mkdirSync(getAgentDir(), { recursive: true });
+		// Write-then-rename so a concurrent reader never sees half a file.
+		const tmp = `${usageCachePath()}.${process.pid}.tmp`;
+		writeFileSync(tmp, JSON.stringify(merged));
+		renameSync(tmp, usageCachePath());
+	} catch {
+		// Best-effort cache; a failed write costs nothing but the fallback.
+	}
+}
+
+/** The shortest gap between two rounds of usage requests, however often the front end asks. */
+const USAGE_POLL_MIN_MS = 60 * 1000;
+
+/**
+ * Combine per-account windows into one set, assuming equal-size plans: the
+ * pooled remaining share of a window is the mean of the accounts' remaining
+ * shares. A window is "limited" only when every account is limited, since
+ * the pool fails over to whichever account still has headroom.
+ */
+function aggregateUsageWindows(accounts: UsageAccount[]): UsageWindow[] {
+	const keys: string[] = [];
+	const byKey = new Map<string, { label: string; percents: number[]; resets: string[]; limited: number }>();
+	for (const account of accounts) {
+		for (const window_ of account.windows) {
+			let bucket = byKey.get(window_.key);
+			if (!bucket) {
+				bucket = { label: window_.label, percents: [], resets: [], limited: 0 };
+				byKey.set(window_.key, bucket);
+				keys.push(window_.key);
+			}
+			bucket.percents.push(window_.percent);
+			if (window_.status === "rate-limited") bucket.limited += 1;
+			if (window_.resetsAt) bucket.resets.push(window_.resetsAt);
+		}
+	}
+	return keys.map((key) => {
+		const bucket = byKey.get(key)!;
+		const meanRemaining = bucket.percents.reduce((sum, percent) => sum + (100 - percent), 0) / bucket.percents.length;
+		const percent = 100 - meanRemaining;
+		const allLimited = bucket.limited === bucket.percents.length;
+		const latestReset = bucket.resets.sort().at(-1);
+		return {
+			key,
+			label: bucket.label,
+			status: allLimited ? "rate-limited" : percent >= 100 ? "rate-limited" : "ok",
+			percent: Math.min(100, Math.max(0, percent)),
+			resetsAt: latestReset,
+		};
+	});
+}
+
+/** The most-consumed window: the one that limits the session first. */
+function bindingOf(usage: ProviderUsage): UsageWindow | undefined {
+	return usage.windows.reduce<UsageWindow | undefined>(
+		(top, window_) => (top === undefined || window_.percent > top.percent ? window_ : top),
+		undefined,
+	);
 }
 
 interface ToolDefinitionEntry {
@@ -315,6 +503,19 @@ function estimateMessagesTokens(messages: AgentMessage[]): number {
 // AgentSession Class
 // ============================================================================
 
+/**
+ * The extension a registered tool belongs to, from where it was loaded:
+ * "research" for .../extensions/research/index.ts, "my-hook" for
+ * my-hook.ts, nothing for a synthetic source like <sdk:name>.
+ */
+function extensionLabel(sourcePath: string | undefined): string | undefined {
+	if (!sourcePath || sourcePath.startsWith("<")) return undefined;
+	const parts = sourcePath.split(/[\\/]/);
+	const file = parts.pop() ?? "";
+	const stem = file.replace(/\.[cm]?[jt]sx?$/, "");
+	return stem === "index" ? parts.pop() : stem;
+}
+
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -333,8 +534,27 @@ export class AgentSession {
 	private _steeringMessages: string[] = [];
 	/** Tracks pending follow-up messages for UI display. Removed when delivered. */
 	private _followUpMessages: string[] = [];
+	/**
+	 * Queued texts that came from an extension rather than the reader — a
+	 * research kickoff, a battletest brief. They are not the reader's words,
+	 * so a surface restoring the queue to its editor must not get them.
+	 */
+	private _extensionQueued = new Set<string>();
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private _pendingNextTurnMessages: CustomMessage[] = [];
+	/**
+	 * How many times this session has been asked to put something in front of
+	 * the model.
+	 *
+	 * Counted on the way in rather than on arrival, because an extension briefs
+	 * the agent without waiting for it: a count taken once the handler returned
+	 * would miss a brief still working its way through the awaits, and narrate
+	 * over the top of it.
+	 *
+	 * Only ever compared against itself: a command handler that leaves this
+	 * untouched asked the model nothing, and so has nobody to say what it did.
+	 */
+	private _modelInputs = 0;
 	/** Context-only custom messages queued during a run, flushed once the current turn's tool results are in. */
 	private _pendingCustomMessages: CustomMessage[] = [];
 
@@ -342,6 +562,8 @@ export class AgentSession {
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _overflowRecoveryAttempted = false;
+	/** A step crossed the compaction threshold mid-turn: the run was stopped to compact and go on. */
+	private _compactBeforeNextStep = false;
 
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -689,6 +911,20 @@ export class AgentSession {
 				this._lastAssistantMessage = event.message;
 
 				const assistantMsg = event.message as AssistantMessage;
+				// A turn that will go on with more tool calls, and has already
+				// filled the window: stop it here, compact, and continue, rather
+				// than let the next steps run out of room.
+				if (
+					this._isAgentRunActive &&
+					!this._compactBeforeNextStep &&
+					this.model &&
+					assistantMsg.provider === this.model.provider &&
+					assistantMsg.model === this.model.id &&
+					shouldCompactBeforeNextStep(assistantMsg, this.model.contextWindow ?? 0, this._compactionSettings())
+				) {
+					this._compactBeforeNextStep = true;
+					this.agent.abort();
+				}
 				if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "length") {
 					this._overflowRecoveryAttempted = false;
 				}
@@ -959,7 +1195,7 @@ export class AgentSession {
 	 * Set active tools by name.
 	 * Only tools in the registry can be enabled. Unknown tool names are ignored.
 	 * Also rebuilds the system prompt to reflect the new tool set.
-	 * Changes take effect on the next agent turn.
+	 * Changes take effect on the next provider request, including one later in the same run.
 	 */
 	setActiveToolsByName(toolNames: string[]): void {
 		const tools: AgentTool[] = [];
@@ -1079,12 +1315,31 @@ export class AgentSession {
 		const loadedSkills = this._resourceLoader.getSkills().skills;
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
+		// The agent cannot interpret "/research how X works" without being told
+		// that /research exists and what it is for. Named here rather than in
+		// the tool's description because the decision to reach for the tool at
+		// all depends on recognising the command first.
+		const commands = this._agentCommands();
+		const commandSection =
+			commands.length === 0
+				? undefined
+				: [
+						"## Slash commands",
+						"The user may type one of these, or ask in words for what one does. Work out which was " +
+							`meant and run it with the \`${COMMAND_TOOL_NAME}\` tool; say in one short sentence what ` +
+							"you are doing as you go.",
+						commands
+							.map((entry) => `- \`/${entry.name}\`${entry.description === "" ? "" : ` - ${entry.description}`}`)
+							.join("\n"),
+					].join("\n\n");
+
 		this._baseSystemPromptOptions = {
 			cwd: this._cwd,
 			skills: loadedSkills,
 			contextFiles: loadedContextFiles,
 			customPrompt: loaderSystemPrompt,
-			appendSystemPrompt,
+			appendSystemPrompt:
+				[appendSystemPrompt, commandSection].filter((part) => part !== undefined).join("\n\n") || undefined,
 			selectedTools: validToolNames,
 			toolSnippets,
 			promptGuidelines,
@@ -1164,6 +1419,19 @@ export class AgentSession {
 			this._retryAttempt = 0;
 		}
 
+		if (this._compactBeforeNextStep) {
+			this._compactBeforeNextStep = false;
+			// The step that crossed the line stays in the session file, so the
+			// summary knows of it; it leaves the live context so the turn can be
+			// continued from the summary. Tool results it may have gathered go
+			// with it: a tool call without its call is not a state to continue from.
+			const messages = this.agent.state.messages;
+			let lastAssistant = messages.length - 1;
+			while (lastAssistant >= 0 && messages[lastAssistant]?.role !== "assistant") lastAssistant--;
+			if (lastAssistant >= 0) this.agent.state.messages = messages.slice(0, lastAssistant);
+			return await this._runAutoCompaction("threshold", true);
+		}
+
 		if (await this._checkCompaction(msg)) {
 			return true;
 		}
@@ -1171,6 +1439,11 @@ export class AgentSession {
 		// The agent loop drains both queues before emitting agent_end. Any messages
 		// here were queued by agent_end extension handlers and need a continuation.
 		return this.agent.hasQueuedMessages();
+	}
+
+	/** The compaction settings, sized to the current model's window. */
+	private _compactionSettings(): CompactionSettings {
+		return compactionSettingsFor(this.settingsManager.getCompactionSettings(), this.model?.contextWindow ?? 0);
 	}
 
 	/**
@@ -1183,6 +1456,7 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		this._modelInputs++;
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
 		let messages: AgentMessage[] | undefined;
@@ -1191,12 +1465,11 @@ export class AgentSession {
 			// Handle extension commands first (execute immediately, even during streaming)
 			// Extension commands manage their own LLM interaction via smolt.sendMessage()
 			if (expandPromptTemplates && text.startsWith("/")) {
-				const handled = await this._tryExecuteExtensionCommand(text);
-				if (handled) {
-					// Extension command executed, no prompt to send
-					preflightResult?.(true);
-					return;
-				}
+				// The preflight fires the moment the handler is done rather than
+				// after: the caller waits to hear the command was taken, not for
+				// the agent to finish saying what it did.
+				const handled = await this._tryExecuteExtensionCommand(text, () => preflightResult?.(true));
+				if (handled) return;
 			}
 
 			if (this._compactionAbortController !== undefined) {
@@ -1283,10 +1556,7 @@ export class AgentSession {
 			messages = [];
 
 			// Add user message
-			const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
-			if (currentImages) {
-				userContent.push(...currentImages);
-			}
+			const userContent = userContentOf(expandedText, currentImages);
 			messages.push({
 				role: "user",
 				content: userContent,
@@ -1353,7 +1623,7 @@ export class AgentSession {
 	/**
 	 * Try to execute an extension command. Returns true if command was found and executed.
 	 */
-	private async _tryExecuteExtensionCommand(text: string): Promise<boolean> {
+	private async _tryExecuteExtensionCommand(text: string, onHandled?: () => void): Promise<boolean> {
 		// Parse command name and args
 		const spaceIndex = text.indexOf(" ");
 		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
@@ -1364,18 +1634,219 @@ export class AgentSession {
 
 		// Get command context from extension runner (includes session control methods)
 		const ctx = this._extensionRunner.createCommandContext();
+		// What the command told the reader while it ran. A command that answers
+		// entirely inside the app never puts anything in front of the model, so
+		// its own words are all the agent has to go on afterwards.
+		const reported: string[] = [];
+		// Held rather than shown. A command the reader just typed is answered by
+		// the agent, so its own announcement must not float past as a toast
+		// saying the same thing in the harness's voice; it is released only if
+		// the agent turns out not to be speaking for it.
+		const held: { message: string; type?: "info" | "warning" | "error" }[] = [];
+		const restoreUi = this._captureCommandNotices(ctx, reported, held);
+		const inputsBefore = this._modelInputs;
+		let failure: string | undefined;
 
 		try {
 			await command.handler(args, ctx);
-			return true;
 		} catch (err) {
+			failure = err instanceof Error ? err.message : String(err);
 			// Emit error via extension runner
 			this._extensionRunner.emitError({
 				extensionPath: `command:${commandName}`,
 				event: "command",
-				error: err instanceof Error ? err.message : String(err),
+				error: failure,
 			});
+		} finally {
+			restoreUi();
+		}
+		onHandled?.();
+
+		// A command that handed work to the model is already narrating it through
+		// the brief; a second line would talk over the first. Whatever it said on
+		// the way is its own, so that goes to the reader as it always did.
+		if (this._modelInputs !== inputsBefore) {
+			this._replayCommandNotices(ctx, held);
 			return true;
+		}
+		const narrated = await this._narrateCommandOutcome(commandName, args, reported, failure, command.description);
+		// Nobody spoke for it after all - no model, no key, no network. Better
+		// the harness's own words than a command that answers with silence.
+		if (!narrated) this._replayCommandNotices(ctx, held);
+		return true;
+	}
+
+	/** Hand a command's held announcements to the reader after all. */
+	private _replayCommandNotices(
+		ctx: ExtensionCommandContext,
+		held: { message: string; type?: "info" | "warning" | "error" }[],
+	): void {
+		for (const notice of held) {
+			try {
+				ctx.ui.notify(notice.message, notice.type);
+			} catch {
+				// A stale session's ui throws on access; there is nobody left to tell.
+			}
+		}
+	}
+
+	/**
+	 * Hold an extension command's notifications while its handler runs, and
+	 * hand back the undo.
+	 *
+	 * They go into `sink` for the agent to read and into `held` in case they
+	 * have to be shown after all - and nowhere else, because the reader hears
+	 * about a command they typed from the agent, not from a toast.
+	 *
+	 * The context's `ui` is a guarded getter - it re-checks on every read that
+	 * this session is still the live one - so the stand-in is a getter too,
+	 * wrapping whatever the original hands back rather than a copy taken once
+	 * and frozen.
+	 */
+	private _captureCommandNotices(
+		ctx: ExtensionCommandContext,
+		sink: string[],
+		held: { message: string; type?: "info" | "warning" | "error" }[],
+	): () => void {
+		const original = Object.getOwnPropertyDescriptor(ctx, "ui");
+		if (!original) return () => {};
+		Object.defineProperty(ctx, "ui", {
+			configurable: true,
+			enumerable: original.enumerable ?? true,
+			get: () => {
+				const ui = original.get
+					? (original.get.call(ctx) as ExtensionUIContext)
+					: (original.value as ExtensionUIContext);
+				return new Proxy(ui, {
+					get(target, property, receiver) {
+						if (property !== "notify") return Reflect.get(target, property, receiver);
+						return (message: string, type?: "info" | "warning" | "error") => {
+							if (typeof message === "string" && message.trim() !== "") {
+								sink.push(message.trim());
+								held.push({ message, type });
+							}
+						};
+					},
+				});
+			},
+		});
+		return () => Object.defineProperty(ctx, "ui", original);
+	}
+
+	/**
+	 * Say what a command did, in one sentence, in the agent's own voice.
+	 *
+	 * A command that resolves inside the app - a toggle, a status read - never
+	 * reaches the model, so the chat was left holding the reader's own words
+	 * and nothing back: a command that had plainly been taken and then said
+	 * nothing about itself.
+	 *
+	 * It is a side call rather than a turn. The full model is not needed to say
+	 * "the advisor is on now", and a turn is a lot of machinery for one line:
+	 * the whole context, the tools, the thinking budget, and a second or two of
+	 * silence before any of it reaches the screen. This asks the same model
+	 * at its lowest thinking level, with a tight ceiling and only the few facts
+	 * it needs, so
+	 * the answer is there almost at once and costs almost nothing.
+	 *
+	 * The facts go into the session as a hidden note as well as into the
+	 * prompt. Without it the next real turn would find a line the agent
+	 * apparently said for no reason, with no request of any kind before it.
+	 *
+	 * True when something was said, so the caller knows whether anything spoke
+	 * for the command at all.
+	 */
+	private async _narrateCommandOutcome(
+		commandName: string,
+		args: string,
+		reported: string[],
+		failure?: string,
+		description?: string,
+	): Promise<boolean> {
+		const outcome =
+			failure !== undefined
+				? `It failed: ${failure}`
+				: reported.length > 0
+					? `What it reported:\n${reported.join("\n")}`
+					: "It reported nothing back.";
+		return this._sayOneLine({
+			systemPrompt: COMMAND_LINE_SYSTEM_PROMPT,
+			facts: `${this._commandFacts(commandName, args, description)}\n${outcome}`,
+			noteType: "command-outcome",
+			commandName,
+			complaint: "Could not say what the command did",
+		});
+	}
+
+	/** The command, its arguments and what it is for, as the model needs them. */
+	private _commandFacts(commandName: string, args: string, description?: string): string {
+		const trimmed = args.trim();
+		const invocation = `/${commandName}${trimmed === "" ? "" : ` ${trimmed}`}`;
+		// What the command is for, in the extension's own words. Without it the
+		// agent has only a name to go on, and a name is not enough to say what is
+		// happening in a sentence a reader would recognise.
+		const what = description?.trim() ? `\nWhat it does: ${description.trim()}` : "";
+		return `The user ran ${invocation}.${what}`;
+	}
+
+	/**
+	 * One sentence from a cheap side call, put into the chat as the agent's own.
+	 *
+	 * A side call rather than a turn: the full model is not needed to say "the
+	 * advisor is on now", and a turn is a lot of machinery for one line - the
+	 * whole context, the tools, the thinking budget, and a second or two of
+	 * silence before any of it reaches the screen. This asks the same model at
+	 * its lowest thinking level, with a tight ceiling and only the few facts it
+	 * needs.
+	 *
+	 * The facts go into the session as a hidden note as well as into the prompt.
+	 * Without it the next real turn would find a line the agent apparently said
+	 * for no reason, with no request of any kind before it.
+	 *
+	 * True when something was said.
+	 */
+	private async _sayOneLine(options: {
+		systemPrompt: string;
+		facts: string;
+		noteType: string;
+		commandName: string;
+		complaint: string;
+	}): Promise<boolean> {
+		if (!this.model) return false;
+		try {
+			const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(this.model);
+			const answer = await completeSummarization(
+				requestModel,
+				{
+					systemPrompt: options.systemPrompt,
+					messages: [{ role: "user", content: [{ type: "text", text: options.facts }], timestamp: Date.now() }],
+				},
+				{ apiKey, headers, env, reasoning: "minimal", maxTokens: COMMAND_LINE_MAX_TOKENS },
+				this.agent.streamFunction,
+			);
+			if (answer.stopReason === "error" || answer.stopReason === "aborted") return false;
+			const said = answer.content
+				.filter((block): block is TextContent => block.type === "text")
+				.map((block) => block.text)
+				.join("")
+				.trim();
+			if (said === "") return false;
+			// The note first, so the line has something before it that explains it.
+			await this.sendCustomMessage({ customType: options.noteType, content: options.facts, display: false });
+			this.agent.state.messages.push(answer);
+			this.sessionManager.appendMessage(answer);
+			this._emit({ type: "message_start", message: answer });
+			this._emit({ type: "message_end", message: answer });
+			return true;
+		} catch (err) {
+			// A command that worked must not read as broken because the line about
+			// it could not be fetched (no model, no key, no network).
+			this._extensionRunner.emitError({
+				extensionPath: `command:${options.commandName}`,
+				event: "command",
+				error: `${options.complaint}: ${err instanceof Error ? err.message : String(err)}`,
+			});
+			return false;
 		}
 	}
 
@@ -1474,12 +1945,10 @@ export class AgentSession {
 	 * Internal: Queue a steering message (already expanded, no extension command check).
 	 */
 	private async _queueSteer(text: string, images?: ImageContent[], source?: InputSource): Promise<void> {
+		this._modelInputs++;
 		this._steeringMessages.push(text);
 		this._emitQueueUpdate();
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
-		if (images) {
-			content.push(...images);
-		}
+		const content = userContentOf(text, images);
 		this.agent.steer({
 			role: "user",
 			content,
@@ -1487,19 +1956,20 @@ export class AgentSession {
 			// An extension's brief, not the reader talking — surfaces hide it.
 			...(source === "extension" ? { internal: true } : {}),
 		});
-		if (source === "extension") this.agent.steer(this._briefNarrationMessage());
+		if (source === "extension") {
+			this._extensionQueued.add(text);
+			this.agent.steer(this._briefNarrationMessage());
+		}
 	}
 
 	/**
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
 	 */
 	private async _queueFollowUp(text: string, images?: ImageContent[], source?: InputSource): Promise<void> {
+		this._modelInputs++;
 		this._followUpMessages.push(text);
 		this._emitQueueUpdate();
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
-		if (images) {
-			content.push(...images);
-		}
+		const content = userContentOf(text, images);
 		this.agent.followUp({
 			role: "user",
 			content,
@@ -1507,7 +1977,10 @@ export class AgentSession {
 			// An extension's brief, not the reader talking — surfaces hide it.
 			...(source === "extension" ? { internal: true } : {}),
 		});
-		if (source === "extension") this.agent.followUp(this._briefNarrationMessage());
+		if (source === "extension") {
+			this._extensionQueued.add(text);
+			this.agent.followUp(this._briefNarrationMessage());
+		}
 	}
 
 	/**
@@ -1551,6 +2024,7 @@ export class AgentSession {
 			details: message.details,
 			timestamp: Date.now(),
 		} satisfies CustomMessage<T>;
+		this._modelInputs++;
 		if (options?.deliverAs === "nextTurn") {
 			this._pendingNextTurnMessages.push(appMessage);
 		} else if (this.isStreaming && options?.triggerTurn !== false) {
@@ -1644,10 +2118,12 @@ export class AgentSession {
 	 * @returns Object with steering and followUp arrays
 	 */
 	clearQueue(): { steering: string[]; followUp: string[] } {
-		const steering = [...this._steeringMessages];
-		const followUp = [...this._followUpMessages];
+		const mine = (text: string): boolean => !this._extensionQueued.has(text);
+		const steering = this._steeringMessages.filter(mine);
+		const followUp = this._followUpMessages.filter(mine);
 		this._steeringMessages = [];
 		this._followUpMessages = [];
+		this._extensionQueued.clear();
 		this.agent.clearAllQueues();
 		this._emitQueueUpdate();
 		return { steering, followUp };
@@ -1677,6 +2153,29 @@ export class AgentSession {
 	 */
 	async abort(): Promise<void> {
 		this.abortRetry();
+		// Extensions first, and not awaited. Stopping means everything in this
+		// chat: a research team, a battletest, an advisor reading along all run
+		// their own agents, and nothing here can reach those but the extension
+		// that started them. Left out, the reader presses stop, one request dies
+		// and the rest carry on - so they press it again, and again.
+		//
+		// Not awaited because an extension winding down its own agents can take
+		// as long as it likes, and the stop the reader asked for is this one:
+		// the turn in front of them has to end now, not after the slowest
+		// handler has finished tidying up.
+		if (this._extensionRunner.hasHandlers("agent_abort")) {
+			void this._extensionRunner.emit({ type: "agent_abort" }).catch(() => {
+				// A handler that throws on the way down is not worth reporting:
+				// the abort itself must not fail because a listener did.
+			});
+		}
+		// Whatever was queued behind this turn goes with it. A research run
+		// queues its kickoff brief as a follow-up, and the brief's narration
+		// nudge behind that: left in place, each started a fresh turn the
+		// moment the stopped one died, and stopping a run took three presses.
+		// A surface that wants the reader's own queued words back in its editor
+		// takes them from clearQueue() before calling this.
+		this.clearQueue();
 		this.agent.abort();
 		await this.waitForIdle();
 	}
@@ -2009,7 +2508,7 @@ export class AgentSession {
 			const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(this.model);
 
 			const pathEntries = this.sessionManager.getBranch();
-			const settings = this.settingsManager.getCompactionSettings();
+			const settings = this._compactionSettings();
 
 			const preparation = prepareCompaction(pathEntries, settings);
 			if (!preparation) {
@@ -2182,7 +2681,7 @@ export class AgentSession {
 	 * @returns Whether the post-run loop should call `agent.continue()` for overflow recovery or queued messages
 	 */
 	private async _checkCompaction(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<boolean> {
-		const settings = this.settingsManager.getCompactionSettings();
+		const settings = this._compactionSettings();
 		if (!settings.enabled) return false;
 
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
@@ -2298,7 +2797,7 @@ export class AgentSession {
 	 * @returns Whether the post-run loop should call `agent.continue()`
 	 */
 	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
-		const settings = this.settingsManager.getCompactionSettings();
+		const settings = this._compactionSettings();
 		let started = false;
 		let fromExtension = false;
 
@@ -2443,7 +2942,10 @@ export class AgentSession {
 				// from agent state. Rebuilding state from the new compaction can restore that kept entry,
 				// leaving an assistant as the final message. agent.continue() rejects that state, so remove
 				// the retriable error or truncated-length response again before continuing the interrupted turn.
-				if (lastMsg?.role === "assistant" && (lastMsg.stopReason === "error" || lastMsg.stopReason === "length")) {
+				if (
+					lastMsg?.role === "assistant" &&
+					(lastMsg.stopReason === "error" || lastMsg.stopReason === "length" || lastMsg.stopReason === "toolUse")
+				) {
 					this.agent.state.messages = messages.slice(0, -1);
 				}
 				return true;
@@ -2733,6 +3235,91 @@ export class AgentSession {
 		);
 	}
 
+	/**
+	 * The commands this session has, as the agent needs to see them.
+	 *
+	 * Read live rather than baked into the tool's description: extensions load
+	 * after the builtin definitions are seeded, and a session can gain or lose
+	 * them on a reload.
+	 */
+	private _agentCommands(): { name: string; description: string }[] {
+		return this._extensionRunner
+			.getRegisteredCommands()
+			.filter((command) => !command.internal && !HARNESS_ONLY_COMMANDS.has(command.invocationName))
+			.map((command) => ({
+				name: command.invocationName,
+				description: command.description?.trim() ?? "",
+			}));
+	}
+
+	/**
+	 * One tool for every slash command, rather than a tool apiece.
+	 *
+	 * The commands are already written: fifteen handlers that know how to start
+	 * a battletest, toggle the advisor, read a status. What was missing was the
+	 * agent ever being asked - the harness parsed the slash itself and ran the
+	 * handler, so `/research` with no subject answered with a popup instead of
+	 * a question, and nothing in the chat was the agent's. Now the agent reads
+	 * what was typed, works out which command was meant and what its arguments
+	 * are, and calls it. A generic tool rather than fifteen means a command
+	 * added tomorrow is reachable the same day, with no tool written for it.
+	 */
+	private _buildCommandTool(): ToolDefinition {
+		return {
+			name: COMMAND_TOOL_NAME,
+			label: "Command",
+			description:
+				"Run one of this session's slash commands. Use it when the user types a slash command, or " +
+				"asks in words for something a command does. `name` is the command without its slash; " +
+				"`args` is everything the user gave after it, verbatim. The result is whatever the command " +
+				"reported - relay it in your own words. If a command needs an argument the user did not " +
+				"give, ask them for it rather than guessing.",
+			parameters: Type.Object({
+				name: Type.String({ description: "The command to run, without the leading slash." }),
+				args: Type.Optional(Type.String({ description: "Everything after the command name, verbatim." })),
+			}),
+			execute: async (_toolCallId, params) => {
+				const { name, args } = params as { name: string; args?: string };
+				const wanted = String(name ?? "").replace(/^\/+/, "");
+				const command = this._extensionRunner.getCommand(wanted);
+				if (!command || HARNESS_ONLY_COMMANDS.has(wanted)) {
+					const known = this._agentCommands()
+						.map((entry) => entry.name)
+						.join(", ");
+					return {
+						content: [{ type: "text", text: `No command "${wanted}". This session has: ${known || "none"}.` }],
+						isError: true,
+						details: { command: wanted, ran: false },
+					};
+				}
+				// The handler talks to the reader through notifications, which is
+				// the harness's voice. Held here and handed back as the result, so
+				// the agent is the one who says what happened.
+				const reported: string[] = [];
+				const held: { message: string; type?: "info" | "warning" | "error" }[] = [];
+				const ctx = this._extensionRunner.createCommandContext();
+				const restoreUi = this._captureCommandNotices(ctx, reported, held);
+				try {
+					await command.handler(String(args ?? ""), ctx);
+				} catch (err) {
+					const failure = err instanceof Error ? err.message : String(err);
+					return {
+						content: [{ type: "text", text: `/${wanted} failed: ${failure}` }],
+						isError: true,
+						details: { command: wanted, ran: true },
+					};
+				} finally {
+					restoreUi();
+				}
+				const said = reported.join("\n").trim();
+				return {
+					content: [{ type: "text", text: said === "" ? `/${wanted} ran and reported nothing.` : said }],
+					details: { command: wanted, ran: true },
+				};
+			},
+		} as ToolDefinition;
+	}
+
 	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
 		const previousRegistryNames = new Set(this._toolRegistry.keys());
 		const previousActiveToolNames = this.getActiveToolNames();
@@ -2855,6 +3442,7 @@ export class AgentSession {
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
 		);
+		this._baseToolDefinitions.set(COMMAND_TOOL_NAME, this._buildCommandTool());
 
 		const extensionsResult = this._resourceLoader.getExtensions();
 		if (options.flagValues) {
@@ -3393,6 +3981,150 @@ export class AgentSession {
 		return result;
 	}
 
+	/** Percent consumed of the binding usage window, sampled per poll for the drain-rate projection. */
+	private usageSamples: { at: number; key: string; percent: number }[] = [];
+	/**
+	 * The last good reading per provider. A usage endpoint that answers 429
+	 * or times out for one poll must not make the provider vanish from the
+	 * view until the next: the previous figures stand, marked stale, for a
+	 * while.
+	 */
+	private lastUsage = new Map<string, ProviderUsage & { accounts: UsageAccount[] }>();
+	/**
+	 * The last answer handed out, reused for a minute. The desktop asks on
+	 * every state refresh as well as on its own timer, and each answer costs
+	 * a request per provider per account; usage endpoints rate-limit long
+	 * before anything else does.
+	 */
+	private usageAnswer: { at: number; model: string | undefined; value: ProviderUsageSnapshot | undefined } | undefined;
+
+	/**
+	 * Subscription usage, polled live: the provider in use first, then every
+	 * other configured provider that reports an allowance.
+	 *
+	 * Each call records a sample of the most-consumed window of the provider
+	 * in use; with enough history the drain rate gives an estimate of when
+	 * the allowance runs out at the current pace. Undefined when no
+	 * configured provider exposes a usage endpoint.
+	 */
+	async getProviderUsage(): Promise<ProviderUsageSnapshot | undefined> {
+		const active = this.model?.provider;
+		const cached = this.usageAnswer;
+		if (cached && cached.model === active && Date.now() - cached.at < USAGE_POLL_MIN_MS) return cached.value;
+		const value = await this.pollProviderUsage(active);
+		this.usageAnswer = { at: Date.now(), model: active, value };
+		return value;
+	}
+
+	private async pollProviderUsage(active: string | undefined): Promise<ProviderUsageSnapshot | undefined> {
+		const poolData = PoolStore.create().read();
+		// Every provider with a stored credential, primary or pooled, in the
+		// order they were added; the one in use goes first.
+		const stored = await this.modelRuntime.listCredentials();
+		const ids = new Set<string>(stored.map((entry) => entry.providerId));
+		for (const providerId of Object.keys(poolData.providers)) ids.add(providerId);
+		const ordered = [...ids].filter((id) => supportsProviderUsage(id) && isProviderPooled(poolData, id));
+		if (active && ordered.includes(active)) {
+			ordered.splice(ordered.indexOf(active), 1);
+			ordered.unshift(active);
+		}
+
+		const snapshots: (ProviderUsage & { accounts: UsageAccount[]; stale?: boolean })[] = [];
+		const fresh = await Promise.all(ordered.map((providerId) => this.usageForProvider(providerId, poolData)));
+		for (const [index, providerId] of ordered.entries()) {
+			const reading = fresh[index];
+			if (reading) {
+				this.lastUsage.set(providerId, reading);
+				writeUsageCache(reading);
+				snapshots.push(reading);
+				continue;
+			}
+			// Own memory first, then the newest reading any other chat's agent
+			// process managed — without it a provider vanished from the panel
+			// whenever this process's own poll failed or had not run yet.
+			const previous = this.lastUsage.get(providerId) ?? readUsageCache()[providerId];
+			if (previous && Date.now() - previous.fetchedAt <= USAGE_STALE_MS)
+				snapshots.push({ ...previous, stale: true });
+		}
+		if (snapshots.length === 0) return undefined;
+
+		const [first, ...rest] = snapshots;
+		const lead: ProviderUsageSnapshot =
+			first.providerId === active ? this.projectDrain(first) : { ...first, bindingWindow: bindingOf(first)?.key };
+		return { ...lead, others: rest.map((usage) => ({ ...usage, bindingWindow: bindingOf(usage)?.key })) };
+	}
+
+	/** One provider: every credential that can serve it, fetched and aggregated. */
+	private async usageForProvider(
+		provider: string,
+		poolData: PoolData,
+	): Promise<(ProviderUsage & { accounts: UsageAccount[] }) | undefined> {
+		// Every credential that can serve this provider: the primary from
+		// auth.json plus the pool's extras. Pool failover means the session's
+		// real allowance is the sum of these, so usage is fetched per account
+		// and aggregated; a single-account provider skips the pool entirely.
+		const entries: { label: string; credential: Credential }[] = [];
+		let primary = await this.modelRuntime.getCredential(provider);
+		if (primary?.type === "oauth") {
+			// Resolving auth refreshes a stale token and writes it back, so the
+			// credential read afterwards is the live one.
+			await this.modelRuntime.getAuth(provider).catch(() => undefined);
+			primary = await this.modelRuntime.getCredential(provider);
+		}
+		if (primary) entries.push({ label: primaryLabelOf(poolData, provider), credential: primary });
+		const poolCredentials = poolData.providers[provider]?.credentials ?? [];
+		for (const [index, entry] of poolCredentials.entries()) {
+			if (entry.type !== "api_key" || !entry.key) continue;
+			entries.push({
+				label: entry.label ?? `Account ${index + 2}`,
+				credential: { type: "api_key", key: entry.key },
+			});
+		}
+		if (entries.length === 0) return undefined;
+
+		const settled = await Promise.allSettled(entries.map((entry) => fetchProviderUsage(provider, entry.credential)));
+		const accounts: UsageAccount[] = [];
+		let providerName = provider;
+		for (const [index, result] of settled.entries()) {
+			if (result.status === "fulfilled" && result.value) {
+				providerName = result.value.providerName;
+				accounts.push({ label: entries[index].label, windows: result.value.windows });
+			}
+		}
+		if (accounts.length === 0) return undefined;
+		const windows = accounts.length === 1 ? accounts[0].windows : aggregateUsageWindows(accounts);
+		return { providerId: provider, providerName, windows, fetchedAt: Date.now(), accounts };
+	}
+
+	/** The provider in use: sample its binding window and project when it runs out. */
+	private projectDrain(usage: ProviderUsage & { accounts: UsageAccount[] }): ProviderUsageSnapshot {
+		const binding = bindingOf(usage);
+		let hoursLeft: number | undefined;
+		let rateSampleMinutes: number | undefined;
+		if (binding) {
+			const samples = this.usageSamples;
+			const last = samples.at(-1);
+			// A different key or a falling percent means the window switched or
+			// reset; history from before that says nothing about the new window.
+			if (!last || last.key !== binding.key || binding.percent < last.percent) samples.length = 0;
+			samples.push({ at: usage.fetchedAt, key: binding.key, percent: binding.percent });
+			while (samples.length > 2 && usage.fetchedAt - samples[0].at > RATE_SAMPLE_SPAN_MS) samples.shift();
+
+			const first = samples[0];
+			const latest = samples.at(-1);
+			if (first && latest && samples.length >= 2) {
+				const dt = latest.at - first.at;
+				const dp = latest.percent - first.percent;
+				// Skip spans too short to distinguish a real drain from polling noise.
+				if (dt >= 60_000 && dp > 0) {
+					hoursLeft = ((100 - latest.percent) / dp) * (dt / 3_600_000);
+					rateSampleMinutes = dt / 60_000;
+				}
+			}
+		}
+		return { ...usage, bindingWindow: binding?.key, hoursLeft, rateSampleMinutes };
+	}
+
 	/**
 	 * Get session statistics. Aggregates over ALL session entries (including
 	 * history that was compacted away), so token/cost totals reflect what was
@@ -3405,10 +4137,26 @@ export class AgentSession {
 		let totalMessages = 0;
 		let toolCalls = 0;
 		const usageTotals = createUsageTotals();
+		const background = new Map<string, BackgroundSpend>();
+		const bank = (key: string, label: string, usage: Usage): void => {
+			addUsageToTotals(usageTotals, usage);
+			const spend = background.get(key) ?? { key, label, tokens: 0, cost: 0, requests: 0 };
+			spend.tokens += usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+			spend.cost += usage.cost?.total ?? 0;
+			spend.requests += 1;
+			background.set(key, spend);
+		};
 
 		for (const entry of this.sessionManager.getEntries()) {
 			if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
 				addUsageToTotals(usageTotals, entry.usage);
+			}
+			if (entry.type === "custom" && entry.customType === ADVISOR_USAGE_ENTRY) {
+				const data = entry.data as { advisor?: string; usage?: Usage } | undefined;
+				if (data?.usage) {
+					const name = data.advisor ?? "Advisor";
+					bank(`advisor:${name}`, `Advisor · ${name}`, data.usage);
+				}
 			}
 			if (entry.type !== "message") continue;
 			totalMessages++;
@@ -3418,7 +4166,8 @@ export class AgentSession {
 			} else if (message.role === "toolResult") {
 				toolResults++;
 				if (message.usage) {
-					addUsageToTotals(usageTotals, message.usage);
+					const name = message.toolName;
+					bank(`tool:${name}`, name.charAt(0).toUpperCase() + name.slice(1), message.usage);
 				}
 			} else if (message.role === "assistant") {
 				assistantMessages++;
@@ -3447,7 +4196,21 @@ export class AgentSession {
 			},
 			cost: usageTotals.cost,
 			contextUsage: this.getContextUsage(),
+			background: [...background.values()].sort((a, b) => b.tokens - a.tokens),
 		};
+	}
+
+	/**
+	 * Images the next request will carry, against what the context holds.
+	 *
+	 * Counted off the live context rather than the session file, because
+	 * that is what actually gets sent: history compacted away costs nothing,
+	 * and a picture read an hour ago costs the same as one read just now.
+	 */
+	private imageUsage(): { sent: number; held: number } {
+		const held = countImages(this.messages);
+		const sent = this.settingsManager.getBlockImages() ? 0 : Math.min(held, MAX_IMAGES_PER_REQUEST);
+		return { sent, held };
 	}
 
 	getContextUsage(): ContextUsage | undefined {
@@ -3482,7 +4245,13 @@ export class AgentSession {
 			}
 
 			if (!hasPostCompactionUsage) {
-				return { tokens: null, contextWindow, percent: null };
+				return {
+					tokens: null,
+					contextWindow,
+					percent: null,
+					images: this.imageUsage(),
+					breakdown: this.contextBreakdown(null),
+				};
 			}
 		}
 
@@ -3493,7 +4262,77 @@ export class AgentSession {
 			tokens: estimate.tokens,
 			contextWindow,
 			percent,
+			images: this.imageUsage(),
+			breakdown: this.contextBreakdown(estimate.tokens),
 		};
+	}
+
+	/**
+	 * What the next request carries, part by part. Sizes come from text
+	 * length, four characters to a token — the heuristic compaction uses —
+	 * and when the provider has reported the real total they are scaled to
+	 * it, so the parts add up to the figure on the ring.
+	 */
+	private contextBreakdown(reported: number | null): ContextBreakdown {
+		const size = (text: string): number => Math.ceil(text.length / 4);
+		const prompt = this.agent.state.systemPrompt ?? "";
+		const section = (open: string, close: string): string => {
+			const start = prompt.indexOf(open);
+			if (start < 0) return "";
+			const end = prompt.indexOf(close, start);
+			return end < 0 ? prompt.slice(start) : prompt.slice(start, end + close.length);
+		};
+		const skills = section("<available_skills>", "</available_skills>");
+		const contextFiles = section("<project_context>", "</project_context>");
+		const base = prompt.replace(skills, "").replace(contextFiles, "");
+		const fileItems: ContextBreakdownItem[] = [];
+		for (const match of contextFiles.matchAll(
+			/<project_instructions path="([^"]*)">[\s\S]*?<\/project_instructions>/g,
+		)) {
+			fileItems.push({ name: match[1] ?? "", tokens: size(match[0]) });
+		}
+		const systemTools: ContextBreakdownItem[] = [];
+		const extensionTools: ContextBreakdownItem[] = [];
+		for (const tool of this.agent.state.tools) {
+			const tokens = size(
+				JSON.stringify({ name: tool.name, description: tool.description, parameters: tool.parameters }),
+			);
+			const sourceInfo = this._toolDefinitions.get(tool.name)?.sourceInfo;
+			if (sourceInfo?.source === "builtin") systemTools.push({ name: tool.name, tokens });
+			else extensionTools.push({ name: tool.name, tokens, source: extensionLabel(sourceInfo?.path) });
+		}
+		let messages = 0;
+		for (const message of this.messages) messages += estimateTokens(message);
+		const largestFirst = (items: ContextBreakdownItem[]): ContextBreakdownItem[] =>
+			[...items].sort((a, b) => b.tokens - a.tokens);
+		const total = (items: ContextBreakdownItem[]): number => items.reduce((sum, item) => sum + item.tokens, 0);
+		const parts: ContextBreakdownPart[] = [
+			{ key: "messages", label: "Messages", tokens: messages },
+			{ key: "systemTools", label: "System tools", tokens: total(systemTools), items: largestFirst(systemTools) },
+			{
+				key: "extensionTools",
+				label: "Extension tools",
+				tokens: total(extensionTools),
+				items: largestFirst(extensionTools),
+			},
+			{ key: "systemPrompt", label: "System prompt", tokens: size(base) },
+			{ key: "skills", label: "Skills", tokens: size(skills) },
+			{
+				key: "contextFiles",
+				label: "Context files",
+				tokens: fileItems.length > 0 ? total(fileItems) : size(contextFiles),
+				items: largestFirst(fileItems),
+			},
+		];
+		const estimated = parts.reduce((sum, part) => sum + part.tokens, 0);
+		if (reported !== null && reported > 0 && estimated > 0) {
+			const factor = reported / estimated;
+			for (const part of parts) {
+				part.tokens = Math.round(part.tokens * factor);
+				for (const item of part.items ?? []) item.tokens = Math.round(item.tokens * factor);
+			}
+		}
+		return { parts };
 	}
 
 	/**

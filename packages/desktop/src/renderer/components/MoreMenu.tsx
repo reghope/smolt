@@ -22,13 +22,14 @@ export function MoreMenu() {
 	const state = useApp();
 	return (
 		<DropdownMenu>
+			{/* The button says "Settings" in its own text, so there is nothing a
+			    tooltip would add. */}
 			<DropdownMenuTrigger asChild>
 				<button
 					type="button"
-					title="Settings"
 					className="flex h-8 w-full items-center gap-2 rounded-lg px-3 text-left text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground data-[state=open]:bg-accent"
 				>
-					<Icon name="settings" className="text-faint" />
+					<Icon name="cog" className="text-faint" />
 					<span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap">Settings</span>
 					<Icon name="chevron" className="-rotate-90 text-faint" />
 				</button>
@@ -62,7 +63,7 @@ export function MoreMenu() {
 				</DropdownMenuItem>
 				<DropdownMenuSeparator />
 				<div className="flex items-center gap-1.5 px-2.5 py-1 font-mono text-xs text-faint">
-					<span className="font-bold tracking-[-0.08em] text-salmon-text" aria-hidden="true">&gt;&lt;&gt;</span>
+					<span className="font-bold tracking-[-0.08em] text-salmon" aria-hidden="true">&gt;&lt;&gt;</span>
 					smolt {state.appInfo.version}
 				</div>
 			</DropdownMenuContent>

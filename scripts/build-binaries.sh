@@ -89,7 +89,7 @@ fi
 
 if [[ "$SKIP_INSTALL" == "false" ]]; then
     echo "==> Installing dependencies..."
-    npm ci --ignore-scripts
+    npm ci
 else
     echo "==> Skipping npm ci (--skip-install)"
 fi
@@ -107,7 +107,7 @@ if [[ "$SKIP_DEPS" == "false" ]]; then
     trap cleanup_native_deps EXIT
     printf '%s\n' '{"private":true}' > "$NATIVE_DEPS_DIR/package.json"
     # Use --force to bypass platform checks (os/cpu restrictions in package.json).
-    npm install --prefix "$NATIVE_DEPS_DIR" --include=optional --no-save --package-lock=false --force --ignore-scripts \
+    npm install --prefix "$NATIVE_DEPS_DIR" --include=optional --no-save --package-lock=false --force \
         @mariozechner/clipboard@"$CLIPBOARD_VERSION" \
         @mariozechner/clipboard-darwin-arm64@"$CLIPBOARD_VERSION" \
         @mariozechner/clipboard-darwin-x64@"$CLIPBOARD_VERSION" \

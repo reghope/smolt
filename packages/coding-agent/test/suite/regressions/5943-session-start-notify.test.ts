@@ -12,6 +12,7 @@ function createUiContext(
 ): ExtensionUIContext {
 	return {
 		select: async () => undefined,
+		multiselect: async () => undefined,
 		confirm: async () => false,
 		input: async () => undefined,
 		notify: onNotify,

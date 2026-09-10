@@ -140,6 +140,20 @@ export interface ExtensionUIContext {
 	/** Show a selector and return the user's choice. */
 	select(title: string, options: string[], opts?: ExtensionUIDialogOptions): Promise<string | undefined>;
 
+	/**
+	 * Show a checklist and return everything ticked when it is confirmed.
+	 *
+	 * Unlike `select`, which answers on the first click, this stays open until
+	 * the reader confirms, so choosing several things is one dialog rather than
+	 * one dialog per click. Undefined means they cancelled.
+	 */
+	multiselect(
+		title: string,
+		options: string[],
+		selected?: string[],
+		opts?: ExtensionUIDialogOptions,
+	): Promise<string[] | undefined>;
+
 	/** Show a confirmation dialog. */
 	confirm(title: string, message: string, opts?: ExtensionUIDialogOptions): Promise<boolean>;
 
@@ -299,6 +313,43 @@ export interface ContextUsage {
 	contextWindow: number;
 	/** Context usage as percentage of context window, or null if tokens is unknown. */
 	percent: number | null;
+	/**
+	 * Images riding along in every request: how many the context holds, and
+	 * how many of those are actually sent once the per-request cap is applied.
+	 *
+	 * Worth reporting because nothing else shows it. Images are the most
+	 * expensive thing a context can accumulate and the easiest to forget
+	 * about — they arrive as a side effect of reading a screenshot, and then
+	 * ride along in every request for the rest of the session.
+	 */
+	images?: { sent: number; held: number };
+	/**
+	 * Where the context goes, part by part, so a person can see what rides
+	 * on every request: the conversation, each tool's definition, the system
+	 * prompt, and what the harness appended to it. Sizes are estimated from
+	 * text length and scaled so the parts add up to `tokens` whenever the
+	 * provider has reported a real figure.
+	 */
+	breakdown?: ContextBreakdown;
+}
+
+export interface ContextBreakdownItem {
+	name: string;
+	tokens: number;
+	/** Where the piece came from — the extension that registered a tool — when it is not built in. */
+	source?: string;
+}
+
+export interface ContextBreakdownPart {
+	key: "messages" | "systemTools" | "extensionTools" | "systemPrompt" | "skills" | "contextFiles";
+	label: string;
+	tokens: number;
+	/** The named pieces of this part — each tool, each context file — largest first. */
+	items?: ContextBreakdownItem[];
+}
+
+export interface ContextBreakdown {
+	parts: ContextBreakdownPart[];
 }
 
 export interface CompactOptions {
@@ -748,6 +799,20 @@ export interface AgentSettledEvent {
 	type: "agent_settled";
 }
 
+/**
+ * Fired when the reader stops the chat.
+ *
+ * Stopping means everything in this chat, not just whichever request happened
+ * to be in flight. An extension running work of its own - a research team, a
+ * battletest, an advisor reading over the agent's shoulder - is part of what
+ * was asked to stop, and only it can reach its own agents. Handlers should
+ * cancel what they are running and return; anything still going after this is
+ * something the reader has already told twice to stop.
+ */
+export interface AgentAbortEvent {
+	type: "agent_abort";
+}
+
 export type UIPromptKind = "select" | "confirm" | "input" | "editor" | "custom";
 
 /** Fired when Smolt starts waiting on a blocking user-facing extension UI prompt. */
@@ -1101,6 +1166,7 @@ export type ExtensionEvent =
 	| AgentStartEvent
 	| AgentEndEvent
 	| AgentSettledEvent
+	| AgentAbortEvent
 	| UIPromptStartEvent
 	| UIPromptEndEvent
 	| TurnStartEvent
@@ -1312,6 +1378,7 @@ export interface ExtensionAPI {
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
 	on(event: "agent_settled", handler: ExtensionHandler<AgentSettledEvent>): void;
+	on(event: "agent_abort", handler: ExtensionHandler<AgentAbortEvent>): void;
 	on(event: "ui_prompt_start", handler: ExtensionHandler<UIPromptStartEvent>): void;
 	on(event: "ui_prompt_end", handler: ExtensionHandler<UIPromptEndEvent>): void;
 	on(event: "turn_start", handler: ExtensionHandler<TurnStartEvent>): void;

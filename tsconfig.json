@@ -40,6 +40,7 @@
 		"**/dist/**",
 		"packages/coding-agent/examples/extensions/gondolin/**",
 		"packages/desktop/src/renderer/**",
+		"packages/desktop/src/web-shim.ts",
 		"packages/desktop/test/session-selection.test.ts"
 	]
 }

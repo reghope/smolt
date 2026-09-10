@@ -236,6 +236,7 @@ export async function emitProjectTrustEvent(
 
 const noOpUIContext: ExtensionUIContext = {
 	select: async () => undefined,
+	multiselect: async () => undefined,
 	confirm: async () => false,
 	input: async () => undefined,
 	notify: () => {},

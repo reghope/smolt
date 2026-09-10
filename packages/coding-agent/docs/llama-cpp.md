@@ -65,6 +65,17 @@ smolt
 
 If the server uses an API key, start `llama-server` with the matching `--api-key` value. Keep `--host 127.0.0.1` for local-only access.
 
+## Pick a model
+
+Choosing a llama.cpp model with `/model` (or the desktop model menu) is the whole request. Smolt:
+
+1. Checks the configured server and, when the URL is local and nothing answers, starts `llama-server` in router mode over the folder that holds the chosen model. The folder is `LLAMA_MODELS_DIR`, then `~/models`, then a `models` folder at the root of any drive on Windows. A `presets.ini` beside the models is passed as `--models-preset`. Every installed `llama-server` build is asked what devices it can see, and the first that lists a GPU is used: a CUDA build on a driver that is too old for it lists none and would run on the CPU. If no build is installed, Smolt installs the Vulkan build with scoop, or llama.cpp with winget on Windows or Homebrew on macOS and Linux.
+2. Unloads every other loaded or sleeping model, so only one model sits in VRAM at a time.
+3. Loads the chosen model and waits for it. Each stage is written into the chat itself, since a load can take minutes: which model is being stopped, that the chosen one is loading into memory, and when it is ready with its context size. The pick returns at once; the first message waits for the load.
+4. Reads the loaded model's own properties. Replies are capped at 32k output tokens, whatever the context size; asking for a reply as long as the window is something llama.cpp can only honour with an empty context. The context size shown is the one the model was really started with, and a model whose chat template can switch thinking on gets Smolt's thinking levels, sent through `chat_template_kwargs` and read back from `reasoning_content`.
+
+A model restored when a session reopens is not treated as a pick: nothing is started or unloaded until you send a message. Every turn on a llama.cpp model first confirms it is loaded and alone on the server, so a model another agent loaded in between is stopped before the turn runs. Set `LLAMA_SERVER_PATH` to point at a llama-server that is not on the PATH, and `LLAMA_MODELS_DIR` when the GGUF files are not in `~/models`.
+
 ## Manage models
 
 Run:

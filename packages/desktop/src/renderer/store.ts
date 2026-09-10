@@ -7,6 +7,8 @@
  * `tool_execution_end` (matched on toolCallId).
  */
 
+import { estimateTokens } from "./lib/throughput.ts";
+
 export interface TextBlock {
 	kind: "text";
 	text: string;
@@ -38,7 +40,50 @@ export interface ToolBlock {
 	images?: { data: string; mimeType: string }[];
 }
 
-export type Block = TextBlock | ThinkingBlock | ImageBlock | ToolBlock;
+/**
+ * A turn that ended badly, drawn where its answer would have been.
+ *
+ * The reason a turn failed rides on the message rather than in its content,
+ * and this window used to read neither field — so a refused request drew an
+ * empty bubble and left the reader to guess, which is exactly how a chat
+ * that had quietly hit a provider's image ceiling looked like the app
+ * stopping for no reason. It is a block rather than a toast because it
+ * belongs to the turn above it: it must survive a scroll, and still be
+ * there when the chat is reopened tomorrow.
+ */
+export interface ErrorBlock {
+	kind: "error";
+	text: string;
+}
+
+/**
+ * A turn that ended because someone said so, drawn plainly.
+ *
+ * Stopping a turn is not a failure — the reader asked for it, and the red
+ * box an error gets says something went wrong when nothing did. It reads as
+ * a quiet aside instead, in the same voice a transcript uses for its own
+ * remarks.
+ */
+export interface NoticeBlock {
+	kind: "notice";
+	text: string;
+}
+
+/**
+ * One advisor note, delivered by the advisor extension as a `<advisory>`
+ * custom message. Rendered in the tool-row voice — dot, label, monospace
+ * body — because it is the machine addressing the machine in the reader's
+ * presence, not prose anyone is meant to read as the answer.
+ */
+export interface AdvisoryBlock {
+	kind: "advisory";
+	severity: "nit" | "concern" | "blocker";
+	/** Roster name, when the note came from a named advisor. */
+	advisor?: string;
+	text: string;
+}
+
+export type Block = TextBlock | ThinkingBlock | ImageBlock | ToolBlock | ErrorBlock | NoticeBlock | AdvisoryBlock;
 
 export interface ChatMessage {
 	role: "user" | "assistant" | "system";
@@ -58,6 +103,22 @@ export interface ChatMessage {
 	tokens?: number;
 	/** When the turn began, for measuring the above. */
 	startedAt?: number;
+	/** When the message was written, in unix ms: what the hover time reads. */
+	at?: number;
+	/**
+	 * The window's own copy of what was just typed, drawn before the agent has
+	 * echoed it back.
+	 *
+	 * Sending used to put nothing on screen: the message appeared only when the
+	 * agent's own user event arrived, which is a round-trip through a
+	 * subprocess and, on a busy one, seconds of the composer looking as though
+	 * it had swallowed the words. The copy goes up at once and the agent's
+	 * version takes its place, which is why it is marked rather than simply
+	 * pushed - two copies of the same sentence would be worse than the wait.
+	 */
+	pendingEcho?: boolean;
+	/** A compaction announcement, waiting to become its outcome. */
+	compacting?: boolean;
 }
 
 export interface UiState {
@@ -73,6 +134,24 @@ export interface UiState {
 	usage: { input: number; output: number; cost: number } | null;
 	/** Completed requests' totals for the running turn; the in-flight request rides on top. */
 	turnBase: { input: number; output: number; cost: number };
+	/**
+	 * What the newest request of this turn carried, on its own: fresh input,
+	 * cached context and output, from its latest snapshot. This is the
+	 * context-window figure while a turn streams. `usage` is not: it sums
+	 * every request of the turn, and tool results bank their background
+	 * sessions' spend into it, so a research run once showed a 38k-token
+	 * chat as 1.5M of a 1M window, red, past the auto-compaction mark.
+	 */
+	request: { context: number } | null;
+	/**
+	 * What the model has written this turn, for the footer's live rate.
+	 *
+	 * `estimated` counts the characters that have streamed in from the
+	 * request in flight; `reported` is that request's own output count, which
+	 * most providers only send at the end. `banked` holds the finished
+	 * requests of the turn. See `turnOutputTokens`.
+	 */
+	output: { banked: number; estimated: number; reported: number };
 	/** When the current turn began, for the footer's elapsed time. */
 	turnStartedAt?: number;
 	/** The session's thinking level right now, stamped onto streamed messages. */
@@ -85,12 +164,34 @@ export function initialState(): UiState {
 		streaming: false,
 		usage: null,
 		turnBase: { input: 0, output: 0, cost: 0 },
+		request: null,
+		output: { banked: 0, estimated: 0, reported: 0 },
 		currentThinking: "",
 	};
 }
 
+/**
+ * Output tokens the turn has produced so far, live: finished requests plus
+ * the one streaming now, taking the provider's word over the estimate
+ * whenever it has given one.
+ */
+export function turnOutputTokens(state: UiState): number {
+	return state.output.banked + Math.max(state.output.estimated, state.output.reported);
+}
+
 function isObj(v: unknown): v is Record<string, unknown> {
 	return typeof v === "object" && v !== null;
+}
+
+/**
+ * Everything one request put through the model: the same sum the agent's
+ * compaction check makes, so the ring and the auto-compaction mark agree.
+ */
+function requestContext(usage: Record<string, unknown>): number {
+	const num = (v: unknown): number => (typeof v === "number" ? v : 0);
+	const total = num(usage.totalTokens);
+	if (total > 0) return total;
+	return num(usage.input) + num(usage.output) + num(usage.cacheRead) + num(usage.cacheWrite);
 }
 
 function textOf(content: unknown): string {
@@ -113,13 +214,49 @@ function imagesOf(content: unknown): { data: string; mimeType: string }[] {
 		.map((b) => ({ data: b.data as string, mimeType: String(b.mimeType ?? "image/png") }));
 }
 
+/**
+ * Advisor notes ride in as `<advisory advisor="…" severity="…">` wrappers
+ * (one per message, batches allowed). Returns blocks only when the message
+ * is entirely advisory wrappers; anything else stays a plain text block,
+ * because a malformed or mixed message still deserves to be read as written.
+ */
+export function advisoriesOf(text: string): AdvisoryBlock[] {
+	const out: AdvisoryBlock[] = [];
+	const re = /<advisory([^>]*)>\n?([\s\S]*?)<\/advisory>/g;
+	let consumed = 0;
+	let match = re.exec(text);
+	for (; match !== null; match = re.exec(text)) {
+		// Whitespace between wrappers is fine; anything else means mixed content.
+		if (text.slice(consumed, match.index).trim() !== "") return [];
+		consumed = match.index + match[0].length;
+		const attrs = match[1] ?? "";
+		const note = (match[2] ?? "").trim();
+		if (note === "") continue;
+		const severity = /severity="([^"]*)"/.exec(attrs)?.[1];
+		const advisor = /advisor="([^"]*)"/.exec(attrs)?.[1];
+		out.push({
+			kind: "advisory",
+			severity: severity === "blocker" || severity === "concern" || severity === "nit" ? severity : "nit",
+			...(advisor ? { advisor } : {}),
+			text: note,
+		});
+	}
+	if (out.length > 0 && text.slice(consumed).trim() !== "") return [];
+	return out;
+}
+
 /** Map an authoritative AgentMessage to display blocks. */
 export function fromAgentMessage(message: Record<string, unknown>): ChatMessage | null {
 	const role = message.role;
 	if (role === "user") {
 		const blocks: Block[] = [{ kind: "text", text: textOf(message.content) }];
 		for (const image of imagesOf(message.content)) blocks.push({ kind: "image", ...image });
-		return { role: "user", blocks, ...(message.internal === true ? { internal: true } : {}) };
+		return {
+			role: "user",
+			blocks,
+			...(typeof message.timestamp === "number" ? { at: message.timestamp } : { at: Date.now() }),
+			...(message.internal === true ? { internal: true } : {}),
+		};
 	}
 	if (role === "custom") {
 		// Extension-authored messages (e.g. the /hindsight report). Only ones
@@ -127,7 +264,18 @@ export function fromAgentMessage(message: Record<string, unknown>): ChatMessage 
 		if (message.display !== true) return null;
 		const text = typeof message.content === "string" ? message.content : textOf(message.content);
 		if (text.trim() === "") return null;
-		return { role: "system", blocks: [{ kind: "text", text }] };
+		const advisories = advisoriesOf(text);
+		if (advisories.length > 0)
+			return {
+				role: "system",
+				blocks: advisories,
+				at: typeof message.timestamp === "number" ? message.timestamp : Date.now(),
+			};
+		return {
+			role: "system",
+			blocks: [{ kind: "text", text }],
+			at: typeof message.timestamp === "number" ? message.timestamp : Date.now(),
+		};
 	}
 	if (role !== "assistant") return null;
 	const blocks: Block[] = [];
@@ -152,7 +300,59 @@ export function fromAgentMessage(message: Record<string, unknown>): ChatMessage 
 			});
 		}
 	}
-	return { role: "assistant", blocks };
+	// A cancelled response that wrote nothing has nothing to say: the harness
+	// aborts a turn to compact when the context fills, and a lone "Stopped."
+	// above the compaction notice reads as though something went wrong.
+	const failure = message.stopReason === "aborted" && blocks.length === 0 ? null : failureText(message);
+	if (failure !== null) blocks.push(failure);
+	return {
+		role: "assistant",
+		blocks,
+		at: typeof message.timestamp === "number" ? message.timestamp : Date.now(),
+	};
+}
+
+/**
+ * The human sentence inside a provider's error, if it has one.
+ *
+ * Providers answer with a JSON envelope, often nested — one service quoting
+ * another quoting a third — and printing it raw drops a wall of punctuation
+ * into the chat where one sentence would do. The status code in front of it
+ * is worth keeping; the braces are not. Anything that does not parse is
+ * shown exactly as it arrived, because a mangled error is worse than an
+ * ugly one.
+ */
+function readableError(raw: string): string {
+	if (raw === "") return "Unknown error";
+	const start = raw.indexOf("{");
+	if (start === -1) return raw;
+	try {
+		const parsed: unknown = JSON.parse(raw.slice(start));
+		const inner = isObj(parsed) && typeof parsed.message === "string" ? parsed.message.trim() : "";
+		if (inner === "") return raw;
+		const status = raw.slice(0, start).trim().replace(/:$/, "");
+		return status === "" ? inner : `${status} ${inner}`;
+	} catch {
+		return raw;
+	}
+}
+
+/** How a turn ended, as the block the transcript should show. */
+function failureText(message: Record<string, unknown>): Block | null {
+	const raw = typeof message.errorMessage === "string" ? message.errorMessage.trim() : "";
+	switch (message.stopReason) {
+		case "length":
+			return { kind: "error", text: "Response was truncated before completion." };
+		case "aborted":
+			// Stopping is not a failure, so it is never drawn as one. The
+			// agent's own wording for a plain stop says nothing the reader
+			// does not already know, having just pressed the button.
+			return { kind: "notice", text: raw !== "" && raw !== "Request was aborted" ? raw : "Stopped." };
+		case "error":
+			return { kind: "error", text: `API Error: ${readableError(raw)}` };
+		default:
+			return null;
+	}
 }
 
 /** The bash tool's marker for a call the reader stopped mid-run. */
@@ -177,9 +377,19 @@ export function attachToolResult(messages: ChatMessage[], raw: Record<string, un
 	}
 }
 
+/**
+ * The message deltas belong to: the last one still live, wherever it sits.
+ *
+ * Not just the tail. A user message queued mid-turn lands behind the message
+ * being written, and taking only the tail started a second live message for
+ * the rest of that turn — two working lines, and the answer split in two.
+ */
 function currentAssistant(state: UiState): ChatMessage | null {
-	const last = state.messages[state.messages.length - 1];
-	return last && last.role === "assistant" && last.streaming ? last : null;
+	for (let i = state.messages.length - 1; i >= 0; i--) {
+		const message = state.messages[i]!;
+		if (message.role === "assistant" && message.streaming) return message;
+	}
+	return null;
 }
 
 function findToolBlock(state: UiState, toolCallId: string): ToolBlock | null {
@@ -204,6 +414,8 @@ export function reduce(state: UiState, event: unknown): UiState {
 			// spend, not a leftover from the last one.
 			state.turnBase = { input: 0, output: 0, cost: 0 };
 			state.usage = null;
+			state.request = null;
+			state.output = { banked: 0, estimated: 0, reported: 0 };
 			break;
 		}
 		case "agent_settled": {
@@ -239,7 +451,25 @@ export function reduce(state: UiState, event: unknown): UiState {
 			const message = isObj(event.message) ? event.message : {};
 			if (message.role === "user") {
 				const mapped = fromAgentMessage(message);
-				if (mapped && textOf(message.content).trim() !== "") state.messages.push(mapped);
+				if (mapped && textOf(message.content).trim() !== "") {
+					// The agent's own copy of a message the window already drew.
+					// It is the authoritative one - it carries the timestamp the
+					// transcript was written with - so it replaces the stand-in
+					// rather than following it. A brief an extension sent is not a
+					// reply to anything the reader typed, so it never matches.
+					const waiting =
+						message.internal === true
+							? -1
+							: state.messages.findIndex(
+									(entry) =>
+										entry.pendingEcho === true &&
+										entry.blocks.some(
+											(block) => block.kind === "text" && block.text === textOf(message.content),
+										),
+								);
+					if (waiting >= 0) state.messages[waiting] = mapped;
+					else state.messages.push(mapped);
+				}
 			} else if (message.role === "custom") {
 				// Displayable extension messages arrive complete at message_start
 				// (message_end repeats them, so only one of the two may append).
@@ -260,8 +490,12 @@ export function reduce(state: UiState, event: unknown): UiState {
 					blocks: [],
 					streaming: true,
 					startedAt: Date.now(),
+					at: Date.now(),
 					thinkingLevel: state.currentThinking || undefined,
 				});
+				// A new request starts its own count; the last one is already banked.
+				state.output.estimated = 0;
+				state.output.reported = 0;
 			}
 			break;
 		}
@@ -274,7 +508,11 @@ export function reduce(state: UiState, event: unknown): UiState {
 				state.messages.push(msg);
 			}
 			applyDelta(msg, delta);
+			if (typeof delta.delta === "string") state.output.estimated += estimateTokens(delta.delta.length);
 			const usage = isObj(event.usage) ? event.usage : null;
+			if (usage && typeof usage.output === "number" && usage.output > state.output.reported) {
+				state.output.reported = usage.output;
+			}
 			if (usage && typeof usage.input === "number") {
 				const cost = isObj(usage.cost) && typeof usage.cost.total === "number" ? usage.cost.total : 0;
 				// The turn so far: every finished request (turnBase) plus this
@@ -285,6 +523,7 @@ export function reduce(state: UiState, event: unknown): UiState {
 					output: state.turnBase.output + ((usage.output as number) ?? 0),
 					cost: state.turnBase.cost + cost,
 				};
+				state.request = { context: requestContext(usage) };
 			}
 			break;
 		}
@@ -302,7 +541,14 @@ export function reduce(state: UiState, event: unknown): UiState {
 						cost: state.turnBase.cost + cost,
 					};
 					state.usage = { ...state.turnBase };
+					state.request = { context: requestContext(done) };
 				}
+				// Settle this request's output at the provider's final word, or the
+				// estimate when it gave none, so the rate carries across requests.
+				const reported = done && typeof done.output === "number" ? done.output : 0;
+				state.output.banked += Math.max(state.output.estimated, state.output.reported, reported);
+				state.output.estimated = 0;
+				state.output.reported = 0;
 				const mapped = fromAgentMessage(message);
 				const existing = currentAssistant(state);
 				if (mapped) {
@@ -363,8 +609,42 @@ export function reduce(state: UiState, event: unknown): UiState {
 			}
 			break;
 		}
+		case "compaction_start": {
+			// On a local model this is minutes of prompt processing with nothing
+			// else on screen moving; without a line here /compact read as dead.
+			const reason = String((event as { reason?: unknown }).reason ?? "");
+			const why =
+				reason === "manual"
+					? ""
+					: reason === "overflow"
+						? " (the context overflowed)"
+						: " (the context is nearly full)";
+			state.messages.push({
+				role: "system",
+				blocks: [
+					{ kind: "text", text: `Compacting the conversation${why}… this can take a while on a local model.` },
+				],
+				compacting: true,
+			});
+			break;
+		}
 		case "compaction_end": {
-			state.messages.push({ role: "system", blocks: [{ kind: "text", text: "Context compacted." }] });
+			const error = (event as { errorMessage?: unknown }).errorMessage;
+			const text = typeof error === "string" && error !== "" ? `Compaction failed: ${error}` : "Context compacted.";
+			// The line that announced the compaction becomes its outcome.
+			let announced: ChatMessage | undefined;
+			for (let index = state.messages.length - 1; index >= 0; index--) {
+				if (state.messages[index]?.compacting === true) {
+					announced = state.messages[index];
+					break;
+				}
+			}
+			if (announced) {
+				announced.compacting = false;
+				announced.blocks = [{ kind: "text", text }];
+			} else {
+				state.messages.push({ role: "system", blocks: [{ kind: "text", text }] });
+			}
 			break;
 		}
 		case "thinking_level_changed": {

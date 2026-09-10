@@ -191,7 +191,7 @@ beforeEach(() => {
 				record.steered.push(text);
 			},
 			actions: () => 5,
-			tokens: () => ({ input: 1000, output: 200, cost: 0.01 }),
+			tokens: () => ({ input: 1000, output: 200, cacheRead: 5000, cacheWrite: 300 }),
 			metricsSummary: () => ({
 				wallMs: 1000,
 				actions: 5,
@@ -393,7 +393,7 @@ describe("researcher tools", () => {
 		expect(notes).toContain("Answered [");
 	});
 
-	test("browse reads rendered text and network requests, relaunches visible, and screenshots navigation", async () => {
+	test("browse reads rendered text and network requests, relaunches visible, and screenshots on request", async () => {
 		await command("1 researcher into x");
 		const early = await researcherTool(0, "browse", { action: "text" });
 		expect(early.raw).toContain("No page open yet");
@@ -407,8 +407,12 @@ describe("researcher tools", () => {
 		);
 		expect(launches[0]!.headed).toBeFalsy();
 		expect(launches[0]!.captureNetwork).toBe(true);
-		expect(gone.content.some((block) => block.type === "image")).toBe(true);
+		// A researcher reads pages as text: navigation carries no picture, a
+		// 'screenshot' call does.
+		expect(gone.content.some((block) => block.type === "image")).toBe(false);
 		expect((gone.content[0] as { text: string }).text).toContain("https://example.dev/pricing — Pricing");
+		const shot = await tool.execute("c2", { action: "screenshot" }, undefined, undefined, fakeCtx() as never);
+		expect(shot.content.some((block) => block.type === "image")).toBe(true);
 		const text = await researcherTool(0, "browse", { action: "text" });
 		expect(text.raw).toContain("Rendered pricing table");
 		const network = await researcherTool(0, "browse", { action: "network" });

@@ -4,7 +4,7 @@
 smolt --mode json "Your prompt"
 ```
 
-Outputs all session events as JSON lines to stdout. Useful for integrating smolt into other tools or custom UIs.
+Outputs all session events as JSON lines to stdout. Useful for integrating Smolt into other tools or custom UIs.
 
 ## Event Types
 

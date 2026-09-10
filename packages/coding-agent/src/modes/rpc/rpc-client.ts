@@ -7,13 +7,23 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import type { AgentMessage, ThinkingLevel } from "@smolt/agent-core";
 import type { ImageContent } from "@smolt/ai";
-import type { SessionStats } from "../../core/agent-session.ts";
+import type { ProviderUsageSnapshot, SessionStats } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
 import type { JsonAgentSessionEvent } from "../json-event.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
-import type { RpcCommand, RpcExtensionInfo, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.ts";
+import type {
+	RpcAdvisorSettings,
+	RpcAdvisorSettingsUpdate,
+	RpcCommand,
+	RpcExtensionInfo,
+	RpcResponse,
+	RpcReviewSettings,
+	RpcReviewSettingsUpdate,
+	RpcSessionState,
+	RpcSlashCommand,
+} from "./rpc-types.ts";
 
 // ============================================================================
 // Types
@@ -69,7 +79,12 @@ export interface RpcClientOptions {
 const RPC_TIMEOUT_MS: Partial<Record<RpcCommand["type"], number>> = {
 	// A prompt's response can be held open by an extension command's dialogs.
 	prompt: 10 * 60 * 1000,
-	compact: 10 * 60 * 1000,
+	// A browser sign-in waits on a person.
+	login: 15 * 60 * 1000,
+	// Summarising a full 131k window on a local model is a quarter of an hour
+	// of prompt processing alone; giving up before it answered made /compact
+	// look like it did nothing.
+	compact: 30 * 60 * 1000,
 	bash: 30 * 60 * 1000,
 	switch_session: 5 * 60 * 1000,
 	new_session: 5 * 60 * 1000,
@@ -329,8 +344,8 @@ export class RpcClient {
 	 * @param parentSession - Optional parent session path for lineage tracking
 	 * @returns Object with `cancelled: true` if an extension cancelled the new session
 	 */
-	async newSession(parentSession?: string): Promise<{ cancelled: boolean }> {
-		const response = await this.send({ type: "new_session", parentSession });
+	async newSession(parentSession?: string, temporary?: boolean): Promise<{ cancelled: boolean }> {
+		const response = await this.send({ type: "new_session", parentSession, temporary });
 		return this.getData(response);
 	}
 
@@ -424,11 +439,27 @@ export class RpcClient {
 		await this.send({ type: "set_auto_compaction", enabled });
 	}
 
+	/** Show or hide the model's live tokens-per-second rate. */
+	async setShowThroughput(enabled: boolean): Promise<void> {
+		await this.send({ type: "set_show_throughput", enabled });
+	}
+
 	/**
 	 * Set auto-retry enabled/disabled.
 	 */
 	async setAutoRetry(enabled: boolean): Promise<void> {
 		await this.send({ type: "set_auto_retry", enabled });
+	}
+
+	/**
+	 * Sign a provider in, the way /login does. OAuth flows open the browser
+	 * through an open_url extension UI request and take their prompts through
+	 * the usual dialog requests; the call resolves once the credential is
+	 * stored and the model list has caught up.
+	 */
+	async login(provider: string, method: "oauth" | "api_key"): Promise<{ type: string }> {
+		const response = await this.send({ type: "login", provider, method });
+		return this.getData(response);
 	}
 
 	/**
@@ -444,6 +475,52 @@ export class RpcClient {
 	 */
 	async setExtensionEnabled(extensionId: string, enabled: boolean): Promise<void> {
 		await this.send({ type: "set_extension_enabled", extensionId, enabled });
+	}
+
+	/**
+	 * What advisor.json says: whether the advisor is on by default, and the
+	 * model it reviews with when not following the session model.
+	 */
+	async getAdvisorSettings(): Promise<RpcAdvisorSettings> {
+		const response = await this.send({ type: "get_advisor_settings" });
+		return this.getData(response);
+	}
+
+	/**
+	 * Set the advisor's model ("provider/model-id") in the user-level
+	 * advisor.json, or clear it so the advisor follows the session model.
+	 * The next review picks it up.
+	 */
+	async setAdvisorModel(model?: string): Promise<void> {
+		await this.send({ type: "set_advisor_model", model });
+	}
+
+	/**
+	 * Change advisor settings in the user-level advisor.json. Fields left out
+	 * stay as they are; a null model makes the advisor follow the session
+	 * model and a null budget removes the budget. A running chat reads the
+	 * file again at its next turn.
+	 */
+	async setAdvisorSettings(settings: RpcAdvisorSettingsUpdate): Promise<void> {
+		await this.send({ type: "set_advisor_settings", settings });
+	}
+
+	/**
+	 * What review.json says: the model reviews run on, whether reviews are
+	 * posted to pull requests, whether arriving pull requests are reviewed,
+	 * and the cap on findings in a posted comment.
+	 */
+	async getReviewSettings(): Promise<RpcReviewSettings> {
+		const response = await this.send({ type: "get_review_settings" });
+		return this.getData(response);
+	}
+
+	/**
+	 * Change review settings in the user-level review.json. Fields left out
+	 * stay as they are; a null model makes reviews follow the session model.
+	 */
+	async setReviewSettings(settings: RpcReviewSettingsUpdate): Promise<void> {
+		await this.send({ type: "set_review_settings", settings });
 	}
 
 	/**
@@ -473,6 +550,14 @@ export class RpcClient {
 	 */
 	async getSessionStats(): Promise<SessionStats> {
 		const response = await this.send({ type: "get_session_stats" });
+		return this.getData(response);
+	}
+
+	/**
+	 * Poll subscription usage for the current provider; null when unavailable.
+	 */
+	async getProviderUsage(): Promise<ProviderUsageSnapshot | null> {
+		const response = await this.send({ type: "get_provider_usage" });
 		return this.getData(response);
 	}
 

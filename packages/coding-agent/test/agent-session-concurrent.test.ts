@@ -181,6 +181,30 @@ describe("AgentSession concurrent prompt guard", () => {
 		await firstPrompt.catch(() => {});
 	});
 
+	it("abort drops what was queued behind the turn, and clearQueue hands back only the reader's words", async () => {
+		await createSession();
+		const firstPrompt = session.prompt("First message");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		session.followUp("mine, later");
+		await session.sendUserMessage("A research run has started: supervise it.", { deliverAs: "followUp" });
+		expect(session.pendingMessageCount).toBe(2);
+		expect(session.getFollowUpMessages()).toContain("A research run has started: supervise it.");
+		// The reader's own words are recoverable; the extension's brief is not theirs.
+		const queued = session.clearQueue();
+		expect(queued.followUp).toEqual(["mine, later"]);
+
+		session.followUp("queued again");
+		await session.sendUserMessage("Kickoff brief", { deliverAs: "followUp" });
+		await session.abort();
+		await firstPrompt.catch(() => {});
+		expect(session.pendingMessageCount).toBe(0);
+		// Nothing starts a new turn after the stop.
+		const before = session.messages.length;
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		expect(session.isStreaming).toBe(false);
+		expect(session.messages.length).toBe(before);
+	});
+
 	it("should queue extension-origin steering messages while streaming", async () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		let abortSignal: AbortSignal | undefined;
@@ -288,7 +312,10 @@ describe("AgentSession concurrent prompt guard", () => {
 		await session.abort();
 		await firstPrompt.catch(() => {});
 
-		expect(sawSteeringMessage).toBe(true);
+		// Stop means stop: the queued steer does not start a turn of its own
+		// once the reader has ended the one it was waiting behind.
+		expect(session.pendingMessageCount).toBe(0);
+		expect(sawSteeringMessage).toBe(false);
 	});
 
 	it("should allow prompt() after previous completes", async () => {

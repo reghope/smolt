@@ -110,9 +110,10 @@ beforeEach(async () => {
 	await smolt.fire("session_start");
 });
 
-/** One full turn: prompt, run, settle. */
+/** One full turn: prompt, per-turn charges, run end, settle. */
 async function turn(messages: unknown[] = TOOL_RUN): Promise<void> {
 	await smolt.fire("before_agent_start", { systemPrompt: "BASE" });
+	for (const message of messages) await smolt.fire("turn_end", { message });
 	await smolt.fire("agent_end", { messages });
 	await smolt.fire("agent_settled");
 }
@@ -124,6 +125,32 @@ describe("accounting", () => {
 
 	test("tool results and user messages cost nothing", () => {
 		expect(turnCost([{ role: "toolResult" }, { role: "user" }])).toBe(0);
+	});
+
+	test("each assistant turn charges as it ends", async () => {
+		await smolt.runCommand("Ship the parser");
+		await smolt.fire("before_agent_start", { systemPrompt: "BASE" });
+		for (const message of TOOL_RUN) await smolt.fire("turn_end", { message });
+		expect(handle.current()?.tokensUsed).toBe(120);
+	});
+
+	test("a goal completed mid-run still charges the run that completed it", async () => {
+		await smolt.runCommand("Ship the parser");
+		smolt.sent = [];
+		await smolt.fire("before_agent_start", { systemPrompt: "BASE" });
+		// Work happens first…
+		for (const message of TOOL_RUN) await smolt.fire("turn_end", { message });
+		// …then the model declares victory mid-run.
+		await smolt.runTool({ action: "update", status: "complete" });
+		expect(handle.current()?.tokensUsed).toBe(120);
+		// The closing text of the same run charges too.
+		await smolt.fire("turn_end", { message: TALK_ONLY[0] });
+		expect(handle.current()?.tokensUsed).toBe(180);
+		// The run ends; accounting closes and later turns stop charging.
+		await smolt.fire("agent_end", { messages: TOOL_RUN });
+		expect(handle.current()?.accountingClosed).toBe(true);
+		await smolt.fire("turn_end", { message: TOOL_RUN[0] });
+		expect(handle.current()?.tokensUsed).toBe(180);
 	});
 
 	test("a turn counts as work when it called a tool", () => {

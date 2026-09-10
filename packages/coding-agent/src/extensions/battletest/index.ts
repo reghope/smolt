@@ -8,10 +8,19 @@ import { describeSummary } from "../../core/action-metrics.ts";
 // tree switches this single line to `from "smolt"`.
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "../../core/extensions/types.ts";
 import { defineTool } from "../../core/extensions/types.ts";
+import { projectStore } from "../../core/project-store.ts";
 import { type BrowseDriver, type BrowseDriverFactory, defaultBrowseDriverFactory, VIEWPORT_PRESETS } from "./cdp.ts";
+import type { LeanChildOptions } from "./lean.ts";
 import { parseBattletestInvocation, pickAmbiguousModel, resolveModelOverride } from "./parse.ts";
 import { describePersona, generatePersonas, generateTeam, type Persona } from "./personas.ts";
-import { CHILD_SHELL_TIMEOUT_SECONDS, type ChildDriver, spawnChildSession } from "./spawn.ts";
+import {
+	CHILD_SHELL_TIMEOUT_SECONDS,
+	type ChildDriver,
+	type ChildTokens,
+	childSpendLabel,
+	childTokenTotal,
+	spawnChildSession,
+} from "./spawn.ts";
 import {
 	type BattleTestRun,
 	BattleTestStore,
@@ -40,8 +49,9 @@ import {
  *
  * When the last tester finishes, the parent session synthesizes: duplicates
  * are folded, findings are grouped by severity and theme, and a report lands
- * next to the tickets in `.smolt/battletest/<run>/` — shared through the
- * repo, ready for later sessions to fix from.
+ * next to the tickets in the project's battletest store — kept out of the
+ * repo, under `~/.smolt/projects/<project>/battletest/<run>/`, so hundreds
+ * of generated ticket files never land in the reader's diff.
  */
 
 /** More testers than this stops being a user base and starts being a DDoS. */
@@ -50,7 +60,14 @@ const MAX_TESTERS = 25;
 const DEFAULT_TESTERS = 3;
 
 /** Longest a single `wait` blocks before reporting testers still at it. */
-const DEFAULT_WAIT_SECONDS = 120;
+const DEFAULT_WAIT_SECONDS = 300;
+/**
+ * A wait returns early on news — a ticket, a finished tester — but not
+ * before this much of it has passed: each return is a parent turn re-reading
+ * the whole session, so news is batched, and a quiet stretch costs no turn
+ * at all until the deadline.
+ */
+const NEWS_SETTLE_MS = 90_000;
 const MAX_WAIT_SECONDS = 600;
 
 /** Base for per-tester debugging ports, offset by tester index. */
@@ -134,6 +151,15 @@ export type TesterSpawner = (
 const TESTER_SHELL_TIMEOUT_SECONDS = CHILD_SHELL_TIMEOUT_SECONDS;
 
 /**
+ * How lean a tester's context is kept. A tester's results are screenshots,
+ * and at the shared defaults (six recent results whole, shed in batches of
+ * eight) up to thirteen of them rode on a turn. Four recent screens is
+ * enough to know where you are and what just changed; the diary holds the
+ * rest. Shed in batches of four, so about two more ride on an average turn.
+ */
+const TESTER_LEAN: LeanChildOptions = { keepRecentToolResults: 4, shedBatchSize: 4 };
+
+/**
  * The real spawner: one background AgentSession per tester, measured action
  * by action, with `edit` excluded — a tester never patches the app it is
  * judging. Write stays available for scratch driver scripts.
@@ -150,6 +176,7 @@ const defaultSpawner: TesterSpawner = (options, onFinish) =>
 			metricsPath: options.metricsPath,
 			excludeTools: ["edit"],
 			shellTimeoutSeconds: TESTER_SHELL_TIMEOUT_SECONDS,
+			lean: TESTER_LEAN,
 		},
 		onFinish,
 	);
@@ -381,7 +408,7 @@ function teamPlanPrompt(focus: string, modelRef?: string): string {
 1. Scout the project for a minute — README, structure, what kind of app this is${focus !== "" ? `. The requested focus: ${focus}` : ""}. A look, not a study.
 1b. PREFLIGHT the target before anyone is dispatched. If the testers will run a built artifact (a dist/, a bundle, a packaged app), confirm the build is CURRENT — newest source mtime vs newest build mtime, or a version probe. A stale build once burned a third of a fleet on "missing" features that were simply unbuilt, including the run's only blocker ticket. Rebuild first, then dispatch.
 1c. Ask: can a FIXTURE exercise the core behavior under test? Features gated on real external state (credentials, paid accounts, live services) often have a test seam in the codebase already — a faux provider, a mock transport, a scripted error. Wiring one up turns "untestable, covered by unit tests only" into the run's main event. If a fixture exists or is cheap, name it in the focus so the testers use it.
-2. Decide the team, at most 3 testers. Default to just the balanced generalist — battletest action 'start' with specialists: [] — one thorough tester covering everything is enough for most projects. Before adding anyone, ask whether the generalist already handles it: viewports (desktop vs mobile vs tablet), walking every screen, ordinary error paths, and general wording/consistency are all inside one generalist's pass — none of those justify a second tester. A specialist earns a seat only for a concentrated domain that rewards sustained expert attention the generalist cannot spare: security posture and hostile input, deep accessibility (keyboard/screen-reader), a payment or data-loss flow, a protocol or offline edge. Up to 2, each as a short focus phrase. Past runs' form is in .smolt/battletest/form.jsonl if it exists — weigh what has actually found problems before.
+2. Decide the team, at most 3 testers. Default to just the balanced generalist — battletest action 'start' with specialists: [] — one thorough tester covering everything is enough for most projects. Before adding anyone, ask whether the generalist already handles it: viewports (desktop vs mobile vs tablet), walking every screen, ordinary error paths, and general wording/consistency are all inside one generalist's pass — none of those justify a second tester. A specialist earns a seat only for a concentrated domain that rewards sustained expert attention the generalist cannot spare: security posture and hostile input, deep accessibility (keyboard/screen-reader), a payment or data-loss flow, a protocol or offline edge. Up to 2, each as a short focus phrase. Past runs' form is in form.jsonl at the root of the battletest store if it exists — weigh what has actually found problems before.
 3. Start the run: battletest action 'start' with your specialists array${focus !== "" ? `, focus: '${focus}'` : ""}${modelRef ? `, model: '${modelRef}'` : ""}. ${modelRef ? "" : "Do NOT pass a model — testers run on the session's own model unless the user names one. "}The kickoff brief for supervising the run arrives as a follow-up message.`;
 }
 
@@ -888,7 +915,7 @@ export interface BattleTestPaths {
 }
 
 export default function battleTestExtension(smolt: ExtensionAPI): void {
-	createBattleTestExtension(smolt, { root: join(process.cwd(), ".smolt", "battletest") });
+	createBattleTestExtension(smolt, { root: projectStore(process.cwd(), "battletest") });
 }
 
 export interface BattleTestHandle {
@@ -968,8 +995,8 @@ export function createBattleTestExtension(
 	const wrappedUp = new Set<string>();
 
 	/**
-	 * The end-of-run record: how each tester did, under which brief, at what
-	 * cost, and who came out on top — the raw material for picking stronger
+	 * The end-of-run record: how each tester did, under which brief, with what
+	 * spend, and who came out on top — the raw material for picking stronger
 	 * teams later. Written the moment the last tester finishes, while every
 	 * driver is still around to answer for its numbers.
 	 */
@@ -994,7 +1021,7 @@ export function createBattleTestExtension(
 						tickets: filed.length,
 						points: filed.reduce((sum, ticket) => sum + (SEVERITY_POINTS[ticket.severity] ?? 1), 0),
 						actions: timing?.actions ?? tester.driver?.actions?.() ?? 0,
-						tokens: tokens ? tokens.input + tokens.output : 0,
+						tokens: tokens ? childTokenTotal(tokens) : 0,
 						wallMs: timing?.wallMs ?? 0,
 						brief: tester.task ?? "",
 					};
@@ -1008,17 +1035,28 @@ export function createBattleTestExtension(
 	/** What the parent has already been told, so each wait reports only deltas. */
 	let reportedTickets = new Set<string>();
 	const reportedActions = new Map<string, number>();
+	/** Testers whose finish a wait has already reported. */
+	const reportedFinishes = new Set<string>();
+	/** Whether a wait has something to say that the last one did not. */
+	const hasNews = (): boolean => {
+		if (activeRun === undefined) return false;
+		if (testers.some((tester) => tester.status !== "testing" && !reportedFinishes.has(tester.persona.slug))) {
+			return true;
+		}
+		return store.listTickets(activeRun).some((ticket) => !reportedTickets.has(ticket.slug));
+	};
 	/** Tester tokens already handed to the parent's accounting via wait results. */
-	const reportedTokens = { input: 0, output: 0, cost: 0 };
+	const reportedTokens: ChildTokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
-	const testerTokenTotals = (): { input: number; output: number; cost: number } => {
-		const totals = { input: 0, output: 0, cost: 0 };
+	const testerTokenTotals = (): ChildTokens => {
+		const totals: ChildTokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 		for (const tester of testers) {
 			const tokens = tester.driver?.tokens?.();
 			if (!tokens) continue;
 			totals.input += tokens.input;
 			totals.output += tokens.output;
-			totals.cost += tokens.cost;
+			totals.cacheRead += tokens.cacheRead;
+			totals.cacheWrite += tokens.cacheWrite;
 		}
 		return totals;
 	};
@@ -1027,12 +1065,7 @@ export function createBattleTestExtension(
 	const allFinished = (): boolean => testers.length > 0 && running().length === 0;
 
 	/** "12.4k tokens" — a tester's own spend, for the per-tester roster lines. */
-	const testerTokenLabel = (tester: Tester): string => {
-		const tokens = tester.driver?.tokens?.();
-		if (!tokens) return "";
-		const total = tokens.input + tokens.output;
-		return total > 0 ? `${(total / 1000).toFixed(1)}k tokens` : "";
-	};
+	const testerTokenLabel = (tester: Tester): string => childSpendLabel(tester.driver?.tokens?.());
 
 	/** Trim a URL or selector down to the part a human scans for. */
 	const shorten = (raw: string): string => {
@@ -1141,9 +1174,8 @@ export function createBattleTestExtension(
 		const tickets = store.listTickets(activeRun);
 		const live = running().length;
 		const pending = clearances.size > 0 ? `, ${clearances.size} clearance pending` : "";
-		const spentTotals = testerTokenTotals();
-		const spentTokens = spentTotals.input + spentTotals.output;
-		const spentLabel = spentTokens > 0 ? `, ${(spentTokens / 1000).toFixed(1)}k tester tokens` : "";
+		const spend = childSpendLabel(testerTokenTotals());
+		const spentLabel = spend === "" ? "" : `, ${spend.replace("tokens", "tester tokens")}`;
 		ctx.ui.setStatus(
 			"battletest",
 			live > 0
@@ -1286,11 +1318,10 @@ export function createBattleTestExtension(
 		synthesisDue = false;
 		// Deltas report only what arrives after (re)dispatch: a resumed run's
 		// existing tickets must not re-announce themselves as new findings.
+		reportedFinishes.clear();
 		reportedTickets = new Set(store.listTickets(run.slug).map((ticket) => ticket.slug));
 		reportedActions.clear();
-		reportedTokens.input = 0;
-		reportedTokens.output = 0;
-		reportedTokens.cost = 0;
+		Object.assign(reportedTokens, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 		wrappedUp.clear();
 		testers = run.personas.map((persona) => ({ persona, status: "testing" as const, summary: "", error: "" }));
 		const knownIssues = knownIssuesBrief(store);
@@ -1389,6 +1420,12 @@ export function createBattleTestExtension(
 		await stopAll(true);
 	});
 
+	// Nor the reader pressing stop. Each tester is an agent of its own, so the
+	// session's abort never reached them on its way down.
+	smolt.on("agent_abort", async () => {
+		await stopAll(true);
+	});
+
 	/** The run now settling was aborted by the user; Stop means stop. */
 	let lastRunAborted = false;
 	smolt.on("agent_end", async (event) => {
@@ -1432,29 +1469,21 @@ export function createBattleTestExtension(
 		name: "battletest",
 		label: "Battletest",
 		description:
-			"Inspect and manage battletest runs: simulated-user test sessions whose notes, tickets, and " +
-			"reports live under the project's .smolt/battletest/ directory.\n\n" +
-			"ACTIONS: 'list' all runs; 'view' one run (personas, tickets by status, notes paths — omit " +
-			"'run' for the latest); 'view_ticket' (ticket, run?) for a ticket's full body; 'add_ticket' " +
-			"(title, what, severity?, category?, area?, expected?, steps?) to file an issue yourself; " +
-			"'update_ticket' (ticket, status?, severity?, duplicate_of?) — status one of open/fixed/" +
-			"wont-fix/duplicate, and 'duplicate' requires duplicate_of; 'ledger' (status?) lists the " +
-			"cross-run issue ledger — every distinct problem past runs found, with hit counts and " +
-			"regressions; 'update_ledger' (ticket = the ledger slug, status open/fixed/wont-fix/regressed) " +
-			"resolves a ledger entry — mark entries 'fixed' as the user fixes them, so future runs verify " +
-			"instead of re-discovering; 'sync_ledger' backfills the ledger from every run on disk; " +
-			"'write_report' (content, run?) " +
-			"writes the synthesized report and completes the run; 'wait' (seconds?) blocks while testers " +
-			"from this session's active run are still working and reports the roster when it returns — it " +
-			"also returns early whenever a tester requests clearance for a possibly-risky action; 'decide' " +
-			"(clearance, verdict allow|deny, guidance?) rules on such a request: the tester is paused on " +
-			"your answer, so rule promptly, and deny when in doubt; 'wrap_up' (persona?) tells straggling " +
-			"testers to file what they have and finish — use it when a run drags well past its worth.\n\n" +
-			"WHEN: after /battletest dispatches a run (wait for it, then synthesize), or when the user asks " +
-			"about earlier runs, wants tickets triaged, or is fixing what a run found — mark tickets " +
-			"'fixed' as they are dealt with. Start new runs with action 'start' (or the /battletest command " +
-			"in plain language: '/battletest 15 subagents using opencode minimax-m3 to test a feature'); " +
-			"resume interrupted ones with 'resume'.",
+			"Battletest runs: simulated-user test sessions whose notes, tickets and reports live in this " +
+			"project's battletest store.\n\n" +
+			"RUN: 'start' (specialists? or count?, focus?, model?); 'wait' (seconds?) blocks while this " +
+			"session's testers work and returns the deltas — early on news or a clearance request; 'decide' " +
+			"(clearance, verdict allow|deny, guidance?) — promptly, deny when in doubt; 'wrap_up' (persona?); " +
+			"'resume' (run?) for an interrupted run.\n" +
+			"RECORD: 'list'; 'view' (run?) — personas, tickets, notes paths; 'view_ticket' (ticket); " +
+			"'add_ticket' (title, what, severity?, category?, area?, expected?, steps?); 'update_ticket' " +
+			"(ticket, status open|fixed|wont-fix|duplicate, severity?, duplicate_of?); 'write_report' " +
+			"(content, run?) completes the run. LEDGER (every distinct problem across runs, with hit counts " +
+			"and regressions): 'ledger' (status?); 'update_ledger' (ticket = ledger slug, status " +
+			"open|fixed|wont-fix|regressed) — mark entries fixed as the user fixes them; 'sync_ledger' " +
+			"backfills from runs on disk.\n\n" +
+			"WHEN: after /battletest dispatches a run (wait, then synthesize), or when the user asks about " +
+			"earlier runs, wants tickets triaged, or is fixing what a run found.",
 		parameters: Type.Object({
 			action: Type.Union(
 				[
@@ -1638,13 +1667,15 @@ export function createBattleTestExtension(
 					);
 				}
 				const limit = Math.max(1, Math.min(params.seconds ?? DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS)) * 1000;
-				const deadline = Date.now() + limit;
+				const started = Date.now();
+				const deadline = started + limit;
 				// Repaint every few seconds so per-tester ticket counts tick up
 				// live in the widget while the parent sits in this wait.
 				let polls = 0;
 				while (!allFinished() && clearances.size === 0 && Date.now() < deadline && signal?.aborted !== true) {
 					await new Promise((resolve) => setTimeout(resolve, 500));
 					if (++polls % 8 === 0) paint(ctx);
+					if (polls % 10 === 0 && Date.now() - started >= NEWS_SETTLE_MS && hasNews()) break;
 				}
 				paint(ctx);
 				if (clearances.size > 0) {
@@ -1678,6 +1709,7 @@ export function createBattleTestExtension(
 								.join("\n")}`;
 				const roster = testers
 					.map((tester) => {
+						if (tester.status !== "testing") reportedFinishes.add(tester.persona.slug);
 						const count = filed.get(tester.persona.slug) ?? 0;
 						const actions = tester.driver?.actions?.() ?? 0;
 						const delta = actions - (reportedActions.get(tester.persona.slug) ?? 0);
@@ -1700,25 +1732,24 @@ export function createBattleTestExtension(
 					.join("\n");
 				// The testers' spend since the last wait rides back as this tool
 				// call's own usage, so the turn's token counter and the session
-				// stats carry the WHOLE run's cost, not just the parent's chatter.
+				// stats carry the WHOLE run's spend, not just the parent's chatter.
 				const totals = testerTokenTotals();
-				const spent = {
+				const spent: ChildTokens = {
 					input: Math.max(0, totals.input - reportedTokens.input),
 					output: Math.max(0, totals.output - reportedTokens.output),
-					cost: Math.max(0, totals.cost - reportedTokens.cost),
+					cacheRead: Math.max(0, totals.cacheRead - reportedTokens.cacheRead),
+					cacheWrite: Math.max(0, totals.cacheWrite - reportedTokens.cacheWrite),
 				};
-				reportedTokens.input = totals.input;
-				reportedTokens.output = totals.output;
-				reportedTokens.cost = totals.cost;
+				Object.assign(reportedTokens, totals);
 				const usage =
-					spent.input + spent.output > 0
+					childTokenTotal(spent) > 0
 						? {
 								input: spent.input,
 								output: spent.output,
-								cacheRead: 0,
-								cacheWrite: 0,
-								totalTokens: spent.input + spent.output,
-								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: spent.cost },
+								cacheRead: spent.cacheRead,
+								cacheWrite: spent.cacheWrite,
+								totalTokens: childTokenTotal(spent),
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, // Usage.cost is required by the type; spend is counted in tokens only
 							}
 						: undefined;
 				if (!allFinished()) {

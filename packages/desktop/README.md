@@ -1,6 +1,6 @@
 # @smolt/desktop
 
-A minimalist desktop app for the smolt coding agent — the same functionality
+A minimalist desktop app for the Smolt coding agent — the same functionality
 as the CLI, as a GUI. Dark, quiet, chat-first.
 
 The app embeds the agent through its supported RPC mode: the Electron main
@@ -51,3 +51,9 @@ assembly, tool lifecycle, history restore), the markdown renderer
 mode (no API key needed), and an Electron full-boot smoke test. A live
 end-to-end suite (real model, gated on `OPENCODE_API_KEY`) streams a prompt
 through the same reducer the UI uses.
+
+## Web server
+
+Settings › General › "Local web server" serves the app in a browser from the running desktop process: the same agent, the same chats, one more window on them. It listens on `http://localhost:7332` and, when the machine has one, its Tailscale address, with HTTPS beside it on 7333 (a self-signed certificate made by openssl on first use; the browser warns once) — dictation needs the HTTPS one, because the microphone only exists in a secure context. The setting lives in `web-server.json` in the app's user-data folder (`{ "enabled": true, "port": 7332, "lan": false }`); `lan: true` binds every interface. There is no login: whoever can reach the port drives the agent.
+
+The browser gets `window.smolt` from `src/web-shim.ts`, the preload's API over `POST /invoke` and an SSE stream at `/events`; a test keeps the two in step. `src/main/web-server.ts` records every `ipcMain.handle` and mirrors every `webContents.send`, so a browser client sees exactly what the window sees. Every window shows the same chat: a message sent from one streams into all of them through the mirrored agent events, and a chat opened in one is followed by the others (`session:changed`, announced by the main process after every move; a window not already there loads the chat the way it loads any other).

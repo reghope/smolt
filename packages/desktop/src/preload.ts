@@ -28,11 +28,13 @@ contextBridge.exposeInMainWorld("smolt", {
 		ipcRenderer.invoke("app:session-messages", path, options),
 	sessionDelete: (path: string): Promise<AgentCallResult> => ipcRenderer.invoke("app:session-delete", path),
 	wipeLocalData: (): Promise<AgentCallResult> => ipcRenderer.invoke("app:wipe-local-data"),
-	titlebar: (theme: string): Promise<void> => ipcRenderer.invoke("app:titlebar", theme),
+	titlebar: (theme: string, dimmed?: boolean): Promise<void> => ipcRenderer.invoke("app:titlebar", theme, dimmed),
 	linkPreview: (url: string): Promise<unknown> => ipcRenderer.invoke("app:link-preview", url),
 	openProject: (path: string): Promise<AgentCallResult> => ipcRenderer.invoke("app:open-project", path),
 	pickFolder: (): Promise<AgentCallResult> => ipcRenderer.invoke("app:pick-folder"),
 	recentProjects: (): Promise<string[]> => ipcRenderer.invoke("app:recent-projects"),
+	projectFiles: (query: string): Promise<string[]> => ipcRenderer.invoke("app:project-files", query),
+	repoUrl: (dir?: string): Promise<string | undefined> => ipcRenderer.invoke("app:repo-url", dir),
 	closeProject: (): Promise<AgentCallResult> => ipcRenderer.invoke("app:close-project"),
 	folders: (): Promise<string[]> => ipcRenderer.invoke("app:folders"),
 	updateState: (): Promise<unknown> => ipcRenderer.invoke("app:update-state"),
@@ -46,6 +48,18 @@ contextBridge.exposeInMainWorld("smolt", {
 		ipcRenderer.invoke("app:known-providers"),
 	authSet: (provider: string, key: string): Promise<AgentCallResult> =>
 		ipcRenderer.invoke("app:auth-set", provider, key),
+	authRemove: (provider: string): Promise<AgentCallResult> => ipcRenderer.invoke("app:auth-remove", provider),
+	providersList: (): Promise<unknown[]> => ipcRenderer.invoke("app:providers-list"),
+	llamaStatus: (): Promise<unknown> => ipcRenderer.invoke("app:llama-sizeup"),
+	llamaLaunch: (): Promise<unknown> => ipcRenderer.invoke("app:llama-launch"),
+	poolRemove: (provider: string, credentialId: string): Promise<AgentCallResult> =>
+		ipcRenderer.invoke("app:pool-remove", provider, credentialId),
+	poolRelabel: (provider: string, credentialId: string, label: string): Promise<AgentCallResult> =>
+		ipcRenderer.invoke("app:pool-relabel", provider, credentialId, label),
+	poolAddKey: (provider: string, key: string, label: string): Promise<AgentCallResult> =>
+		ipcRenderer.invoke("app:pool-add-key", provider, key, label),
+	poolSetPooled: (provider: string, pooled: boolean): Promise<AgentCallResult> =>
+		ipcRenderer.invoke("app:pool-set-pooled", provider, pooled),
 	openCli: (): Promise<AgentCallResult> => ipcRenderer.invoke("app:open-cli"),
 	addFolder: (path: string): Promise<AgentCallResult> => ipcRenderer.invoke("app:add-folder", path),
 	popupMenu: (x: number, y: number): Promise<AgentCallResult> => ipcRenderer.invoke("app:menu-popup", x, y),
@@ -64,9 +78,15 @@ contextBridge.exposeInMainWorld("smolt", {
 		ipcRenderer.on("speech:progress", (_e, progress) => cb(progress));
 	},
 	stats: (): Promise<AgentCallResult> => ipcRenderer.invoke("app:stats"),
+	starters: (): Promise<AgentCallResult> => ipcRenderer.invoke("app:starters"),
 	diff: (): Promise<AgentCallResult> => ipcRenderer.invoke("app:diff"),
+	diffStats: (): Promise<AgentCallResult> => ipcRenderer.invoke("app:diff-stats"),
+	prReadiness: (): Promise<AgentCallResult> => ipcRenderer.invoke("app:pr-readiness"),
+	prCreate: (draft: boolean): Promise<AgentCallResult> => ipcRenderer.invoke("app:pr-create", draft),
 	permissionMode: (mode?: string): Promise<AgentCallResult> => ipcRenderer.invoke("app:permission-mode", mode),
 	worktrees: (): Promise<AgentCallResult> => ipcRenderer.invoke("app:worktrees"),
+	branches: (): Promise<AgentCallResult> => ipcRenderer.invoke("app:branches"),
+	branchCheckout: (branch: string): Promise<AgentCallResult> => ipcRenderer.invoke("app:branch-checkout", branch),
 	worktreeCreate: (label: string): Promise<AgentCallResult> => ipcRenderer.invoke("app:worktree-create", label),
 	worktreeEnter: (path: string): Promise<AgentCallResult> => ipcRenderer.invoke("app:worktree-enter", path),
 	worktreeRemove: (path: string, force?: boolean): Promise<AgentCallResult> =>
@@ -96,5 +116,16 @@ contextBridge.exposeInMainWorld("smolt", {
 	onAgentExited: (cb: (info: { slotId: number; wasActive: boolean; code: number | null }) => void): void => {
 		ipcRenderer.on("agent:exited", (_e, info) => cb(info));
 	},
+	onTurnDropped: (cb: (info: { sessionPath: string; cwd: string; to: string }) => void): void => {
+		ipcRenderer.on("agent:turn-dropped", (_e, info) => cb(info));
+	},
+	onReloadDeferred: (cb: (info: { sessionPath: string }) => void): void => {
+		ipcRenderer.on("agent:reload-deferred", (_e, info) => cb(info));
+	},
+	onSessionChanged: (cb: (info: { slot: number; path: string }) => void): void => {
+		ipcRenderer.on("session:changed", (_e, info) => cb(info));
+	},
+	webServer: (): Promise<unknown> => ipcRenderer.invoke("app:web-server"),
+	setWebServer: (enabled: boolean): Promise<unknown> => ipcRenderer.invoke("app:web-server-set", enabled),
 	ready: (): void => ipcRenderer.send("renderer:ready"),
 });

@@ -26,7 +26,20 @@ import {
 	waitForRawStdoutBackpressure,
 	writeRawStdout,
 } from "../../core/output-guard.ts";
+import {
+	type AdvisorSettingsUpdate,
+	loadAdvisorSettings,
+	writeAdvisorModel,
+	writeAdvisorSettings,
+} from "../../extensions/advisor/config.ts";
+import { DEFAULT_THINKING as DEFAULT_ADVISOR_THINKING, DEFAULT_REVIEW_EVERY } from "../../extensions/advisor/index.ts";
 import { builtInExtensions } from "../../extensions/index.ts";
+import {
+	DEFAULT_MAX_FINDINGS,
+	loadReviewSettings,
+	type ReviewSettings,
+	saveReviewSettings,
+} from "../../extensions/review/config.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
 import { toJsonEvent } from "../json-event.ts";
@@ -168,6 +181,14 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		select: (title, options, opts) =>
 			createDialogPromise(opts, undefined, { method: "select", title, options, timeout: opts?.timeout }, (r) =>
 				"cancelled" in r && r.cancelled ? undefined : "value" in r ? r.value : undefined,
+			),
+
+		multiselect: (title, options, selected, opts) =>
+			createDialogPromise(
+				opts,
+				undefined,
+				{ method: "multiselect", title, options, selected: selected ?? [], timeout: opts?.timeout },
+				(r) => ("cancelled" in r && r.cancelled ? undefined : "values" in r ? r.values : undefined),
 			),
 
 		confirm: (title, message, opts) =>
@@ -463,7 +484,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			}
 
 			case "new_session": {
-				const options = command.parentSession ? { parentSession: command.parentSession } : undefined;
+				const options =
+					command.parentSession || command.temporary
+						? { parentSession: command.parentSession, temporary: command.temporary }
+						: undefined;
 				const result = await runtimeHost.newSession(options);
 				if (!result.cancelled) {
 					await rebindSession();
@@ -487,6 +511,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					sessionId: session.sessionId,
 					sessionName: session.sessionName,
 					autoCompactionEnabled: session.autoCompactionEnabled,
+					showThroughput: session.settingsManager.getShowThroughput(),
 					messageCount: session.messages.length,
 					pendingMessageCount: session.pendingMessageCount,
 					activeThinkingEntry: session.extensionRunner
@@ -591,6 +616,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				return success(id, "set_auto_compaction");
 			}
 
+			case "set_show_throughput": {
+				session.settingsManager.setShowThroughput(command.enabled);
+				return success(id, "set_show_throughput");
+			}
+
 			// =================================================================
 			// Retry
 			// =================================================================
@@ -598,6 +628,60 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			case "set_auto_retry": {
 				session.setAutoRetryEnabled(command.enabled);
 				return success(id, "set_auto_retry");
+			}
+
+			// =================================================================
+			// Provider sign-in
+			// =================================================================
+
+			case "login": {
+				// The same login the TUI runs, with a client on the other end of
+				// the dialog channel instead of a terminal: selections and codes
+				// come back as dialog answers, the browser step goes out as an
+				// open_url request, and progress lines as notifications.
+				const ui = createExtensionUIContext();
+				const cancelled = (): Error => new Error("Login cancelled");
+				try {
+					const credential = await session.modelRuntime.login(command.provider, command.method, {
+						prompt: async (prompt) => {
+							const opts = { signal: prompt.signal, timeout: DEFAULT_DIALOG_TIMEOUT_MS };
+							if (prompt.type === "select") {
+								const labels = prompt.options.map((option) => option.label);
+								const picked = await ui.select(prompt.message, labels, opts);
+								if (picked === undefined) throw cancelled();
+								return prompt.options[labels.indexOf(picked)]?.id ?? picked;
+							}
+							const value = await ui.input(prompt.message, prompt.placeholder, opts);
+							if (value === undefined) throw cancelled();
+							return value;
+						},
+						notify: (event) => {
+							if (event.type === "auth_url") {
+								output({
+									type: "extension_ui_request",
+									id: crypto.randomUUID(),
+									method: "open_url",
+									url: event.url,
+									instructions: event.instructions,
+								} as RpcExtensionUIRequest);
+							} else if (event.type === "device_code") {
+								output({
+									type: "extension_ui_request",
+									id: crypto.randomUUID(),
+									method: "open_url",
+									url: event.verificationUri,
+									instructions: `Enter the code ${event.userCode} to finish signing in.`,
+								} as RpcExtensionUIRequest);
+								ui.notify(`Enter the code ${event.userCode} at ${event.verificationUri}`, "info");
+							} else if (event.type === "info") {
+								ui.notify(event.message, "info");
+							}
+						},
+					});
+					return success(id, "login", { type: credential.type });
+				} catch (err) {
+					return error(id, "login", err instanceof Error ? err.message : String(err));
+				}
 			}
 
 			// =================================================================
@@ -645,6 +729,179 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				return success(id, "set_extension_enabled");
 			}
 
+			// =================================================================
+			// Advisor
+			// =================================================================
+
+			case "get_advisor_settings": {
+				const settings = loadAdvisorSettings(session.sessionManager.getCwd());
+				return success(id, "get_advisor_settings", {
+					enabled: settings.enabled === true,
+					...(settings.model ? { model: settings.model } : {}),
+					mode: settings.mode ?? "deep",
+					reviewEvery: settings.reviewEvery ?? DEFAULT_REVIEW_EVERY,
+					thinking: settings.thinking ?? DEFAULT_ADVISOR_THINKING,
+					...(settings.tokenBudget !== undefined ? { tokenBudget: settings.tokenBudget } : {}),
+					immuneTurns: settings.immuneTurns ?? 3,
+					syncBacklog: settings.syncBacklog ?? "off",
+				});
+			}
+
+			case "set_advisor_settings": {
+				const requested = command.settings;
+				const update: AdvisorSettingsUpdate = {};
+				if (requested.model !== undefined) {
+					const selector = requested.model?.trim() || undefined;
+					if (selector !== undefined) {
+						const slash = selector.indexOf("/");
+						if (slash <= 0 || slash === selector.length - 1) {
+							return error(id, "set_advisor_settings", `Expected provider/model-id, got: ${selector}`);
+						}
+						const provider = selector.slice(0, slash);
+						const modelId = selector.slice(slash + 1);
+						const known = session.modelRuntime
+							.getAvailableSnapshot()
+							.some((m) => m.provider === provider && m.id === modelId);
+						if (!known) return error(id, "set_advisor_settings", `Model not found: ${selector}`);
+					}
+					update.model = selector ?? null;
+				}
+				if (requested.enabled !== undefined) update.enabled = requested.enabled === true;
+				if (requested.mode !== undefined) {
+					if (requested.mode !== "quick" && requested.mode !== "deep") {
+						return error(id, "set_advisor_settings", `Expected quick or deep, got: ${String(requested.mode)}`);
+					}
+					update.mode = requested.mode;
+				}
+				if (requested.reviewEvery !== undefined) {
+					const every = Math.floor(requested.reviewEvery);
+					if (!Number.isFinite(every) || every < 1) {
+						return error(
+							id,
+							"set_advisor_settings",
+							`Expected a step count of 1 or more, got: ${requested.reviewEvery}`,
+						);
+					}
+					update.reviewEvery = every;
+				}
+				if (requested.thinking !== undefined) {
+					const levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+					if (!levels.includes(requested.thinking)) {
+						return error(id, "set_advisor_settings", `Expected a thinking level, got: ${requested.thinking}`);
+					}
+					update.thinking = requested.thinking as AdvisorSettingsUpdate["thinking"];
+				}
+				if (requested.tokenBudget !== undefined) {
+					if (
+						requested.tokenBudget !== null &&
+						(!Number.isFinite(requested.tokenBudget) || requested.tokenBudget < 0)
+					) {
+						return error(
+							id,
+							"set_advisor_settings",
+							`Expected a token budget of 0 or more, got: ${requested.tokenBudget}`,
+						);
+					}
+					update.tokenBudget =
+						requested.tokenBudget === null || requested.tokenBudget === 0
+							? null
+							: Math.floor(requested.tokenBudget);
+				}
+				if (requested.immuneTurns !== undefined) {
+					const turns = Math.floor(requested.immuneTurns);
+					if (!Number.isFinite(turns) || turns < 0) {
+						return error(
+							id,
+							"set_advisor_settings",
+							`Expected a turn count of 0 or more, got: ${requested.immuneTurns}`,
+						);
+					}
+					update.immuneTurns = turns;
+				}
+				if (requested.syncBacklog !== undefined) {
+					const backlog = requested.syncBacklog;
+					if (backlog !== "off" && backlog !== 1 && backlog !== 3 && backlog !== 5) {
+						return error(id, "set_advisor_settings", `Expected off, 1, 3 or 5, got: ${String(backlog)}`);
+					}
+					update.syncBacklog = backlog;
+				}
+				writeAdvisorSettings(update);
+				return success(id, "set_advisor_settings");
+			}
+
+			case "set_advisor_model": {
+				const selector = command.model?.trim() || undefined;
+				if (selector !== undefined) {
+					const slash = selector.indexOf("/");
+					if (slash <= 0 || slash === selector.length - 1) {
+						return error(id, "set_advisor_model", `Expected provider/model-id, got: ${selector}`);
+					}
+					const provider = selector.slice(0, slash);
+					const modelId = selector.slice(slash + 1);
+					const known = session.modelRuntime
+						.getAvailableSnapshot()
+						.some((m) => m.provider === provider && m.id === modelId);
+					if (!known) {
+						return error(id, "set_advisor_model", `Model not found: ${selector}`);
+					}
+				}
+				writeAdvisorModel(selector);
+				return success(id, "set_advisor_model");
+			}
+
+			// =================================================================
+			// Review
+			// =================================================================
+
+			case "get_review_settings": {
+				const settings = loadReviewSettings(process.cwd());
+				return success(id, "get_review_settings", {
+					...(settings.model ? { model: settings.model } : {}),
+					maxFindings: settings.maxFindings ?? DEFAULT_MAX_FINDINGS,
+					watchRepos: settings.watchRepos ?? [],
+					watch: settings.watch === true,
+					autoFix: settings.autoFix === true,
+				});
+			}
+
+			case "set_review_settings": {
+				const update: ReviewSettings = {};
+				if (command.settings.model !== undefined) {
+					const selector = command.settings.model?.trim() || undefined;
+					if (selector !== undefined) {
+						const slash = selector.indexOf("/");
+						if (slash <= 0 || slash === selector.length - 1) {
+							return error(id, "set_review_settings", `Expected provider/model-id, got: ${selector}`);
+						}
+						const provider = selector.slice(0, slash);
+						const modelId = selector.slice(slash + 1);
+						const known = session.modelRuntime
+							.getAvailableSnapshot()
+							.some((m) => m.provider === provider && m.id === modelId);
+						if (!known) {
+							return error(id, "set_review_settings", `Model not found: ${selector}`);
+						}
+					}
+					update.model = selector;
+				}
+				if (command.settings.maxFindings !== undefined) {
+					const max = Math.floor(command.settings.maxFindings);
+					if (!Number.isFinite(max) || max < 1) {
+						return error(
+							id,
+							"set_review_settings",
+							`Expected a findings cap of 1 or more, got: ${command.settings.maxFindings}`,
+						);
+					}
+					update.maxFindings = max;
+				}
+				if (command.settings.watchRepos !== undefined) update.watchRepos = command.settings.watchRepos;
+				if (command.settings.watch !== undefined) update.watch = command.settings.watch;
+				if (command.settings.autoFix !== undefined) update.autoFix = command.settings.autoFix;
+				saveReviewSettings(update);
+				return success(id, "set_review_settings");
+			}
+
 			case "abort_retry": {
 				session.abortRetry();
 				return success(id, "abort_retry");
@@ -689,6 +946,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			case "get_session_stats": {
 				const stats = session.getSessionStats();
 				return success(id, "get_session_stats", stats);
+			}
+
+			case "get_provider_usage": {
+				const usage = await session.getProviderUsage();
+				return success(id, "get_provider_usage", usage ?? null);
 			}
 
 			case "export_html": {

@@ -79,6 +79,19 @@ export class AgentSessionRuntime {
 	private readonly createRuntime: CreateAgentSessionRuntimeFactory;
 	private _diagnostics: AgentSessionRuntimeDiagnostic[];
 	private _modelFallbackMessage?: string;
+	/**
+	 * The session in view is a temporary chat: in memory because it was asked
+	 * for, not because the whole process runs without sessions.
+	 */
+	private temporaryChat = false;
+	/**
+	 * Whether a plain new chat is written to disk, and where. Read off the
+	 * session in view, except across a temporary chat: that one has no
+	 * directory and is in memory by request, so the plain new chat after it
+	 * goes back to disk the way the chat before it did. Without this, one
+	 * temporary chat made every chat after it temporary too.
+	 */
+	private persistence: { persist: boolean; sessionDir?: string } | undefined;
 
 	constructor(
 		_session: AgentSession,
@@ -178,6 +191,9 @@ export class AgentSessionRuntime {
 	}
 
 	private apply(result: CreateAgentSessionRuntimeResult): void {
+		// Whatever replaces the session in view is not a temporary chat unless
+		// newSession says so after this; a switch or fork lands on a real one.
+		this.temporaryChat = false;
 		this._session = result.session;
 		this._services = result.services;
 		this._diagnostics = result.diagnostics;
@@ -225,6 +241,8 @@ export class AgentSessionRuntime {
 
 	async newSession(options?: {
 		parentSession?: string;
+		/** Start an in-memory session: never written to disk, invisible to session lists and search. */
+		temporary?: boolean;
 		setup?: (sessionManager: SessionManager) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	}): Promise<{ cancelled: boolean }> {
@@ -234,10 +252,17 @@ export class AgentSessionRuntime {
 		}
 
 		const previousSessionFile = this.session.sessionFile;
-		const sessionDir = this.session.sessionManager.getSessionDir();
-		const sessionManager = this.session.sessionManager.isPersisted()
-			? SessionManager.create(this.cwd, sessionDir)
-			: SessionManager.inMemory(this.cwd);
+		const current = this.session.sessionManager;
+		if (!this.temporaryChat) {
+			this.persistence = current.isPersisted()
+				? { persist: true, sessionDir: current.getSessionDir() }
+				: { persist: false };
+		}
+		const temporary = options?.temporary === true;
+		const sessionManager =
+			temporary || this.persistence?.persist !== true
+				? SessionManager.inMemory(this.cwd)
+				: SessionManager.create(this.cwd, this.persistence.sessionDir);
 		if (options?.parentSession) {
 			sessionManager.newSession({ parentSession: options.parentSession });
 		}
@@ -251,6 +276,7 @@ export class AgentSessionRuntime {
 				sessionStartEvent: { type: "session_start", reason: "new", previousSessionFile },
 			}),
 		);
+		this.temporaryChat = temporary;
 		if (options?.setup) {
 			await options.setup(this.session.sessionManager);
 			this.session.agent.state.messages = this.session.sessionManager.buildSessionContext().messages;

@@ -1,5 +1,16 @@
 import { describe, expect, test } from "vitest";
-import { attributeChanges, changedBetween, classifyToolCall, parseDiff, toGitPath } from "../src/main/diff.ts";
+import {
+	additionHunk,
+	attributeChanges,
+	baseBranchAmong,
+	changedBetween,
+	classifyToolCall,
+	countLines,
+	parseDiff,
+	parseNumstat,
+	toGitPath,
+	webUrlOf,
+} from "../src/main/diff.ts";
 
 /**
  * Splitting `git diff` output into per-file entries for the changes pane.
@@ -203,6 +214,21 @@ describe("classifyToolCall", () => {
 	});
 });
 
+describe("webUrlOf", () => {
+	test("turns an ssh remote into its browsable form", () => {
+		expect(webUrlOf("git@github.com:reghope/smolt.git")).toBe("https://github.com/reghope/smolt");
+	});
+
+	test("keeps an https remote, without the .git suffix", () => {
+		expect(webUrlOf("https://github.com/reghope/smolt.git")).toBe("https://github.com/reghope/smolt");
+		expect(webUrlOf("https://github.com/reghope/smolt\n")).toBe("https://github.com/reghope/smolt");
+	});
+
+	test("declines a remote it cannot turn into a URL", () => {
+		expect(webUrlOf("/srv/git/local.git")).toBeUndefined();
+	});
+});
+
 describe("toGitPath", () => {
 	test("resolves relative tool paths against the cwd and reports them from the repo root", () => {
 		expect(toGitPath("src/a.ts", "/repo", "/repo")).toBe("src/a.ts");
@@ -211,5 +237,68 @@ describe("toGitPath", () => {
 
 	test("normalises separators to git's forward slashes", () => {
 		expect(toGitPath("src\\deep\\a.ts", "/repo", "/repo")).toBe("src/deep/a.ts");
+	});
+});
+
+describe("countLines", () => {
+	test("counts newline-terminated lines", () => {
+		expect(countLines(Buffer.from("a\nb\nc\n"))).toBe(3);
+	});
+
+	test("a last line without a newline still counts, as git counts it", () => {
+		expect(countLines(Buffer.from("a\nb\nc"))).toBe(3);
+	});
+
+	test("an empty file has no lines", () => {
+		expect(countLines(Buffer.from(""))).toBe(0);
+	});
+
+	test("a NUL near the start means binary, which has no lines to count", () => {
+		expect(countLines(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0a, 0x00, 0x0a]))).toBeUndefined();
+	});
+});
+
+describe("additionHunk", () => {
+	test("renders a new file as one hunk of added lines", () => {
+		expect(additionHunk("a\nb\n")).toBe("@@ -0,0 +1,2 @@\n+a\n+b\n");
+	});
+
+	test("says when the file has no newline at its end", () => {
+		expect(additionHunk("a\nb")).toBe("@@ -0,0 +1,2 @@\n+a\n+b\n\\ No newline at end of file\n");
+	});
+
+	test("an empty file has no hunk", () => {
+		expect(additionHunk("")).toBe("");
+	});
+});
+
+describe("parseNumstat", () => {
+	test("totals lines and files, treating a binary file as changed without lines", () => {
+		const raw = "12\t3\tsrc/a.ts\n-\t-\timage.png\n0\t0\told.ts => new.ts\n";
+		expect(parseNumstat(raw)).toEqual({ changed: 3, added: 12, removed: 3 });
+	});
+
+	test("an empty diff totals nothing", () => {
+		expect(parseNumstat("")).toEqual({ changed: 0, added: 0, removed: 0 });
+	});
+});
+
+describe("baseBranchAmong", () => {
+	test("prefers the remote's own default", () => {
+		const listing = "origin/HEAD\torigin/develop\norigin/main\t\nmain\t\n";
+		expect(baseBranchAmong(listing, "feature")).toBe("origin/develop");
+	});
+
+	test("falls back through the usual names, remote first", () => {
+		expect(baseBranchAmong("main\t\norigin/master\t\n", "feature")).toBe("origin/master");
+		expect(baseBranchAmong("main\t\n", "feature")).toBe("main");
+	});
+
+	test("a branch is never its own base", () => {
+		expect(baseBranchAmong("origin/main\t\nmain\t\n", "main")).toBeUndefined();
+	});
+
+	test("nothing listed means no base", () => {
+		expect(baseBranchAmong("", "feature")).toBeUndefined();
 	});
 });

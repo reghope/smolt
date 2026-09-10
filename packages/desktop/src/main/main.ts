@@ -1,27 +1,49 @@
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, session, shell, systemPreferences } from "electron";
+import lockfile from "proper-lockfile";
+import {
+	appendPoolCredential,
+	parsePoolData,
+	relabelPoolCredential,
+	removePoolCredential,
+	setProviderPooled,
+} from "../../../coding-agent/src/extensions/pool/model.ts";
 import { AgentBridge, findCliPath } from "./agent-bridge.ts";
 import { pendingPermissionRequests, requestPid, watchPermissionRequests, writePermissionReply } from "./approvals.ts";
+import { createChatFolder, needsChatFolder, sweepEmptyChatFolders } from "./chat-folders.ts";
 import { ensureCliShim } from "./cli-shim.ts";
 import {
 	captureDiffBaseline,
 	changedBetween,
 	classifyToolCall,
 	collectDiff,
+	collectDiffStats,
+	createPullRequest,
 	type DiffBaseline,
+	prReadiness,
+	remoteWebUrl,
 	toGitPath,
 } from "./diff.ts";
 import { transformersEntry } from "./embeddings-module.ts";
 import { refreshIconCacheAfterUpdate } from "./icon-cache.ts";
 import { fetchLinkPreview } from "./link-preview.ts";
-import { listSessions, searchSessions } from "./sessions.ts";
+import { searchProjectFiles } from "./project-files.ts";
+import { listSessions, searchSessions, sessionCwd } from "./sessions.ts";
+import { chooseSlotForSession, type SlotChoice } from "./slots.ts";
 import { ensureModel, isModelCached, speechStatus, stopSpeech, transcribeSamples } from "./speech.ts";
+import { makeCliRunner, suggestStarters } from "./starters.ts";
 import { collectStats } from "./stats.ts";
 import { checkNow, installUpdate, startUpdates, updateState } from "./updates.ts";
-import { createWorktree, listWorktrees, removeWorktree, repoRoot } from "./worktrees.ts";
+import { tapIpc, WebServer } from "./web-server.ts";
+import { checkoutBranch, createWorktree, listBranches, listWorktrees, removeWorktree, repoRoot } from "./worktrees.ts";
+
+// Before any handler registers: the web server answers browsers with the
+// same handlers the window gets, and this is how it learns them.
+tapIpc();
 
 const SMOKE = process.env.SMOLT_DESKTOP_SMOKE === "1";
 
@@ -115,6 +137,16 @@ interface AgentSlot {
 	/** Stable identity, so a forwarded event names the agent it came from. */
 	id: number;
 	bridge: AgentBridge;
+	/**
+	 * The folder this agent is rooted in, and with it the chat's project.
+	 *
+	 * A chat belongs to the folder it was started in and stays there: the
+	 * directory used to be one app-wide value, so opening another project —
+	 * or a chat settling into a folder of its own — re-rooted every agent at
+	 * once and killed whatever the others were in the middle of. Only an
+	 * explicit move of the chat on screen changes this now.
+	 */
+	cwd: string;
 	/** Session file this agent currently holds; "" until first known. */
 	sessionPath: string;
 	busy: boolean;
@@ -124,6 +156,16 @@ interface AgentSlot {
 	turnWrote: Set<string>;
 	/** The running turn used bash or another tool that can write anywhere. */
 	turnSwept: boolean;
+	/**
+	 * The agent currently holds a temporary chat: in-memory on the agent
+	 * side, never written to disk, never named into a chat folder.
+	 */
+	temporary: boolean;
+	/**
+	 * A chat that has never been prompted and was not switched into from the
+	 * session list, so it is still free to be moved into a folder of its own.
+	 */
+	fresh: boolean;
 }
 /** How much of a stored transcript the window is asking for. */
 interface SessionWindow {
@@ -185,6 +227,10 @@ const STRIPPED_AGENT_VARS = [
 const embeddingsModule = transformersEntry();
 const agentEnv = (extra: Record<string, string>): Record<string, string | undefined> => ({
 	...Object.fromEntries(STRIPPED_AGENT_VARS.map((name) => [name, undefined])),
+	// Only providers set up in the app (or by the CLI's /login) exist to a
+	// desktop agent: a key left in the shell by some other tool must not put
+	// hundreds of unasked-for models in the list.
+	SMOLT_STORED_CREDENTIALS_ONLY: "1",
 	...(app.isPackaged ? { ELECTRON_RUN_AS_NODE: "1", SMOLT_PACKAGE_DIR: join(process.resourcesPath, "agent") } : {}),
 	// The agents embed past sessions with the app's own copy of transformers.js.
 	...(embeddingsModule ? { SMOLT_EMBEDDINGS_MODULE: embeddingsModule } : {}),
@@ -264,14 +310,84 @@ function syncTelegramHost(): void {
 }
 
 /** The directory the main agent is running in; a worktree once isolated. */
-function projectFile(): string {
+/**
+ * The agent directory, computed the way every other main-process path is.
+ * The coding-agent has its own resolver, but inside the Electron bundle it
+ * once produced a raw `"path" argument must be of type string` throw, so the
+ * desktop keeps its own.
+ */
+function agentDir(): string {
 	const envDir = process.env.SMOLT_CODING_AGENT_DIR;
-	const base = envDir?.trim()
+	return envDir?.trim()
 		? envDir.startsWith("~")
 			? join(homedir(), envDir.slice(1))
 			: envDir
 		: join(homedir(), ".smolt", "agent");
-	return join(base, "desktop-project");
+}
+
+function projectFile(): string {
+	return join(agentDir(), "desktop-project");
+}
+
+/**
+ * Edit one of the agent's credential files under the same lock the agent
+ * takes, so a settings change never races a pool write mid-turn.
+ *
+ * The desktop does not use the agent's own stores for this: their module
+ * graph reaches the config module, which reads `import.meta.url` at load
+ * time and throws inside this CommonJS bundle. The files are plain JSON,
+ * created 0600 like the agent creates them.
+ */
+function editLockedJson(path: string, edit: (current: string | undefined) => string): void {
+	const dir = dirname(path);
+	if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+	if (!existsSync(path)) writeFileSync(path, "{}", { encoding: "utf-8", mode: 0o600 });
+	const release = acquireLockSync(path);
+	try {
+		const current = readFileSync(path, "utf-8");
+		writeFileSync(path, edit(current), { encoding: "utf-8", mode: 0o600 });
+	} finally {
+		release();
+	}
+}
+
+/**
+ * Take the file lock, waiting out a holder for a moment. The sync API has no
+ * retry option of its own, so this is the agent's loop: a few short waits
+ * on ELOCKED, anything else thrown straight through.
+ */
+function acquireLockSync(path: string): () => void {
+	const maxAttempts = 10;
+	const delayMs = 20;
+	for (let attempt = 1; ; attempt += 1) {
+		try {
+			return lockfile.lockSync(path, { realpath: false });
+		} catch (error) {
+			const code =
+				typeof error === "object" && error !== null && "code" in error
+					? String((error as { code?: unknown }).code)
+					: undefined;
+			if (code !== "ELOCKED" || attempt === maxAttempts) throw error;
+			const start = Date.now();
+			while (Date.now() - start < delayMs) {
+				// A synchronous wait: the caller is a one-shot IPC handler.
+			}
+		}
+	}
+}
+
+/** Change the pool file in place, through the pool's own pure operations. */
+function editPool(edit: (current: ReturnType<typeof parsePoolData>) => ReturnType<typeof parsePoolData>): void {
+	editLockedJson(join(agentDir(), "pool.json"), (current) => JSON.stringify(edit(parsePoolData(current)), null, 2));
+}
+
+/** Change the auth file in place: one credential set or cleared, the rest untouched. */
+function editAuth(edit: (current: Record<string, unknown>) => Record<string, unknown>): void {
+	editLockedJson(join(agentDir(), "auth.json"), (current) => {
+		const parsed: unknown = current && current.trim() !== "" ? JSON.parse(current.replace(/^﻿/, "")) : {};
+		const data = parsed !== null && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+		return JSON.stringify(edit(data), null, 2);
+	});
 }
 
 /**
@@ -347,21 +463,58 @@ function rememberProject(next: string[], leaving: string[]): void {
 }
 
 /**
- * Where the agent runs with no folder open.
+ * Where chats with no folder open keep their work.
  *
- * It needs some directory to start in, and it must not be one of the reader's:
- * with nothing selected the agent has no business writing anywhere, and the
- * note below tells it to ask first.
+ * One folder per chat lives under this, dated and named after the message
+ * that opened it. It sits in the reader's documents on purpose: what a chat
+ * makes is theirs, it has to be findable a week later, and the old shared
+ * hidden directory was neither.
  */
-function scratchDir(): string {
-	const dir = join(dirname(projectFile()), "scratch");
-	mkdirSync(dir, { recursive: true });
-	return dir;
+function chatsRoot(): string {
+	// The documents folder beside the home directory, not whatever the OS
+	// reports: on Windows that one is often redirected into a synced cloud
+	// drive, and a chat's working files have no business being uploaded to a
+	// company drive, one save at a time, as the agent writes them.
+	const root = join(homedir(), "Documents", "smolt");
+	mkdirSync(root, { recursive: true });
+	return root;
 }
 
-/** The extra system prompt this agent should start with, if any. */
-function agentNotes(): string[] | undefined {
-	if (projectFolders.length === 0) return ["--append-system-prompt", NO_PROJECT_NOTE];
+/**
+ * The chat folder the agent is actually running in, while no project folder
+ * is open. Null until some chat has claimed one.
+ *
+ * It outlives the chat that made it, because the agent stays there until a
+ * restart moves it: between chats this is still where the working directory
+ * is, and saying otherwise would have the window describe a directory the
+ * agent is not in.
+ */
+let chatFolder: string | null = null;
+
+/**
+ * Whether the chat on screen has claimed a folder of its own.
+ *
+ * Separate from the one above: a new chat has claimed nothing yet, but the
+ * agent is still standing in the last chat's folder until its first message
+ * names a new one.
+ */
+let chatSettled = false;
+
+/**
+ * The extra system prompt an agent rooted at `cwd` should start with, if any.
+ *
+ * Taken from the folder the agent is actually being started in rather than
+ * from whatever the window is showing: agents now sit in different folders at
+ * the same time, and one told about another chat's folder would offer to
+ * write there.
+ */
+function agentNotes(cwd: string): string[] | undefined {
+	if (projectFolders.length === 0) {
+		// A chat working in a folder of its own is told so by name; one still
+		// standing in the shared scratch root has nowhere the reader chose.
+		const own = cwd !== "" && cwd !== chatsRoot() && cwd.startsWith(chatsRoot());
+		return ["--append-system-prompt", own ? chatFolderNote(cwd) : NO_PROJECT_NOTE];
+	}
 	const extra = projectFolders.slice(1);
 	return extra.length > 0 ? ["--append-system-prompt", extraFoldersNote(extra)] : undefined;
 }
@@ -375,7 +528,16 @@ function extraFoldersNote(extra: string[]): string {
 	);
 }
 
-/** Told to the agent whenever no folder is open. */
+/** Told to the agent once this chat has a folder of its own. */
+function chatFolderNote(dir: string): string {
+	return (
+		`No project folder is open, so this chat has one of its own: ${dir}, which is already the working ` +
+		"directory and is empty. Put anything you create there, and say where a file landed so the user can " +
+		"find it. Ask first only before writing somewhere else."
+	);
+}
+
+/** Told to the agent when no folder is open and this chat has not begun. */
 const NO_PROJECT_NOTE =
 	"No project folder is open in this app, so there is no directory the user has chosen to work in. " +
 	"Answer questions and reason freely, but before creating, writing or moving any file, ask the user " +
@@ -434,8 +596,34 @@ const requestMeta = (id: string): { slot?: number; session?: string } => {
  * used to start in the process working directory instead, so the opening
  * chat of every launch ran somewhere other than the folder on screen.
  */
-const homeCwd = (): string => process.env.SMOLT_DESKTOP_CWD || projectFolders[0] || scratchDir();
+const homeCwd = (): string => process.env.SMOLT_DESKTOP_CWD || projectFolders[0] || chatFolder || chatsRoot();
+/**
+ * The folder of the chat on screen — a mirror of the active slot's own cwd,
+ * kept here because everything a directory answers for (the diff, the stats,
+ * the file picker, the repo bar) is asked of the module rather than of the
+ * slot. It follows the chat, so opening a chat from another project moves
+ * all of that with it; it is no longer something a chat can be moved *by*.
+ */
 let activeCwd = homeCwd();
+
+/**
+ * A system terminal opened in a folder, detached from this process.
+ *
+ * Each platform has one way in that needs nothing installed: `start` on
+ * Windows, the Terminal app on macOS, and the Debian alternative on Linux,
+ * which is what a desktop's chosen terminal is registered as.
+ */
+function openTerminalAt(dir: string): void {
+	if (process.platform === "win32") {
+		// `/D` as well as cwd: the new console takes its directory from the switch,
+		// and the empty title is what keeps `start` from reading the path as one.
+		spawn("cmd.exe", ["/c", "start", "", "/D", dir, "cmd.exe", "/K"], { cwd: dir, detached: true }).unref();
+	} else if (process.platform === "darwin") {
+		spawn("open", ["-a", "Terminal", dir], { detached: true }).unref();
+	} else {
+		spawn("x-terminal-emulator", [], { cwd: dir, detached: true }).unref();
+	}
+}
 /**
  * The tree as this chat found it. Anything already modified when a chat opens
  * belongs to whoever made it, not to the chat, so the pane and the composer
@@ -666,18 +854,65 @@ app.whenReady().then(async () => {
 	// CLI this build shipped with.
 	ensureCliShim();
 	refreshIconCacheAfterUpdate();
+	// Chats that ran without a project folder and wrote nothing leave an empty
+	// folder behind. Nothing is standing in them at startup, so this is when
+	// they can go.
+	try {
+		sweepEmptyChatFolders(chatsRoot());
+	} catch {
+		// A documents folder that cannot be read is not worth a failed launch.
+	}
 	const win = createWindow();
+
+	// The app in a browser, when the setting says so: this process, these
+	// chats — a browser is one more window on the same app.
+	const webServer = new WebServer({
+		dist: __dirname,
+		dataDir: join(app.getPath("userData"), "web-server"),
+		settingsPath: join(app.getPath("userData"), "web-server.json"),
+	});
+	webServer.mirror(win);
+	ipcMain.handle("app:web-server", () => webServer.state());
+	ipcMain.handle("app:web-server-set", async (_event, enabled: unknown) => {
+		try {
+			return await webServer.setEnabled(enabled === true);
+		} catch {
+			// The failure is in the state's `error`; the switch shows it.
+			return webServer.state();
+		}
+	});
+	if (webServer.settings().enabled) {
+		webServer.start().catch((error: unknown) => {
+			console.error(`web server: ${error instanceof Error ? error.message : String(error)}`);
+		});
+	}
 
 	let active: AgentSlot = {
 		id: ++slotSeq,
 		bridge,
+		cwd: activeCwd,
 		sessionPath: "",
 		busy: false,
 		turnCapture: null,
 		turnWrote: new Set(),
 		turnSwept: false,
+		temporary: false,
+		fresh: true,
 	};
 	slots.push(active);
+
+	/**
+	 * Put the window on a slot, and the app's directory with it.
+	 *
+	 * The only place `active` is assigned. Every folder-shaped answer — the
+	 * diff, the changed-files bar, the stats, the file picker, `git` — reads
+	 * `activeCwd`, so the two moving apart is what would have one chat showing
+	 * another project's working tree.
+	 */
+	const setActive = (slot: AgentSlot): void => {
+		active = slot;
+		activeCwd = slot.cwd;
+	};
 
 	/**
 	 * A session change in flight.
@@ -707,6 +942,18 @@ app.whenReady().then(async () => {
 	 */
 	const announceActive = (): void => {
 		if (!win.isDestroyed()) win.webContents.send("agent:attached", active.id);
+	};
+
+	/**
+	 * Name the chat the app has moved to, for every window on it. The
+	 * window that asked for the move already shows it; a browser tab on the
+	 * in-app web server, or the desktop when the browser did the moving,
+	 * follows — the same chat on every screen, not one per screen.
+	 */
+	const announceSession = (): void => {
+		if (!win.isDestroyed()) {
+			win.webContents.send("session:changed", { slot: active.id, path: active.sessionPath });
+		}
 	};
 
 	const refreshSlotPath = async (slot: AgentSlot): Promise<void> => {
@@ -749,10 +996,21 @@ app.whenReady().then(async () => {
 				if (slot === active) ensureSpare();
 				// The session file appears with the first message, so the path
 				// recorded at spawn can be empty or stale; re-read it as a turn
-				// begins, or the sidebar's busy dot points at nothing.
+				// begins, or the sidebar's busy dot points at nothing. A brand-new
+				// chat can still be nameless at that instant, so look again a
+				// little later and say so again if the answer changed.
 				void refreshSlotPath(slot).then(broadcastBusy);
 				broadcastBusy();
-				slot.turnCapture = captureDiffBaseline(activeCwd);
+				for (const delay of [1500, 4000]) {
+					setTimeout(() => {
+						if (!slot.busy) return;
+						const before = slot.sessionPath;
+						void refreshSlotPath(slot).then(() => {
+							if (slot.sessionPath !== before) broadcastBusy();
+						});
+					}, delay);
+				}
+				slot.turnCapture = captureDiffBaseline(slot.cwd);
 				slot.turnWrote = new Set();
 				slot.turnSwept = false;
 			} else if (type === "message_update") {
@@ -762,7 +1020,7 @@ app.whenReady().then(async () => {
 					delta?.type === "toolcall_end" ? (delta.toolCall as { name?: unknown; arguments?: unknown }) : null;
 				if (call) {
 					const { target, sweeping } = classifyToolCall(String(call.name ?? ""), call.arguments);
-					if (target !== undefined) slot.turnWrote.add(toGitPath(target, activeCwd, repoRootPath));
+					if (target !== undefined) slot.turnWrote.add(toGitPath(target, slot.cwd, repoRootPath));
 					if (sweeping) slot.turnSwept = true;
 				}
 			} else if (type === "agent_settled") {
@@ -783,7 +1041,7 @@ app.whenReady().then(async () => {
 						if (!swept) return;
 						if (!before) await baselineReady;
 						const start = before ? await before : diffBaseline;
-						const end = await captureDiffBaseline(activeCwd);
+						const end = await captureDiffBaseline(slot.cwd);
 						for (const path of changedBetween(start, end)) bucket.add(path);
 					};
 					attributionReady = attributionReady.then(settle, settle);
@@ -794,6 +1052,14 @@ app.whenReady().then(async () => {
 			// hangs that agent's turn: it must reach the window whichever slot
 			// asked and whatever move is in flight, unlike ordinary events,
 			// which belong to the chat on screen.
+			// A sign-in's browser step: the agent names the page, the window
+			// opens it. Only web URLs, so a malformed flow cannot launch anything
+			// else.
+			if (type === "extension_ui_request" && (event as { method?: unknown }).method === "open_url") {
+				const url = String((event as { url?: unknown }).url ?? "");
+				if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
+				return;
+			}
 			if (type === "extension_ui_request" && isDialogRequest(event)) {
 				win.webContents.send("agent:event", event, slot.id);
 				return;
@@ -808,22 +1074,32 @@ app.whenReady().then(async () => {
 	};
 	wireSlot(active);
 
-	const spawnSlot = async (): Promise<AgentSlot> => {
+	/**
+	 * A new agent rooted in a folder — the chat on screen's by default, and
+	 * another project's when a chat from there is being opened.
+	 */
+	const spawnSlot = async (cwd: string = activeCwd): Promise<AgentSlot> => {
 		const slot: AgentSlot = {
 			id: ++slotSeq,
 			bridge: new AgentBridge(),
+			cwd,
 			sessionPath: "",
 			busy: false,
 			turnCapture: null,
 			turnWrote: new Set(),
 			turnSwept: false,
+			temporary: false,
+			fresh: true,
 		};
 		wireSlot(slot);
 		await slot.bridge.start(
 			{
-				cwd: activeCwd,
+				cwd,
 				provider: process.env.SMOLT_DESKTOP_PROVIDER,
 				model: process.env.SMOLT_DESKTOP_MODEL,
+				// The folder note belongs at spawn as much as at a restart: a
+				// spare started without it answered as if no folder were open.
+				args: agentNotes(cwd),
 				env: agentEnv(PANE_ENV),
 				execPath: agentExecPath(),
 				onDiagnostic: crashLog,
@@ -833,6 +1109,54 @@ app.whenReady().then(async () => {
 		noteAgentPid(slot.bridge);
 		slots.push(slot);
 		return slot;
+	};
+
+	/**
+	 * The folder a stored chat belongs to.
+	 *
+	 * Its own opening record, which is where it actually ran; the folder on
+	 * screen only stands in for a chat too new to have written one yet. A
+	 * folder that has since been deleted is not somewhere an agent can start,
+	 * so that falls back too.
+	 */
+	const cwdForSession = (path: string): string => {
+		const recorded = sessionCwd(path);
+		return recorded !== "" && existsSync(recorded) ? recorded : activeCwd;
+	};
+
+	/**
+	 * Bring the window's idea of the open project into line with the chat it
+	 * has landed on.
+	 *
+	 * A chat carries its project, so opening one from elsewhere moves the
+	 * window there: the folder chip, the folders a new chat would start in,
+	 * and what the app reopens with next launch all name the same place.
+	 * Without this the directory followed the chat while the folder bar went
+	 * on naming the project the reader had left.
+	 *
+	 * A chat working in a folder of its own is not a project and is not
+	 * promoted to one; the window simply has no folder open, which is the
+	 * state that chat was started in.
+	 */
+	const followActiveFolder = (): void => {
+		// A directory forced from outside is not the window's to change.
+		if (process.env.SMOLT_DESKTOP_CWD) return;
+		const cwd = active.cwd;
+		if (cwd === "") return;
+		if (cwd !== chatsRoot() && cwd.startsWith(chatsRoot())) {
+			if (projectFolders.length > 0) {
+				rememberProject([], projectFolders);
+				projectFolders = [];
+			}
+			chatFolder = cwd;
+			chatSettled = true;
+			return;
+		}
+		// Already the open project — and its extra folders stay with it.
+		if (projectFolders[0] === cwd) return;
+		rememberProject([cwd], projectFolders);
+		projectFolders = [cwd];
+		chatSettled = false;
 	};
 
 	/** Idle, inactive agents beyond the cap are stopped quietly. */
@@ -862,8 +1186,11 @@ app.whenReady().then(async () => {
 	const ensureSpare = (): void => {
 		if (warming !== null) return;
 		if (slots.length >= MAX_SLOTS) return;
-		if (slots.some((slot) => slot !== active && !slot.busy)) return;
-		warming = spawnSlot();
+		// A spare only saves the wait for a chat in the same folder: an agent
+		// is rooted where it started, so one warmed in another project cannot
+		// take this one's chats.
+		if (slots.some((slot) => slot !== active && !slot.busy && slot.cwd === activeCwd)) return;
+		warming = spawnSlot(activeCwd);
 		void warming
 			.catch(() => undefined)
 			.finally(() => {
@@ -871,25 +1198,89 @@ app.whenReady().then(async () => {
 			});
 	};
 
+	/**
+	 * Give a chat with no project folder open one of its own, in the moment
+	 * between its first message being typed and being answered.
+	 *
+	 * The folder is named after that message, so it cannot be made any
+	 * earlier, and an agent's working directory is fixed when it starts — so
+	 * the agent is restarted into it. Only a chat that has not begun is moved:
+	 * a chat with history would be stranded away from the folder it has been
+	 * writing in. If an agent is mid-turn the move waits for another chat, as
+	 * a restart would take that turn down with it.
+	 */
+	const settleChatFolder = async (first: unknown): Promise<void> => {
+		// A temporary chat names no folder of its own: its whole point is that
+		// nothing about it lands on disk, and the agent running in the chats
+		// root (or wherever it was opened) already answers where it works.
+		if (active.temporary) return;
+		const move = needsChatFolder({
+			forcedCwd: Boolean(process.env.SMOLT_DESKTOP_CWD),
+			hasProject: projectFolders.length > 0,
+			settled: chatSettled,
+			fresh: active.fresh,
+			// This chat's own agent. It used to be any agent at all, because a
+			// move restarted every one of them; now it moves only this chat, so
+			// another chat working elsewhere is no reason to leave this one
+			// without a folder of its own.
+			busy: active.busy,
+		});
+		if (!move) return;
+		const previous = chatFolder;
+		try {
+			chatFolder = createChatFolder(chatsRoot(), new Date(), typeof first === "string" ? first : "");
+			chatSettled = true;
+			await restartAgentIn(chatFolder);
+		} catch (err) {
+			// No folder of its own is a poor answer but a working one: the agent
+			// stays where it is, and its note still tells it to ask first.
+			crashLog(`chat folder: ${err instanceof Error ? err.message : String(err)}`);
+			chatFolder = previous;
+			chatSettled = false;
+		}
+	};
+
 	const switchToPath = async (path: string): Promise<unknown> => {
-		// A slot already holding the target — running or not — just becomes the
-		// view again; that is how a background turn is picked back up live.
-		let slot = slots.find((candidate) => candidate.sessionPath === path);
-		if (!slot) {
-			if (!active.busy) {
+		// The chat opens in the folder it ran in, not the one on screen: an
+		// agent's directory is fixed when it starts, so a chat from another
+		// project needs an agent rooted there rather than this one moved.
+		const cwd = cwdForSession(path);
+		const choose = (): SlotChoice =>
+			chooseSlotForSession({
+				slots: slots.map(({ id, cwd: at, sessionPath, busy }) => ({ id, cwd: at, sessionPath, busy })),
+				activeId: active.id,
+				sessionPath: path,
+				cwd,
+			});
+		let choice = choose();
+		// An agent still starting may be exactly the spare this needs; wait for
+		// it before paying for another cold start.
+		if (choice.kind === "spawn" && warming !== null) {
+			await warming.catch(() => undefined);
+			choice = choose();
+		}
+		const byId = (id: number): AgentSlot | undefined => slots.find((candidate) => candidate.id === id);
+		let slot: AgentSlot;
+		if (choice.kind === "held") {
+			// Already open here, running or not; nothing to ask of the agent.
+			slot = byId(choice.id) ?? active;
+		} else {
+			if (choice.kind === "active") {
 				const value = await active.bridge.call("switchSession", [path]);
 				await refreshSlotPath(active);
+				active.fresh = false;
+				active.temporary = false;
 				return value;
 			}
-			// A warm spare, the one still starting, or a fresh one — in that order.
-			const spare = (): AgentSlot | undefined => slots.find((candidate) => candidate !== active && !candidate.busy);
-			if (!spare() && warming !== null) await warming.catch(() => undefined);
-			slot = spare() ?? (await spawnSlot());
+			slot = choice.kind === "spare" ? (byId(choice.id) ?? (await spawnSlot(cwd))) : await spawnSlot(cwd);
 			const value = (await slot.bridge.call("switchSession", [path])) as { cancelled?: boolean } | undefined;
 			await refreshSlotPath(slot);
+			slot.fresh = false;
+			slot.temporary = false;
 			if (value?.cancelled) return value;
 		}
-		active = slot;
+		setActive(slot);
+		followActiveFolder();
 		broadcastBusy();
 		reapIdleSlots();
 		// Line up the next one now. A connector can keep the active agent busy
@@ -899,15 +1290,27 @@ app.whenReady().then(async () => {
 	};
 
 	/** A new chat while the current agent works starts on its own agent. */
-	const newSessionSlot = async (): Promise<unknown> => {
-		const idle = slots.find((candidate) => candidate !== active && !candidate.busy);
-		const slot = idle ?? (await spawnSlot());
-		const value = (await slot.bridge.call("newSession", [])) as { cancelled?: boolean } | undefined;
+	const newSessionSlot = async (temporary?: boolean): Promise<unknown> => {
+		// In this chat's folder: a new chat opens where the reader is, and only
+		// a free agent already standing there can be the one to take it.
+		const cwd = activeCwd;
+		const idle = slots.find((candidate) => candidate !== active && !candidate.busy && candidate.cwd === cwd);
+		const slot = idle ?? (await spawnSlot(cwd));
+		const value = (await slot.bridge.call("newSession", [undefined, temporary === true])) as
+			| { cancelled?: boolean }
+			| undefined;
 		await refreshSlotPath(slot);
 		if (value?.cancelled) return value;
-		active = slot;
+		slot.temporary = temporary === true;
+		setActive(slot);
+		// A new chat on its own agent has claimed no folder either — and it is
+		// as unbegun as one started on the agent already in view, so it is
+		// still free to be moved into a folder of its own by its first message.
+		chatSettled = false;
+		slot.fresh = true;
 		broadcastBusy();
 		reapIdleSlots();
+		ensureSpare();
 		return { cancelled: false };
 	};
 
@@ -925,7 +1328,8 @@ app.whenReady().then(async () => {
 		if (respawning.has(dead.id)) return;
 		respawning.add(dead.id);
 		try {
-			const fresh = await spawnSlot();
+			// Back into the folder that chat belongs to, not the one on screen.
+			const fresh = await spawnSlot(dead.cwd);
 			const index = slots.indexOf(dead);
 			if (index >= 0) slots.splice(index, 1);
 			if (dead.sessionPath) {
@@ -936,12 +1340,16 @@ app.whenReady().then(async () => {
 					// The chat is on disk either way; a failed switch starts empty.
 				}
 			}
-			active = fresh;
+			// Only if the window is still on that chat: starting an agent takes a
+			// couple of seconds, and a reader who moved on in the meantime must
+			// not be dragged back to the chat that died.
+			const wasActive = active === dead;
+			if (wasActive) setActive(fresh);
 			broadcastBusy();
 			announceActive();
 			reapIdleSlots();
 			ensureSpare();
-			if (!win.isDestroyed()) win.webContents.send("agent:exited", { slotId: dead.id, wasActive: true, code });
+			if (!win.isDestroyed()) win.webContents.send("agent:exited", { slotId: dead.id, wasActive, code });
 		} finally {
 			respawning.delete(dead.id);
 		}
@@ -972,11 +1380,37 @@ app.whenReady().then(async () => {
 			const list = Array.isArray(args) ? args : [];
 			const movesSession =
 				method === "switchSession" || method === "newSession" || method === "clone" || method === "fork";
+			// A first message is what names this chat's folder, so it is settled
+			// here, before the message is answered anywhere.
+			if (method === "prompt") await settleChatFolder(list[0]);
 			const dispatch = async (): Promise<unknown> => {
 				if (method === "switchSession") return await switchToPath(String(list[0] ?? ""));
-				if (method === "newSession" && active.busy) return await newSessionSlot();
+				if (method === "newSession" && active.busy) {
+					return await newSessionSlot(
+						(list[0] && typeof list[0] === "object"
+							? (list[0] as { temporary?: boolean }).temporary
+							: undefined) === true,
+					);
+				}
+				if (method === "newSession") {
+					const temporary =
+						(list[0] && typeof list[0] === "object"
+							? (list[0] as { temporary?: boolean }).temporary
+							: undefined) === true;
+					const result = await active.bridge.call("newSession", [undefined, temporary]);
+					active.temporary = temporary;
+					await refreshSlotPath(active);
+					// This chat starts over and claims nothing yet; the agent stays
+					// in the last folder until this one's first message names its
+					// own.
+					chatSettled = false;
+					active.fresh = true;
+					return result;
+				}
 				const result = await active.bridge.call(method, list);
 				if (movesSession) await refreshSlotPath(active);
+				if (method === "prompt") active.fresh = false;
+				if (method === "clone" || method === "fork") active.fresh = false;
 				return result;
 			};
 			let value: unknown;
@@ -996,6 +1430,7 @@ app.whenReady().then(async () => {
 				// The view may have landed on another agent; say so before the
 				// renderer reattaches, or it stays deaf to the chat it is showing.
 				announceActive();
+				announceSession();
 			} else {
 				value = await dispatch();
 			}
@@ -1020,12 +1455,20 @@ app.whenReady().then(async () => {
 			return null;
 		}
 	});
-	ipcMain.handle("app:titlebar", (_e, theme: string) => {
+	ipcMain.handle("app:titlebar", (_e, theme: string, dimmed?: boolean) => {
 		try {
+			// The dimmed pair is each theme under the 40% black backdrop the
+			// dialogs draw, so the strip the OS paints reads as part of the
+			// dimmed page rather than a bright bar above it.
+			const light = theme === "light";
 			win.setTitleBarOverlay(
-				theme === "light"
-					? { color: "#fffdfc", symbolColor: "#635956", height: 36 }
-					: { color: "#0a0b0e", symbolColor: "#aeb4bd", height: 36 },
+				dimmed === true
+					? light
+						? { color: "#999897", symbolColor: "#3b3534", height: 36 }
+						: { color: "#060708", symbolColor: "#686c71", height: 36 }
+					: light
+						? { color: "#fffdfc", symbolColor: "#635956", height: 36 }
+						: { color: "#0a0b0e", symbolColor: "#aeb4bd", height: 36 },
 			);
 		} catch {
 			// Not every platform draws the overlay; the theme still applies.
@@ -1042,6 +1485,11 @@ app.whenReady().then(async () => {
 			telegram: telegramPath !== "" && row.path === telegramPath,
 		}));
 	});
+	// What "@" offers in the composer: files of the folder the chat is in.
+	ipcMain.handle(
+		"app:project-files",
+		async (_e, query?: string) => await searchProjectFiles(activeCwd, typeof query === "string" ? query : ""),
+	);
 	ipcMain.handle("app:info", () => ({
 		cwd: activeCwd,
 		hasProject: projectFolders.length > 0,
@@ -1108,31 +1556,44 @@ app.whenReady().then(async () => {
 		restarting = new Promise<void>((resolve) => {
 			signalReady = resolve;
 		});
-		// A directory move restarts everything: every slot is rooted in the old
-		// cwd, and background turns there would write into the wrong tree. A
-		// fresh bridge each time — re-wiring a stopped one would stack its old
-		// event listeners under the new ones.
-		// The old agents are dropped, not waited for: their teardown is a second
-		// of the switch and nothing downstream needs them gone, since the fresh
-		// bridge is a new process with its own listeners and its own session file.
-		for (const slot of slots) {
-			stoppingBridges.add(slot.bridge);
-			void slot.bridge.stop();
+		// Only the chat on screen moves. This used to restart every slot at
+		// once, on the reasoning that background turns would otherwise write
+		// into the wrong tree — but they would not: each of those chats is
+		// rooted where it was started and stays there, and taking them down
+		// meant opening another project silently killed whatever the other
+		// chats were in the middle of, with nothing on screen to say so.
+		//
+		// A fresh bridge rather than a re-wired one: re-wiring a stopped bridge
+		// would stack its old event listeners under the new ones. The old agent
+		// is dropped, not waited for — its teardown is a second of the switch,
+		// and the new process has its own listeners and its own session file.
+		const leaving = active;
+		stoppingBridges.add(leaving.bridge);
+		void leaving.bridge.stop();
+		const index = slots.indexOf(leaving);
+		if (index >= 0) slots.splice(index, 1);
+		// A turn in flight in the chat being moved does die with it — the move
+		// was asked for — but it is never taken quietly.
+		if (leaving.busy && !win.isDestroyed()) {
+			win.webContents.send("agent:turn-dropped", { sessionPath: leaving.sessionPath, cwd: leaving.cwd, to: cwd });
 		}
-		slots.length = 0;
-		// Any agent still starting belongs to the folder being left.
+		// A spare warmed for the folder being left is of no use here, and
+		// dropping the handle lets the next ensureSpare warm one in the new
+		// folder; the agent itself is still in `slots` and still reapable.
 		warming = null;
-		activeCwd = cwd;
 		const slot: AgentSlot = {
 			id: ++slotSeq,
 			bridge: new AgentBridge(),
+			cwd,
 			sessionPath: "",
 			busy: false,
 			turnCapture: null,
 			turnWrote: new Set(),
 			turnSwept: false,
+			temporary: false,
+			fresh: true,
 		};
-		active = slot;
+		setActive(slot);
 		slots.push(slot);
 		wireSlot(slot);
 		await slot.bridge.start(
@@ -1141,7 +1602,7 @@ app.whenReady().then(async () => {
 				provider: process.env.SMOLT_DESKTOP_PROVIDER,
 				model: process.env.SMOLT_DESKTOP_MODEL,
 				// With no folder open the agent must not guess a destination.
-				args: agentNotes(),
+				args: agentNotes(cwd),
 				env: agentEnv(PANE_ENV),
 				execPath: agentExecPath(),
 				onDiagnostic: crashLog,
@@ -1152,10 +1613,55 @@ app.whenReady().then(async () => {
 		await refreshSlotPath(slot);
 		restarting = null;
 		signalReady();
+		// Idle agents left in the folder just left are worth nothing to the
+		// chats still open there, and the cap counts them.
+		reapIdleSlots();
 		ensureSpare();
 		await rebaseline();
 		announceActive();
 		if (!win.isDestroyed()) win.webContents.send("agent:started", slot.bridge.status);
+	};
+
+	/**
+	 * Pick up a credential change without disturbing anyone's work.
+	 *
+	 * Providers, keys and pool membership are read when an agent starts, so a
+	 * change needs new agents — but it is not a reason to move a chat or to
+	 * end a turn. Idle agents are replaced where they stand; a chat mid-turn
+	 * keeps the credentials it started with and is told, rather than being cut
+	 * off. This used to call `restartAgentIn(homeCwd())`, which both killed
+	 * every running turn and dragged the chat on screen out of its own folder
+	 * — adding an API key moved you to another project.
+	 */
+	const reloadAgents = async (): Promise<void> => {
+		// Spares first: they carry no chat, so they simply go and are warmed
+		// again from the new credentials on the next switch.
+		for (const spare of [...slots]) {
+			if (spare === active || spare.busy) continue;
+			stoppingBridges.add(spare.bridge);
+			void spare.bridge.stop();
+			const index = slots.indexOf(spare);
+			if (index >= 0) slots.splice(index, 1);
+		}
+		if (active.busy) {
+			// Its turn is worth more than the immediacy of the change.
+			if (!win.isDestroyed()) win.webContents.send("agent:reload-deferred", { sessionPath: active.sessionPath });
+			return;
+		}
+		const held = active.sessionPath;
+		await restartAgentIn(active.cwd);
+		// Back into the same chat: a credential change is not a reason to lose
+		// the conversation on screen.
+		if (held !== "" && existsSync(held)) {
+			try {
+				await active.bridge.call("switchSession", [held]);
+				await refreshSlotPath(active);
+				active.fresh = false;
+				announceActive();
+			} catch {
+				// The chat is on disk either way; a failed switch starts empty.
+			}
+		}
 	};
 
 	ipcMain.handle("app:worktrees", async () => {
@@ -1169,6 +1675,29 @@ app.whenReady().then(async () => {
 					worktrees: await listWorktrees(homeCwd()),
 				},
 			};
+		} catch (err) {
+			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+		}
+	});
+	ipcMain.handle("app:branches", async () => {
+		try {
+			return { ok: true, value: await listBranches(homeCwd()) };
+		} catch (err) {
+			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+		}
+	});
+	ipcMain.handle("app:branch-checkout", async (_e, branch: string) => {
+		try {
+			// The chat on screen runs wherever it runs, and a busy turn writing
+			// files while the branch moves under it is not something to risk.
+			if (slots.some((slot) => slot.busy)) {
+				return { ok: false, error: "A chat is still working. Stop its turn before switching branch." };
+			}
+			await checkoutBranch(homeCwd(), String(branch ?? ""));
+			// The agent reads git state when it starts, so a fresh one is what
+			// the new chat opens against.
+			await restartAgentIn(homeCwd());
+			return { ok: true, value: activeCwd };
 		} catch (err) {
 			return { ok: false, error: err instanceof Error ? err.message : String(err) };
 		}
@@ -1192,8 +1721,26 @@ app.whenReady().then(async () => {
 	});
 	ipcMain.handle("app:worktree-remove", async (_e, path: string, force?: boolean) => {
 		try {
-			if (activeCwd === path) await restartAgentIn(homeCwd());
-			await removeWorktree(homeCwd(), String(path), force === true);
+			const target = String(path);
+			// Chats live in their own folders now, so this worktree may be home
+			// to background ones as well as to the chat on screen. A turn still
+			// running in it is not something to end behind the reader's back —
+			// and on Windows a running agent's directory cannot be deleted at
+			// all, so the removal would fail here anyway, with a worse message.
+			if (slots.some((slot) => slot.busy && slot.cwd === target)) {
+				return { ok: false, error: "A chat is still working in that worktree. Stop its turn first." };
+			}
+			if (activeCwd === target) await restartAgentIn(homeCwd());
+			// Idle agents standing there are dropped; nothing is lost, since
+			// their chats are on disk and reopen in whatever folder they name.
+			for (const idle of [...slots]) {
+				if (idle === active || idle.cwd !== target) continue;
+				stoppingBridges.add(idle.bridge);
+				await idle.bridge.stop();
+				const index = slots.indexOf(idle);
+				if (index >= 0) slots.splice(index, 1);
+			}
+			await removeWorktree(homeCwd(), target, force === true);
 			return { ok: true };
 		} catch (err) {
 			return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -1267,22 +1814,25 @@ app.whenReady().then(async () => {
 	 */
 	ipcMain.handle("app:wipe-local-data", async () => {
 		try {
-			const { wipeLocalData } = await import("./wipe.ts");
+			const { describeFailure, wipeLocalData } = await import("./wipe.ts");
 			for (const slot of slots) {
 				stoppingBridges.add(slot.bridge);
 				await slot.bridge.stop();
 			}
 			slots.length = 0;
 			warming = null;
-			const report = wipeLocalData();
+			const report = await wipeLocalData();
 			await restartAgentIn(activeCwd);
-			return { ok: report.failed.length === 0, value: report, error: report.failed[0]?.error };
+			return { ok: report.failed.length === 0, value: report, error: describeFailure(report) };
 		} catch (err) {
 			return { ok: false, error: err instanceof Error ? err.message : String(err) };
 		}
 	});
 
 	ipcMain.handle("app:recent-projects", () => readProjectState().recent);
+
+	/** Where this folder's `origin` lives on the web, so a menu can name it. */
+	ipcMain.handle("app:repo-url", async (_e, dir?: string) => await remoteWebUrl(String(dir || activeCwd)));
 
 	ipcMain.handle("app:update-state", () => updateState());
 	ipcMain.handle("app:update-check", async () => {
@@ -1322,11 +1872,295 @@ app.whenReady().then(async () => {
 		try {
 			// The names only, straight from the file the CLI shares. Reading keys
 			// rather than credentials keeps the secrets out of this process's reply.
-			const raw: unknown = JSON.parse(readFileSync(join(dirname(projectFile()), "auth.json"), "utf-8"));
+			const raw: unknown = JSON.parse(readFileSync(join(agentDir(), "auth.json"), "utf-8"));
 			if (raw === null || typeof raw !== "object") return [];
 			return Object.keys(raw as Record<string, unknown>);
 		} catch {
 			return [];
+		}
+	});
+
+	/**
+	 * Every provider with a credential, and the failover pool behind each: what
+	 * the settings page lists. Metadata only, read straight from the two files
+	 * the CLI shares: the kind of credential, never the credential itself.
+	 */
+	ipcMain.handle("app:providers-list", async () => {
+		const providers = new Map<
+			string,
+			{
+				id: string;
+				type?: string;
+				primaryLabel?: string;
+				pooled: boolean;
+				pool: { id: string; label?: string; type: string; addedAt: number; plan?: string }[];
+			}
+		>();
+		try {
+			const raw: unknown = JSON.parse(readFileSync(join(agentDir(), "auth.json"), "utf-8"));
+			if (raw !== null && typeof raw === "object") {
+				for (const [id, credential] of Object.entries(raw as Record<string, { type?: string }>)) {
+					providers.set(id, { id, type: credential?.type, pooled: true, pool: [] });
+				}
+			}
+		} catch {
+			// No auth file yet: nothing configured.
+		}
+		try {
+			const raw = JSON.parse(readFileSync(join(agentDir(), "pool.json"), "utf-8")) as {
+				providers?: Record<
+					string,
+					{ credentials?: { id: string; label?: string; type: string; addedAt: number; plan?: string }[] }
+				>;
+				primaryLabels?: Record<string, string>;
+				unpooled?: string[];
+			};
+			for (const id of Array.isArray(raw.unpooled) ? raw.unpooled : []) {
+				const existing = providers.get(id);
+				if (existing) existing.pooled = false;
+			}
+			for (const [id, label] of Object.entries(raw.primaryLabels ?? {})) {
+				const existing = providers.get(id);
+				if (existing && typeof label === "string" && label.trim() !== "") existing.primaryLabel = label.trim();
+			}
+			for (const [id, pool] of Object.entries(raw.providers ?? {})) {
+				const entries = (pool.credentials ?? []).map((entry) => ({
+					id: entry.id,
+					label: entry.label,
+					type: entry.type,
+					addedAt: entry.addedAt,
+					plan: entry.plan,
+				}));
+				if (entries.length === 0) continue;
+				const existing = providers.get(id);
+				if (existing) existing.pool = entries;
+				else providers.set(id, { id, pooled: !(raw.unpooled ?? []).includes(id), pool: entries });
+			}
+		} catch {
+			// No pool file: no failover credentials.
+		}
+		return [...providers.values()];
+	});
+
+	/**
+	 * Local llama.cpp launcher: what the settings page needs to decide whether
+	 * a "Launch server" button applies, and the actual launch. Detection only:
+	 * the llama-server binary on the PATH-like spots and a GGUF model directory.
+	 */
+	function findLlamaServerBinary(): string | undefined {
+		const exeSuffix = process.platform === "win32" ? ".exe" : "";
+		const candidates: string[] = [];
+		const configured = process.env.LLAMA_SERVER_PATH?.trim();
+		if (configured) candidates.push(configured);
+		candidates.push(join(homedir(), "scoop", "apps", "llama.cpp-cu133", "current", `llama-server${exeSuffix}`));
+		candidates.push(join(homedir(), "scoop", "apps", "llama.cpp", "current", `llama-server${exeSuffix}`));
+		candidates.push(
+			...(process.env.PATH ?? "")
+				.split(process.platform === "win32" ? ";" : ":")
+				.filter((part) => part.trim() !== "")
+				.map((part) => join(part.trim(), `llama-server${exeSuffix}`)),
+		);
+		return candidates.find((candidate) => existsSync(candidate));
+	}
+
+	function llamaModelsDir(): { dir: string; models: number } | undefined {
+		const dir = process.env.LLAMA_MODELS_DIR?.trim() || join(homedir(), "models");
+		if (!existsSync(dir)) return undefined;
+		let models = 0;
+		try {
+			for (const entry of readdirSync(dir, { withFileTypes: true })) {
+				if (entry.isFile() && entry.name.toLowerCase().endsWith(".gguf")) models += 1;
+				if (entry.isDirectory() && existsSync(join(dir, entry.name, "mmproj-F16.gguf"))) models += 1;
+			}
+		} catch {
+			return undefined;
+		}
+		return models > 0 ? { dir, models } : undefined;
+	}
+
+	async function llamaServerUrl(): Promise<string | undefined> {
+		let url = process.env.LLAMA_BASE_URL?.trim();
+		if (!url) {
+			try {
+				const raw: unknown = JSON.parse(readFileSync(join(agentDir(), "auth.json"), "utf-8"));
+				const credential = (raw as Record<string, { env?: { LLAMA_BASE_URL?: unknown } } | undefined>)["llama.cpp"];
+				const stored = credential?.env?.LLAMA_BASE_URL;
+				if (typeof stored === "string" && stored.trim() !== "") url = stored.trim();
+			} catch {
+				// No auth file or no llama.cpp credential.
+			}
+		}
+		if (!url || !/^https?:\/\//.test(url)) return undefined;
+		return url.replace(/\/$/, "");
+	}
+
+	async function llamaReachable(serverUrl: string): Promise<boolean> {
+		try {
+			const response = await fetch(`${serverUrl}/health`, { signal: AbortSignal.timeout(1500) });
+			return response.ok;
+		} catch {
+			return false;
+		}
+	}
+
+	ipcMain.handle("app:llama-sizeup", async () => {
+		const binary = findLlamaServerBinary();
+		const models = llamaModelsDir();
+		const serverUrl = await llamaServerUrl();
+		const reachable = serverUrl !== undefined && (await llamaReachable(serverUrl));
+		return {
+			binary,
+			modelsDir: models?.dir,
+			modelCount: models?.models ?? 0,
+			serverUrl,
+			reachable,
+		};
+	});
+
+	ipcMain.handle("app:llama-launch", async () => {
+		const serverUrl = await llamaServerUrl();
+		if (serverUrl !== undefined && (await llamaReachable(serverUrl))) {
+			return { ok: true, already: true, serverUrl };
+		}
+		const binary = findLlamaServerBinary();
+		if (!binary) {
+			return { ok: false, error: "llama-server was not found. Install llama.cpp first." };
+		}
+		const models = llamaModelsDir();
+		if (!models) {
+			return {
+				ok: false,
+				error: `No GGUF models were found${process.env.LLAMA_MODELS_DIR ? ` in ${process.env.LLAMA_MODELS_DIR}` : " in ~models"}.`,
+			};
+		}
+		const port = Number(/^https?:\/\/[^:/]+:(\d+)$/.exec(serverUrl ?? "")?.[1] ?? 8080);
+		try {
+			const child = spawn(
+				binary,
+				[
+					"--models-dir",
+					models.dir,
+					"--jinja",
+					"--host",
+					"127.0.0.1",
+					"--port",
+					String(port),
+					"-ngl",
+					"999",
+					"-c",
+					"32768",
+				],
+				{ detached: true, stdio: "ignore", windowsHide: true },
+			);
+			child.unref();
+		} catch (err) {
+			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+		}
+		const deadline = Date.now() + 20_000;
+		while (Date.now() < deadline) {
+			if (await llamaReachable(`http://127.0.0.1:${port}`)) {
+				return { ok: true, serverUrl: `http://127.0.0.1:${port}` };
+			}
+			await new Promise((resolve) => setTimeout(resolve, 500));
+		}
+		return { ok: false, error: "llama-server started but did not answer within 20 seconds." };
+	});
+
+	/**
+	 * Forget a provider's credential, then restart so the agent stops offering
+	 * its models. Through the agent's own store, which takes the lock the CLI
+	 * respects. The pool entries behind it are left alone: they are removed
+	 * one at a time, on purpose.
+	 */
+	ipcMain.handle("app:auth-remove", async (_e, provider: string) => {
+		try {
+			const name = String(provider ?? "").trim();
+			if (name === "") return { ok: false, error: "Which provider?" };
+			editAuth((data) => {
+				const next = { ...data };
+				delete next[name];
+				return next;
+			});
+			void reloadAgents();
+			return { ok: true };
+		} catch (err) {
+			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+		}
+	});
+
+	/**
+	 * Name a credential: the primary (by the pool's own primary id) or one
+	 * failover key. The agent reads the pool file afresh each poll, so the new
+	 * name shows up in usage without a restart.
+	 */
+	ipcMain.handle("app:pool-relabel", async (_e, provider: string, credentialId: string, label: string) => {
+		try {
+			const name = String(provider ?? "").trim();
+			const id = String(credentialId ?? "").trim();
+			if (name === "" || id === "") return { ok: false, error: "Which credential?" };
+			editPool((current) => relabelPoolCredential(current, name, id, String(label ?? "")));
+			return { ok: true };
+		} catch (err) {
+			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+		}
+	});
+
+	/**
+	 * Add an instance of a provider: another API key in its pool, the way
+	 * /pool add-key does, then restart so the pool wraps it in. The key comes
+	 * straight from the dialog over IPC and never touches a transcript.
+	 */
+	ipcMain.handle("app:pool-add-key", async (_e, provider: string, key: string, label: string) => {
+		try {
+			const name = String(provider ?? "").trim();
+			const secret = String(key ?? "").trim();
+			if (name === "" || secret === "") return { ok: false, error: "Both a provider and a key are needed." };
+			if (/[\s]/.test(secret))
+				return { ok: false, error: "That does not look like an API key: it contains whitespace." };
+			const trimmedLabel = String(label ?? "").trim();
+			editPool((current) =>
+				appendPoolCredential(
+					current,
+					name,
+					{ type: "api_key", key: secret, label: trimmedLabel === "" ? undefined : trimmedLabel },
+					randomUUID(),
+				),
+			);
+			void reloadAgents();
+			return { ok: true };
+		} catch (err) {
+			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+		}
+	});
+
+	/**
+	 * Switch a provider in or out of the pool. Out, it runs on its primary
+	 * alone and leaves the usage view; the agent restarts so its failover
+	 * wrappers follow.
+	 */
+	ipcMain.handle("app:pool-set-pooled", async (_e, provider: string, pooled: boolean) => {
+		try {
+			const name = String(provider ?? "").trim();
+			if (name === "") return { ok: false, error: "Which provider?" };
+			editPool((current) => setProviderPooled(current, name, pooled === true));
+			void reloadAgents();
+			return { ok: true };
+		} catch (err) {
+			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+		}
+	});
+
+	/** Drop one failover credential from a provider's pool, the way /pool remove does. */
+	ipcMain.handle("app:pool-remove", async (_e, provider: string, credentialId: string) => {
+		try {
+			const name = String(provider ?? "").trim();
+			const id = String(credentialId ?? "").trim();
+			if (name === "" || id === "") return { ok: false, error: "Which credential?" };
+			editPool((current) => removePoolCredential(current, name, id));
+			void reloadAgents();
+			return { ok: true };
+		} catch (err) {
+			return { ok: false, error: err instanceof Error ? err.message : String(err) };
 		}
 	});
 
@@ -1341,23 +2175,8 @@ app.whenReady().then(async () => {
 			const name = String(provider ?? "").trim();
 			const secret = String(key ?? "").trim();
 			if (name === "" || secret === "") return { ok: false, error: "Both a provider and a key are needed." };
-			const { AuthStorage } = await import("../../../coding-agent/src/core/auth-storage.ts");
-			// The explicit path, computed the way every other main-process path
-			// is: AuthStorage.create()'s own default resolves through the
-			// coding-agent's config module, which inside the Electron bundle
-			// once produced a raw `"path" argument must be of type string`
-			// throw — and a key that silently never saved.
-			const envDir = process.env.SMOLT_CODING_AGENT_DIR;
-			const agentDir = envDir?.trim()
-				? envDir.startsWith("~")
-					? join(homedir(), envDir.slice(1))
-					: envDir
-				: join(homedir(), ".smolt", "agent");
-			await AuthStorage.create(join(agentDir, "auth.json")).modify(name, async () => ({
-				type: "api_key",
-				key: secret,
-			}));
-			void restartAgentIn(homeCwd());
+			editAuth((data) => ({ ...data, [name]: { type: "api_key", key: secret } }));
+			void reloadAgents();
 			return { ok: true };
 		} catch (err) {
 			return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -1410,8 +2229,12 @@ app.whenReady().then(async () => {
 			const primaryChanged = projectFolders.length === 0;
 			projectFolders = [...projectFolders, target];
 			rememberProject(projectFolders, []);
-			// Only a first folder moves the agent; the rest just widen its remit.
-			await restartAgentIn(primaryChanged ? target : activeCwd);
+			// Only a first folder moves the agent. The rest widen its remit,
+			// which is a line of its system prompt and so needs a new agent —
+			// but not at the cost of a turn: this said as much and restarted
+			// regardless, so adding a second folder killed whatever was running.
+			if (primaryChanged) await restartAgentIn(target);
+			else await reloadAgents();
 			return { ok: true, value: projectFolders };
 		} catch (err) {
 			return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -1422,6 +2245,9 @@ app.whenReady().then(async () => {
 		try {
 			rememberProject([], projectFolders);
 			projectFolders = [];
+			// Closing the folder moves the chat on screen out of it, as asked.
+			// Chats that were started in it stay in it — they are still on that
+			// project, and clicking one takes the window back there.
 			void restartAgentIn(homeCwd());
 			return { ok: true, value: null };
 		} catch (err) {
@@ -1460,6 +2286,28 @@ app.whenReady().then(async () => {
 
 	ipcMain.handle("app:reveal", async (_e, target: string, how?: string) => {
 		try {
+			if (how === "open") {
+				// A path the agent quoted: relative to the folder it was working
+				// in, and opened with whatever the system uses for that file.
+				const raw = String(target).replace(/^~(?=[/\\])/, homedir());
+				const full = isAbsolute(raw) ? raw : join(activeCwd, raw);
+				if (!existsSync(full)) return { ok: false, error: `${raw} is not there any more.` };
+				const problem = await shell.openPath(full);
+				if (problem) return { ok: false, error: problem };
+				return { ok: true };
+			}
+			if (how === "terminal") {
+				const dir = String(target);
+				if (!existsSync(dir)) return { ok: false, error: `${dir} is not there any more.` };
+				openTerminalAt(dir);
+				return { ok: true };
+			}
+			if (how === "repo") {
+				const url = await remoteWebUrl(String(target));
+				if (url === undefined) return { ok: false, error: "This folder has no origin remote." };
+				await shell.openExternal(url);
+				return { ok: true };
+			}
 			if (how === "editor") {
 				await shell.openExternal(`vscode://file/${String(target).replaceAll("\\", "/")}`);
 			} else if (how === "folder") {
@@ -1529,16 +2377,57 @@ app.whenReady().then(async () => {
 		}
 	});
 
+	// Suggestions for the empty new-chat screen, written by the user's own
+	// default model over a one-shot CLI run. Long (a model round trip) but
+	// fire-and-forget: the empty state shows skeletons and fills in later.
+	ipcMain.handle("app:starters", () => {
+		try {
+			const cli = findCliPath(__dirname);
+			if (!cli) return { ok: true, value: [] };
+			const runCli = makeCliRunner(cli, agentExecPath(), agentEnv({}));
+			return suggestStarters(activeCwd, runCli).then((starters) => ({ ok: true, value: starters }));
+		} catch (err) {
+			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+		}
+	});
+
+	ipcMain.handle("app:pr-readiness", async () => {
+		try {
+			return { ok: true, value: await prReadiness(activeCwd) };
+		} catch (err) {
+			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+		}
+	});
+
+	ipcMain.handle("app:pr-create", async (_e, draft: boolean) => {
+		try {
+			const result = await createPullRequest(activeCwd, draft === true);
+			if (!result.ok) return { ok: false, error: result.error };
+			// The pull request is the point; open it rather than leaving a URL
+			// in a toast for someone to hunt down.
+			if (result.url) void shell.openExternal(result.url);
+			return { ok: true, value: result };
+		} catch (err) {
+			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+		}
+	});
+
 	ipcMain.handle("app:diff", async () => {
 		try {
 			// Follows the agent into a worktree, so the pane shows that session's work.
-			await baselineReady;
-			await attributionReady;
-			// A running turn counts live: files its edit/write calls have named,
-			// and — once it has used a sweeping tool — whatever moved since its start.
-			const paths = active.turnWrote.size > 0 ? new Set([...attributed, ...active.turnWrote]) : attributed;
-			const turnStart = active.turnSwept && active.turnCapture ? await active.turnCapture : undefined;
-			return { ok: true, value: await collectDiff(activeCwd, diffBaseline, { paths, turnStart }) };
+			// The scope is the branch, not the chat: every commit on it plus the
+			// working tree, which is what a review or a pull request would carry.
+			return { ok: true, value: await collectDiff(activeCwd) };
+		} catch (err) {
+			return { ok: false, error: err instanceof Error ? err.message : String(err) };
+		}
+	});
+	// The bar's three numbers, without the bodies: what the composer reads on
+	// every refresh, so a long branch does not push megabytes of hunks through
+	// the pipe just to update a count nobody has opened the pane for.
+	ipcMain.handle("app:diff-stats", async () => {
+		try {
+			return { ok: true, value: await collectDiffStats(activeCwd) };
 		} catch (err) {
 			return { ok: false, error: err instanceof Error ? err.message : String(err) };
 		}

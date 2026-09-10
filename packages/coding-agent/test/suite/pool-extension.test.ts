@@ -7,11 +7,16 @@ import {
 	emptyPoolData,
 	isCapExceeded,
 	isMarkedUnavailable,
+	isProviderPooled,
 	orderedChain,
 	POOL_PRIMARY_ID,
 	type PoolCredential,
 	type PoolData,
 	PoolStore,
+	primaryLabelOf,
+	relabelPoolCredential,
+	removePoolCredential,
+	setProviderPooled,
 } from "../../src/extensions/pool/storage.ts";
 import { effectiveWindow, exceedsCap, recordUsage } from "../../src/extensions/pool/windows.ts";
 import { nextCandidate, selectAttemptOrder, wrapProviderWithPool } from "../../src/extensions/pool/wrapper.ts";
@@ -466,5 +471,55 @@ describe("pool driver", () => {
 		expect(smolt.sentMessages).toEqual([]);
 		expect(store.read().unavailable[POOL_PRIMARY_ID]).toBeUndefined();
 		expect(notifications.some((message) => message.includes("/pool model"))).toBe(true);
+	});
+});
+
+describe("pool credential editing", () => {
+	const fixture = () => {
+		const data = emptyPoolData();
+		data.providers.acme = {
+			credentials: [
+				{ id: "k1", type: "api_key", key: "sk-1", label: "work", addedAt: 1 },
+				{ id: "k2", type: "api_key", key: "sk-2", addedAt: 2 },
+			],
+			activeId: "k2",
+		};
+		data.ledger.k2 = { "5h": { used: 3, windowStart: 0 } } as never;
+		data.unavailable.k2 = { until: 99, reason: "limit" } as never;
+		return data;
+	};
+
+	it("names the primary credential apart from the pool, and clears it on an empty name", () => {
+		const named = relabelPoolCredential(fixture(), "acme", POOL_PRIMARY_ID, "  key one ");
+		expect(primaryLabelOf(named, "acme")).toBe("key one");
+		expect(named.providers.acme.credentials.map((entry) => entry.label)).toEqual(["work", undefined]);
+		const cleared = relabelPoolCredential(named, "acme", POOL_PRIMARY_ID, "");
+		expect(primaryLabelOf(cleared, "acme")).toBe("Primary");
+	});
+
+	it("renames one pool credential and leaves the rest alone", () => {
+		const renamed = relabelPoolCredential(fixture(), "acme", "k2", "home");
+		expect(renamed.providers.acme.credentials.map((entry) => entry.label)).toEqual(["work", "home"]);
+		expect(renamed.providers.acme.activeId).toBe("k2");
+	});
+
+	it("removes a credential with its ledger and marks, falling back to the primary when it was active", () => {
+		const removed = removePoolCredential(fixture(), "acme", "k2");
+		expect(removed.providers.acme.credentials.map((entry) => entry.id)).toEqual(["k1"]);
+		expect(removed.providers.acme.activeId).toBeUndefined();
+		expect(removed.ledger.k2).toBeUndefined();
+		expect(removed.unavailable.k2).toBeUndefined();
+		expect(removePoolCredential(removed, "acme", "k1").providers.acme).toBeUndefined();
+	});
+
+	it("switches a provider out of the pool and back, pooled by default", () => {
+		const data = fixture();
+		expect(isProviderPooled(data, "acme")).toBe(true);
+		const out = setProviderPooled(data, "acme", false);
+		expect(isProviderPooled(out, "acme")).toBe(false);
+		expect(out.providers.acme.credentials).toHaveLength(2);
+		const back = setProviderPooled(setProviderPooled(out, "acme", false), "acme", true);
+		expect(isProviderPooled(back, "acme")).toBe(true);
+		expect(back.unpooled).toEqual([]);
 	});
 });

@@ -1,7 +1,7 @@
 import { Agent } from "@smolt/agent-core";
 import { type AssistantMessage, getModel, streamSimple, type ToolResultMessage, type Usage } from "@smolt/ai/compat";
 import { describe, expect, it } from "vitest";
-import { AgentSession } from "../src/core/agent-session.ts";
+import { ADVISOR_USAGE_ENTRY, AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
@@ -105,6 +105,75 @@ describe("AgentSession.getSessionStats", () => {
 			expect(stats.contextUsage?.tokens).toBe(200);
 			expect(stats.contextUsage?.contextWindow).toBe(model.contextWindow);
 			expect(stats.contextUsage?.percent).toBe((200 / model.contextWindow) * 100);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("breaks the context down part by part, scaled to the provider's count", async () => {
+		const { session, sessionManager } = await createSession();
+
+		try {
+			session.agent.state.systemPrompt = [
+				"You are a helpful assistant.",
+				"<available_skills>\n  <skill><name>grill-me</name></skill>\n</available_skills>",
+				'<project_context>\n\n<project_instructions path="AGENTS.md">\nUse tabs.\n</project_instructions>\n\n</project_context>\n',
+			].join("\n\n");
+			sessionManager.appendMessage(createUserMessage("hello there", 1));
+			sessionManager.appendMessage(createAssistantMessage("hi", 400, 2));
+			syncAgentMessages(session, sessionManager);
+
+			const breakdown = session.getContextUsage()?.breakdown;
+			expect(breakdown).toBeDefined();
+			const parts = Object.fromEntries(breakdown!.parts.map((part) => [part.key, part]));
+			expect(Object.keys(parts)).toEqual([
+				"messages",
+				"systemTools",
+				"extensionTools",
+				"systemPrompt",
+				"skills",
+				"contextFiles",
+			]);
+			// The parts add up to the figure on the ring.
+			const sum = breakdown!.parts.reduce((total, part) => total + part.tokens, 0);
+			expect(Math.abs(sum - 400)).toBeLessThanOrEqual(breakdown!.parts.length);
+			expect(parts.messages!.tokens).toBeGreaterThan(0);
+			expect(parts.skills!.tokens).toBeGreaterThan(0);
+			expect(parts.contextFiles!.items).toEqual([{ name: "AGENTS.md", tokens: expect.any(Number) }]);
+			expect(parts.systemPrompt!.tokens).toBeGreaterThan(0);
+			// Skills and context files are counted once, apart from the base prompt.
+			expect(parts.systemPrompt!.tokens).toBeLessThan(
+				parts.skills!.tokens + parts.contextFiles!.tokens + parts.systemPrompt!.tokens,
+			);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("counts spend made on the session's behalf, and names who made it", async () => {
+		const { session, sessionManager } = await createSession();
+
+		try {
+			sessionManager.appendMessage(createUserMessage("go", 1));
+			sessionManager.appendMessage(createAssistantMessage("on it", 300, 2));
+			// A research wait reports its team's sessions on the tool result.
+			sessionManager.appendMessage({ ...createToolResultMessage(createUsage(5_000)), toolName: "research" });
+			sessionManager.appendMessage({ ...createToolResultMessage(createUsage(7_000)), toolName: "research" });
+			// An advisor files each review as a custom entry.
+			sessionManager.appendCustomEntry(ADVISOR_USAGE_ENTRY, {
+				advisor: "Reviewer",
+				turns: 2,
+				usage: { ...createUsage(1_200), cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 } },
+			});
+			syncAgentMessages(session, sessionManager);
+
+			const stats = session.getSessionStats();
+			expect(stats.background).toEqual([
+				{ key: "tool:research", label: "Research", tokens: 12_000, cost: 0, requests: 2 },
+				{ key: "advisor:Reviewer", label: "Advisor · Reviewer", tokens: 1_200, cost: 0.01, requests: 1 },
+			]);
+			expect(stats.tokens.total).toBe(300 + 12_000 + 1_200);
+			expect(stats.cost).toBeCloseTo(0.01);
 		} finally {
 			session.dispose();
 		}

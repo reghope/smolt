@@ -202,20 +202,54 @@ function releaseWebhook(repo: string): void {
  * caller checks for admin first.
  */
 export function watchAll(repos: string[], hooks: Hooks): () => void {
-	const stops = repos.map((repo) => startWatching(repo, hooks));
+	let stops = repos.map((repo) => startWatching(repo, hooks));
 	const stopAll = (): void => {
 		for (const stop of stops) stop();
+		stops = [];
 	};
 	// A clean shutdown already calls this, but smolt does not always get one:
 	// an orphaned forwarder holds the relay connection and swallows deliveries,
 	// which looks exactly like a working webhook that never fires.
 	process.once("exit", stopAll);
-	process.once("SIGINT", stopAll);
-	process.once("SIGTERM", stopAll);
+
+	// A signal is a request to end the process, not to stop watching, and simply
+	// having a listener for one suppresses Node's own answer to it. With a repo
+	// watched, Ctrl+C therefore killed the forwarders and left smolt running
+	// with no way to quit: the listener that existed only to tidy up had taken
+	// the terminate away. What the handler does now depends on who else is
+	// listening, because that is what the signal would have done without us.
+	const handlers = new Map<NodeJS.Signals, () => void>();
+	const onSignal = (signal: NodeJS.Signals): void => {
+		// Our own listener was a 'once' and has already gone, so this counts the
+		// others. One of them owns the signal — the TUI ignores SIGINT for as
+		// long as it is suspended, and quitting has its own handler — and a
+		// suspend is not a shutdown, so watching is left running and armed. It
+		// is torn down by 'exit' if the process does end up going.
+		if (process.listenerCount(signal) > 0) {
+			const handler = handlers.get(signal);
+			if (handler) process.once(signal, handler);
+			return;
+		}
+		// Nobody else is listening, so terminating is what this signal meant
+		// before we came along. The forwarders go first, then the process.
+		stopAll();
+		// Re-raising is the faithful way to do that, but only where a signal can
+		// be raised on oneself: on Windows process.kill against our own pid does
+		// not run handlers at all, it destroys the process on the spot, which
+		// would take the terminal's cooked mode down with it. There the exit
+		// code a shell reports for the signal is used instead.
+		if (process.platform === "win32") process.exit(signal === "SIGINT" ? 130 : 143);
+		process.kill(process.pid, signal);
+	};
+	for (const signal of ["SIGINT", "SIGTERM"] as const) {
+		const handler = (): void => onSignal(signal);
+		handlers.set(signal, handler);
+		process.once(signal, handler);
+	}
+
 	return () => {
 		process.off("exit", stopAll);
-		process.off("SIGINT", stopAll);
-		process.off("SIGTERM", stopAll);
+		for (const [signal, handler] of handlers) process.off(signal, handler);
 		stopAll();
 	};
 }
@@ -266,6 +300,11 @@ function startWatching(repo: string, hooks: Hooks): () => void {
 		failures = Date.now() - connectedAt > SETTLED_MS ? 0 : failures + 1;
 		if (failures >= MAX_FAILED_ATTEMPTS) {
 			stopped = true;
+			// The claim goes with the watcher. Kept after giving up, it names a
+			// process that is alive and no longer watching, so every standby
+			// session on this machine waits behind it for as long as smolt runs
+			// — an expired 'gh' login here locked the repo out of all of them.
+			releaseWebhook(repo);
 			hooks.notice(
 				`Gave up watching ${repo}: the forwarder failed ${failures} times in a row. Check 'gh auth status' ` +
 					"and that you still have admin on it, then run /review setup again.",

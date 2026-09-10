@@ -134,6 +134,16 @@ function removeStaleForwarderHook(repo: string): void {
 interface Hooks {
 	/** A pull request needs reviewing. */
 	review: (event: PullRequestEvent) => void;
+	/**
+	 * This session now owns the repo, and is the one that should catch up on it.
+	 *
+	 * Work owed on a repo belongs to whoever is watching it, and only one
+	 * session is. Without this the sessions that stood down did the catching up
+	 * too: two of them re-queued the same owed review at once, which reviewed
+	 * one pull request twice at the same time and spent two of its three
+	 * attempts in a single restart.
+	 */
+	claimed: (repo: string) => void;
 	/** Something the reader should see: connected, disconnected, failed. */
 	notice: (message: string, kind: "info" | "warning") => void;
 }
@@ -392,7 +402,13 @@ function startWatching(repo: string, hooks: Hooks): () => void {
 		// The claim is ours; keep saying so for as long as we hold it, or the next
 		// session to look reads it as abandoned and takes the repo over. Unref'd:
 		// watching a repo is not a reason for smolt to stay alive.
-		if (heartbeat === undefined) heartbeat = setInterval(() => refreshClaim(repo), CLAIM_HEARTBEAT_MS).unref();
+		if (heartbeat === undefined) {
+			heartbeat = setInterval(() => refreshClaim(repo), CLAIM_HEARTBEAT_MS).unref();
+			// Owning the repo is the moment to catch up on it, and only that
+			// moment: a plain reconnect keeps the heartbeat, so this does not fire
+			// again for a forwarder that merely dropped.
+			hooks.claimed(repo);
+		}
 		if (announcedStandby) {
 			announcedStandby = false;
 			hooks.notice(`Watching ${repo}: the session that held it has gone.`, "info");

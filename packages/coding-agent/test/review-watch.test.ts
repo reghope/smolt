@@ -92,7 +92,11 @@ describe("review watcher claim", () => {
 
 	it("gives up the claim when it gives up watching", async () => {
 		const notices: string[] = [];
-		stop = watchAll(["owner/name"], { review: () => {}, notice: (message) => notices.push(message) });
+		stop = watchAll(["owner/name"], {
+			review: () => {},
+			claimed: () => {},
+			notice: (message) => notices.push(message),
+		});
 		expect(existsSync(watchClaimFile("owner/name"))).toBe(true);
 
 		// Long enough for every attempt in the backoff (2s, 4s, 8s, 16s).
@@ -107,7 +111,11 @@ describe("review watcher claim", () => {
 
 	it("keeps the claim while it is still retrying", async () => {
 		const notices: string[] = [];
-		stop = watchAll(["owner/name"], { review: () => {}, notice: (message) => notices.push(message) });
+		stop = watchAll(["owner/name"], {
+			review: () => {},
+			claimed: () => {},
+			notice: (message) => notices.push(message),
+		});
 
 		await vi.advanceTimersByTimeAsync(5_000);
 
@@ -124,10 +132,17 @@ describe("review watcher claim", () => {
 		writeFileSync(watchClaimFile(REPO), JSON.stringify({ pid: squatter.pid, at: Date.now() - 10 * 60_000 }), "utf-8");
 
 		const notices: string[] = [];
-		stop = watchAll([REPO], { review: () => {}, notice: (message) => notices.push(message) });
+		const caughtUp: string[] = [];
+		stop = watchAll([REPO], {
+			review: () => {},
+			claimed: (repo) => caughtUp.push(repo),
+			notice: (message) => notices.push(message),
+		});
 
 		expect(readClaimPid()).toBe(process.pid);
 		expect(notices.some((notice) => notice.includes("on standby"))).toBe(false);
+		// Owning the repo is what says this session should catch up on it.
+		expect(caughtUp).toEqual([REPO]);
 		squatter.kill();
 	});
 
@@ -137,11 +152,20 @@ describe("review watcher claim", () => {
 		writeFileSync(watchClaimFile(REPO), JSON.stringify({ pid: owner.pid, at: Date.now() }), "utf-8");
 
 		const notices: string[] = [];
-		stop = watchAll([REPO], { review: () => {}, notice: (message) => notices.push(message) });
+		const caughtUp: string[] = [];
+		stop = watchAll([REPO], {
+			review: () => {},
+			claimed: (repo) => caughtUp.push(repo),
+			notice: (message) => notices.push(message),
+		});
 
 		// Left alone: a fresh claim on a live pid is someone else's repo.
 		expect(readClaimPid()).toBe(owner.pid);
 		expect(notices.some((notice) => notice.includes("on standby"))).toBe(true);
+		// And so is the work owed on it. A session that stood down and caught up
+		// anyway reviewed the same pull request a second time, alongside the
+		// session that owned it, and spent its retries twice as fast.
+		expect(caughtUp).toEqual([]);
 		owner.kill();
 	});
 
@@ -152,7 +176,7 @@ describe("review watcher claim", () => {
 		// page, which is how one looked ignored.
 		forwarder.diesAtOnce = false;
 		const seen: PullRequestEvent[] = [];
-		stop = watchAll([REPO], { review: (event) => seen.push(event), notice: () => {} });
+		stop = watchAll([REPO], { review: (event) => seen.push(event), claimed: () => {}, notice: () => {} });
 
 		const child = forwarder.children[0] as EventEmitter & { stdout: EventEmitter };
 		child.stdout.emit(
@@ -173,7 +197,7 @@ describe("review watcher claim", () => {
 	it("ignores a comment that does not ask", () => {
 		forwarder.diesAtOnce = false;
 		const seen: PullRequestEvent[] = [];
-		stop = watchAll([REPO], { review: (event) => seen.push(event), notice: () => {} });
+		stop = watchAll([REPO], { review: (event) => seen.push(event), claimed: () => {}, notice: () => {} });
 
 		const child = forwarder.children[0] as EventEmitter & { stdout: EventEmitter };
 		for (const body of ["looks good to me", "mail rob@smoltreview.example", "@smolt please review"]) {
@@ -194,7 +218,7 @@ describe("review watcher claim", () => {
 	});
 
 	it("gives up the claim when watching is stopped by hand", async () => {
-		const stopWatching = watchAll(["owner/name"], { review: () => {}, notice: () => {} });
+		const stopWatching = watchAll(["owner/name"], { review: () => {}, claimed: () => {}, notice: () => {} });
 		expect(existsSync(watchClaimFile("owner/name"))).toBe(true);
 		stopWatching();
 		expect(existsSync(watchClaimFile("owner/name"))).toBe(false);

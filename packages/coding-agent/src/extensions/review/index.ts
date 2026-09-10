@@ -633,11 +633,12 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 				pending.push({ number: event.number, repo: event.repo, commentId: event.commentId });
 				void drain().catch(() => undefined);
 			},
+			// Only the session that actually took the repo catches up on it.
+			claimed: (repo) => queueOwedReviews([repo]),
 			notice: (message, kind) => say(message, kind),
 		});
 		const label = repos.length === 1 ? repos[0] : `${repos.length} repos`;
 		setWatchStatus(ctx, `watching ${label}`);
-		queueOwedReviews(repos);
 		return `watching ${repos.join(", ")}`;
 	};
 
@@ -647,7 +648,7 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 	 * A review runs for minutes in a hidden chat, and closing smolt, a crash, or
 	 * a failed run all end it silently — the pull request keeps the "reviewing
 	 * now" comment and hears nothing more. Whatever is still owed on a watched
-	 * repo is picked up here, when watching starts.
+	 * repo is picked up when this session takes the claim on it.
 	 */
 	const queueOwedReviews = (repos: string[]): void => {
 		for (const owed of listPendingReviews()) {

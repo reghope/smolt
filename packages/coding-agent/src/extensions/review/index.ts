@@ -88,10 +88,19 @@ ${COMMENT_HEADING}
 Reviewing this pull request, started ${started} UTC.${progress} This comment will be updated with the findings.`;
 }
 
-/** Put a body in the review comment, making one if the pull request has none yet. */
-function writeReviewComment(repo: string, pr: string, body: string): void {
+/**
+ * Put a body in the review comment, and say which comment that was.
+ *
+ * The id is the point. Finding the comment again costs a round trip and can
+ * fail — a slow 'gh pr view' returns nothing, which reads exactly like "there
+ * is no comment yet" — and a progress line that reacts to that by creating one
+ * posts a fresh comment every two minutes for as long as the review runs. So
+ * the id is taken once here and patched directly from then on.
+ */
+function writeReviewComment(repo: string, pr: string, body: string): string | undefined {
 	const gh = (args: string[]): string =>
 		execFileSync("gh", args, { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+	const idOf = (url: string): string | undefined => /#issuecomment-(\d+)$/.exec(url)?.[1];
 	try {
 		const existing = gh([
 			"pr",
@@ -104,16 +113,29 @@ function writeReviewComment(repo: string, pr: string, body: string): void {
 			"--jq",
 			`[.comments[] | select(.body | contains("${COMMENT_MARKER}")) | .url] | last // ""`,
 		]);
-		// The comments API needs the numeric id, which the URL ends with.
-		const id = /#issuecomment-(d+)$/.exec(existing)?.[1];
-		if (id === undefined) {
-			gh(["pr", "comment", pr, "--repo", repo, "--body", body]);
-			return;
+		const id = idOf(existing);
+		if (id !== undefined) {
+			patchReviewComment(repo, id, body);
+			return id;
 		}
-		gh(["api", "--method", "PATCH", `repos/${repo}/issues/comments/${id}`, "-f", `body=${body}`]);
+		// 'gh pr comment' prints the URL of what it made, which is where the id
+		// for every later update comes from.
+		return idOf(gh(["pr", "comment", pr, "--repo", repo, "--body", body]));
 	} catch {
 		// A pull request we cannot comment on is still worth reviewing; the review
 		// itself will report what it could not post.
+		return undefined;
+	}
+}
+
+/** Rewrite a comment we already know the id of. Never creates one. */
+function patchReviewComment(repo: string, id: string, body: string): void {
+	try {
+		execFileSync("gh", ["api", "--method", "PATCH", `repos/${repo}/issues/comments/${id}`, "-f", `body=${body}`], {
+			stdio: "ignore",
+		});
+	} catch {
+		// A progress line is worth nothing if losing it costs the review.
 	}
 }
 
@@ -123,7 +145,7 @@ const PROGRESS_MS = 120_000;
 /** Findings recorded by the review running now, for that progress line. */
 let findingsSoFar = 0;
 
-function acknowledge(repo: string, pr: string, started: string, commentId?: number): void {
+function acknowledge(repo: string, pr: string, started: string, commentId?: number): string | undefined {
 	// First, and on its own: it lands in the moment rather than after the two
 	// round trips below, and a pull request we cannot edit a comment on is
 	// usually still one we can react on.
@@ -140,7 +162,7 @@ function acknowledge(repo: string, pr: string, started: string, commentId?: numb
 			// A reaction is the nicety, not the acknowledgement.
 		}
 	}
-	writeReviewComment(repo, pr, reviewingBody(started, 0, 0));
+	return writeReviewComment(repo, pr, reviewingBody(started, 0, 0));
 }
 
 /**
@@ -526,15 +548,16 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 		const model = reviewModel(settings, ctx);
 		// Before the review, not after it: the pull request should show it was heard.
 		const started = new Date().toISOString().replace("T", " ").slice(0, 16);
-		acknowledge(next.repo, String(next.number), started, next.commentId);
+		const reviewComment = acknowledge(next.repo, String(next.number), started, next.commentId);
 		// Reading a large pull request takes tens of minutes, and the comment used
 		// to say the same thing for every one of them: whoever asked could not
 		// tell a review still going from one that had died. Unref'd, because a
 		// review in flight is not a reason for smolt to stay alive.
 		findingsSoFar = 0;
 		const progress = setInterval(() => {
+			if (reviewComment === undefined) return;
 			const minutes = Math.round((Date.now() - startedAt) / 60_000);
-			writeReviewComment(next.repo, String(next.number), reviewingBody(started, minutes, findingsSoFar));
+			patchReviewComment(next.repo, reviewComment, reviewingBody(started, minutes, findingsSoFar));
 		}, PROGRESS_MS);
 		progress.unref();
 		// On disk before the work starts, so a review interrupted by a closed

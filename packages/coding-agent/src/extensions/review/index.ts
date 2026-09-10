@@ -63,30 +63,82 @@ const COMMENT_MARKER = "<!-- smolt-review -->";
 const COMMENT_HEADING =
 	'<img src="https://raw.githubusercontent.com/reghope/smolt/main/packages/desktop/build/icon.png" width="22" align="top" alt=""> **Smolt review**';
 
+/** How far a review has got: what it has opened, and what that says about the rest. */
+export interface ReviewProgress {
+	minutes: number;
+	findings: number;
+	/** Changed files the transcript shows it has opened. */
+	covered: number;
+	/** Changed files in the pull request. Zero when we could not ask. */
+	total: number;
+}
+
 /**
- * Say on the pull request that a review has started, before it starts.
+ * The line the pull request shows while a review runs.
  *
- * A review takes minutes, and until now the pull request said nothing at all
- * in the meantime: whoever asked for it, by opening the pull request or by
- * commenting, had no way to tell it had been heard. This is the same marker
- * comment the finished review updates in place, so the acknowledgement becomes
- * the review rather than standing beside it.
- *
- * The start time is in the text because that comment is edited rather than
- * re-posted, and one review request looks exactly like the next: asking again
- * while it still said "Reviewing this pull request now" from a run that had
- * died wrote the identical body back, changed nothing anyone could see, and
- * read as though the request had been ignored. A reaction goes on the comment
- * that asked, which is where whoever asked is actually looking.
+ * Counting files rather than only minutes because "twelve minutes in" says
+ * nothing about whether that is nearly done or barely started, and a review of
+ * a 249-file pull request is a very different wait from one of five. The
+ * estimate is arithmetic on the rate so far, and is called an estimate: a
+ * reviewer reads the risky files slowly and the mechanical ones in batches, so
+ * it moves about, and it is better than the nothing that was there before.
  */
-function reviewingBody(started: string, minutes: number, findings: number): string {
+export function reviewingBody(started: string, progress: ReviewProgress): string {
+	const { minutes, findings, covered, total } = progress;
 	const found = findings === 0 ? "nothing recorded yet" : `${findings} finding${findings === 1 ? "" : "s"} so far`;
-	const progress = minutes < 1 ? "" : ` ${minutes} minute${minutes === 1 ? "" : "s"} in, ${found}.`;
+	const parts: string[] = [];
+	if (minutes >= 1) parts.push(`${minutes} minute${minutes === 1 ? "" : "s"} in`);
+	if (total > 0) parts.push(`${covered}/${total} files (${Math.round((covered / total) * 100)}%)`);
+	if (minutes >= 1) parts.push(found);
+	const line = parts.length === 0 ? "" : ` ${parts.join(", ")}.`;
+	// Needs both a rate and somewhere left to go; two files in twenty minutes
+	// would otherwise promise an afternoon on the strength of almost nothing.
+	const remaining = total - covered;
+	const estimate =
+		covered >= 3 && remaining > 0 && minutes >= 2
+			? ` Estimated ${Math.max(1, Math.round((remaining * minutes) / covered))} more minutes at this rate.`
+			: "";
 	return `${COMMENT_MARKER}
 
 ${COMMENT_HEADING}
 
-Reviewing this pull request, started ${started} UTC.${progress} This comment will be updated with the findings.`;
+Reviewing this pull request, started ${started} UTC.${line}${estimate} This comment will be updated with the findings.`;
+}
+
+/** The files the pull request changes, which is what a review has to get through. */
+function changedFiles(repo: string, pr: string): string[] {
+	try {
+		const out = execFileSync("gh", ["pr", "view", pr, "--repo", repo, "--json", "files", "--jq", ".files[].path"], {
+			encoding: "utf-8",
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+		return out.split("\n").filter((line) => line.trim() !== "");
+	} catch {
+		// Without the list the progress line simply says less.
+		return [];
+	}
+}
+
+/**
+ * How many of those files the review has opened, read from its own transcript.
+ *
+ * A path that appears anywhere in the transcript has been named in a command or
+ * come back in a result, which is as close to "looked at" as can be had without
+ * the reviewer reporting it — and a reviewer that has to report its own
+ * progress will forget to. Deliberately generous rather than exact: this drives
+ * a progress line, not a decision.
+ */
+export function filesCovered(transcript: string | undefined, files: string[]): number {
+	if (transcript === undefined || files.length === 0) return 0;
+	let raw: string;
+	try {
+		raw = fs.readFileSync(transcript, "utf-8");
+	} catch {
+		return 0;
+	}
+	let covered = 0;
+	for (const file of files) if (raw.includes(file)) covered += 1;
+	return covered;
 }
 
 /**
@@ -146,6 +198,22 @@ const PROGRESS_MS = 120_000;
 /** Findings recorded by the review running now, for that progress line. */
 let findingsSoFar = 0;
 
+/**
+ * Say on the pull request that a review has started, before it starts.
+ *
+ * A review takes minutes, and until now the pull request said nothing at all
+ * in the meantime: whoever asked for it, by opening the pull request or by
+ * commenting, had no way to tell it had been heard. This is the same marker
+ * comment the finished review updates in place, so the acknowledgement becomes
+ * the review rather than standing beside it.
+ *
+ * The start time is in the text because that comment is edited rather than
+ * re-posted, and one review request looks exactly like the next: asking again
+ * while it still said "Reviewing this pull request now" from a run that had
+ * died wrote the identical body back, changed nothing anyone could see, and
+ * read as though the request had been ignored. A reaction goes on the comment
+ * that asked, which is where whoever asked is actually looking.
+ */
 function acknowledge(repo: string, pr: string, started: string, commentId?: number): string | undefined {
 	// First, and on its own: it lands in the moment rather than after the two
 	// round trips below, and a pull request we cannot edit a comment on is
@@ -163,7 +231,8 @@ function acknowledge(repo: string, pr: string, started: string, commentId?: numb
 			// A reaction is the nicety, not the acknowledgement.
 		}
 	}
-	return writeReviewComment(repo, pr, reviewingBody(started, 0, 0));
+	// Nothing read and nothing found yet, which is exactly what it should say.
+	return writeReviewComment(repo, pr, reviewingBody(started, { minutes: 0, findings: 0, covered: 0, total: 0 }));
 }
 
 /**
@@ -579,10 +648,24 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 		// tell a review still going from one that had died. Unref'd, because a
 		// review in flight is not a reason for smolt to stay alive.
 		findingsSoFar = 0;
+		// Asked once: the file list of a pull request does not change under a
+		// review, and it is what every later percentage is measured against.
+		const changed = changedFiles(next.repo, String(next.number));
+		// Set once the child exists; until then there is no transcript to read a
+		// file count out of, and the line simply carries fewer numbers.
+		let transcript: string | undefined = resumeFrom;
 		const progress = setInterval(() => {
 			if (reviewComment === undefined) return;
-			const minutes = Math.round((Date.now() - startedAt) / 60_000);
-			patchReviewComment(next.repo, reviewComment, reviewingBody(started, minutes, findingsSoFar));
+			patchReviewComment(
+				next.repo,
+				reviewComment,
+				reviewingBody(started, {
+					minutes: Math.round((Date.now() - startedAt) / 60_000),
+					findings: findingsSoFar,
+					covered: filesCovered(transcript, changed),
+					total: changed.length,
+				}),
+			);
 		}, PROGRESS_MS);
 		progress.unref();
 		// On disk before the work starts, so a review interrupted by a closed
@@ -623,7 +706,11 @@ export default function reviewExtension(smolt: ExtensionAPI): void {
 			);
 			// Noted once the child exists, so a run killed from here on is resumed
 			// in this transcript rather than started again from the first file.
-			if (child.sessionFile !== undefined) recordReviewSession(next.repo, next.number, child.sessionFile);
+			// It is also what the progress line counts files out of.
+			if (child.sessionFile !== undefined) {
+				transcript = child.sessionFile;
+				recordReviewSession(next.repo, next.number, child.sessionFile);
+			}
 		} catch (error) {
 			clearInterval(progress);
 			reviewingPullRequest = false;

@@ -105,13 +105,23 @@ ${COMMENT_HEADING}
 Reviewing this pull request, started ${started} UTC.${line}${estimate} This comment will be updated with the findings.`;
 }
 
-/** The files the pull request changes, which is what a review has to get through. */
+/**
+ * The files the pull request changes, which is what a review has to get through.
+ *
+ * Through the paginated API rather than `gh pr view --json files`, which stops
+ * at one page: on a 250-file pull request that returned exactly 100, so the
+ * progress line measured against the wrong total and stuck near the end of a
+ * hundred while the review was a third of the way through two hundred and fifty.
+ */
 function changedFiles(repo: string, pr: string): string[] {
 	try {
-		const out = execFileSync("gh", ["pr", "view", pr, "--repo", repo, "--json", "files", "--jq", ".files[].path"], {
-			encoding: "utf-8",
-			stdio: ["ignore", "pipe", "ignore"],
-		});
+		const out = execFileSync(
+			"gh",
+			["api", "--paginate", `repos/${repo}/pulls/${pr}/files`, "--jq", ".[].filename"],
+			// A pull request with thousands of files would otherwise overrun the
+			// default pipe buffer and count as none at all.
+			{ encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 16 * 1024 * 1024 },
+		);
 		return out.split("\n").filter((line) => line.trim() !== "");
 	} catch {
 		// Without the list the progress line simply says less.

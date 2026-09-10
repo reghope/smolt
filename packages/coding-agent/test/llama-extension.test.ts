@@ -499,9 +499,34 @@ describe("llama.cpp extension", () => {
 		expect(propsRequests).toBe(1);
 		// A GGUF the router found in the models directory or the HuggingFace
 		// cache loads exactly like a hand-written preset, so it belongs in the
-		// picker. Only the one whose last load failed stays out.
-		expect(controller.provider.getModels().map((model) => model.id)).toEqual(["preset", "cache", "models-dir"]);
-		expect(cachedEntry?.models.map((model) => model.id)).toEqual(["preset", "cache", "models-dir"]);
+		// picker. The one whose last load failed belongs there too, at the end:
+		// a missing model reads as a missing file rather than a broken preset.
+		const order = ["preset", "cache", "models-dir", "failed-preset"];
+		expect(controller.provider.getModels().map((model) => model.id)).toEqual(order);
+		expect(cachedEntry?.models.map((model) => model.id)).toEqual(order);
+	});
+
+	it("puts the running model at the top of the picker", () => {
+		// The catalog comes back in the router's own order, which is the models
+		// folder's. What the reader wants first is the model already in VRAM.
+		const controller = createLlamaProvider();
+		controller.setCatalog(
+			[
+				{ id: "cold", status: { value: "unloaded" } },
+				{ id: "burnt", status: { value: "unloaded", failed: true } },
+				{ id: "running", status: { value: "loaded" } },
+				{ id: "also-cold", status: { value: "unloaded" } },
+			],
+			"http://localhost:8080",
+			{ routerAutoload: true },
+		);
+
+		expect(controller.provider.getModels().map((model) => model.id)).toEqual([
+			"running",
+			"cold",
+			"also-cold",
+			"burnt",
+		]);
 	});
 
 	it("still asks about autoload when the catalog holds no presets at all", async () => {

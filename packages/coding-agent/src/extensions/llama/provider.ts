@@ -44,8 +44,34 @@ function modelIsSelectable(model: LlamaModelInfo, routerAutoload: boolean): bool
 	// just as it does for a hand-written one, and loads them the same way — so
 	// requiring `source === "preset"` hid every local model except the one
 	// already running, which is not what a picker of local models is for.
-	// A model whose last load failed stays hidden: it is known not to start.
-	return routerAutoload && model.status.value === "unloaded" && !model.status.failed;
+	// One whose last load failed is listed too, ranked last rather than hidden:
+	// dropping it made a models folder look emptier than it is, and the usual
+	// cause is a preset the reader can fix once they can see what is missing.
+	return routerAutoload && model.status.value === "unloaded";
+}
+
+/**
+ * Where an entry sits in the picker. The model already up comes first: it is
+ * the one that answers without a load, and on a single-GPU box choosing any
+ * other evicts it. Models the router would start on demand follow, and the
+ * ones whose last start failed come last.
+ */
+function selectionRank(model: LlamaModelInfo): number {
+	if (model.status.value === "loaded" || model.status.value === "sleeping") return 0;
+	return model.status.failed === true ? 2 : 1;
+}
+
+/** The catalog as picker entries: the unroutable dropped, the running one first. */
+function selectableModels(
+	catalog: readonly LlamaModelInfo[],
+	serverUrl: string,
+	routerAutoload: boolean,
+	props?: ReadonlyMap<string, LlamaServerProps>,
+): Model<"openai-completions">[] {
+	return catalog
+		.filter((model) => modelIsSelectable(model, routerAutoload))
+		.sort((left, right) => selectionRank(left) - selectionRank(right))
+		.map((model) => toSmoltModel(model, serverUrl, props?.get(model.id)));
 }
 
 async function routerAutoloadEnabled(
@@ -53,7 +79,7 @@ async function routerAutoloadEnabled(
 	catalog: readonly LlamaModelInfo[],
 	signal: AbortSignal,
 ): Promise<boolean> {
-	if (!catalog.some((model) => model.status.value === "unloaded" && !model.status.failed)) return false;
+	if (!catalog.some((model) => model.status.value === "unloaded")) return false;
 	try {
 		return (await client.props({ signal })).models_autoload === true;
 	} catch {
@@ -136,9 +162,7 @@ export function createLlamaProvider(): LlamaProviderController {
 		serverUrl: string,
 		options: { routerAutoload?: boolean; props?: ReadonlyMap<string, LlamaServerProps> } = {},
 	): void => {
-		models = catalog
-			.filter((model) => modelIsSelectable(model, options.routerAutoload === true))
-			.map((model) => toSmoltModel(model, serverUrl, options.props?.get(model.id)));
+		models = selectableModels(catalog, serverUrl, options.routerAutoload === true, options.props);
 	};
 
 	const provider: Provider<"openai-completions"> = {
@@ -216,9 +240,7 @@ export function createLlamaProvider(): LlamaProviderController {
 			if (context.signal.aborted) return;
 			const props = await loadedModelProps(client, catalog, context.signal);
 			if (context.signal.aborted) return;
-			const refreshed = catalog
-				.filter((model) => modelIsSelectable(model, routerAutoload))
-				.map((model) => toSmoltModel(model, serverUrl, props.get(model.id)));
+			const refreshed = selectableModels(catalog, serverUrl, routerAutoload, props);
 			await context.publish({
 				persist: { models: refreshed, checkedAt: Date.now() },
 				update: () => {

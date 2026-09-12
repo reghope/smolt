@@ -304,8 +304,24 @@ export function createSitesExtension(
 		const anonymous = new ImaginedClient(baseUrl(), undefined, fetchImpl);
 		const code = await anonymous.deviceCode();
 		const shown = formatCode(code.userCode);
+		const minutes = Math.max(1, Math.round(code.expiresIn / 60));
+		// The code goes into the transcript, not just a passing notice: the
+		// browser page asks the reader to check it against what smolt shows, and
+		// the desktop app keeps no notices. The full link is there too, so the
+		// approval can happen on a phone or another machine when this one has no
+		// browser to open, or opened the wrong one.
+		report(
+			[
+				`Authorise smolt on imagined.so. Your code is **${shown}**.`,
+				"",
+				`A browser page should have opened. If it did not, open ${code.verificationUriComplete} on any device where you are logged in to imagined.so.`,
+				`Check the page shows ${shown}, then click Authorise. There is nothing to type into smolt; this chat continues on its own once the page confirms it.`,
+				`The code is good for about ${minutes} minutes.`,
+			].join("\n"),
+		);
 		ctx.ui.notify(`Confirm the code ${shown} at ${code.verificationUri} to authorise smolt.`, "info");
 		ctx.ui.setStatus("sites", `waiting for ${shown} to be approved`);
+		ctx.ui.setWidget("sites", [`imagined.so: approve code ${shown} at ${code.verificationUri}`]);
 		open(code.verificationUriComplete);
 		try {
 			const deadline = Date.now() + Math.min(code.expiresIn * 1000, MAX_LOGIN_WAIT_MS);
@@ -340,6 +356,7 @@ export function createSitesExtension(
 			return `Nobody approved ${shown} in time. Run /sites login again.`;
 		} finally {
 			ctx.ui.setStatus("sites", undefined);
+			ctx.ui.setWidget("sites", undefined);
 		}
 	}
 

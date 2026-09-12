@@ -208,6 +208,7 @@ function context(overrides: Record<string, unknown> = {}) {
 		ui: {
 			notify: () => {},
 			setStatus: () => {},
+			setWidget: () => {},
 			select: async (_title: string, options: string[]) => options[0],
 			confirm: async () => true,
 			input: async (_title: string, placeholder?: string) => placeholder,
@@ -268,6 +269,11 @@ describe("signing in", () => {
 	test("the device flow opens the approval page, polls, and keeps the session", async () => {
 		await smolt.command("login", context());
 		expect(opened).toEqual(["https://imagined.test/device?user_code=ABCD2345"]);
+		// The code and the link are in the transcript before the wait, so the
+		// reader can compare it with the page and approve from another device.
+		expect(smolt.reports[0]).toContain("**ABCD-2345**");
+		expect(smolt.reports[0]).toContain("https://imagined.test/device?user_code=ABCD2345");
+		expect(smolt.reports[0]).toMatch(/nothing to type into smolt/);
 		expect(smolt.reports.at(-1)).toBe("Signed in to imagined.so as rob@example.com.");
 		expect(loadCredentials(credentialsPath())?.token).toBe("session-token");
 		expect(handle.getCredentials()?.user.email).toBe("rob@example.com");

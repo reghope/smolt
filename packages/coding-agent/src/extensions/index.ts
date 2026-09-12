@@ -15,10 +15,12 @@ import researchExtension from "./research/index.ts";
 import reviewExtension from "./review/index.ts";
 import screenshotExtension from "./screenshot/index.ts";
 import sessionNameExtension from "./session-name/index.ts";
+import sitesExtension from "./sites/index.ts";
 import subagentsExtension from "./subagents/index.ts";
 import telegramExtension from "./telegram/index.ts";
 import toolsExtension from "./tools/index.ts";
 import wayfinderExtension from "./wayfinder/index.ts";
+import webserverExtension from "./webserver/index.ts";
 
 export const builtInExtensions: InlineExtension[] = [
 	{
@@ -140,6 +142,18 @@ export const builtInExtensions: InlineExtension[] = [
 		factory: cuesExtension,
 		hidden: true,
 		description: "House notes that enter the prompt only when their subject comes up",
+	},
+	{
+		name: "webserver",
+		factory: webserverExtension,
+		hidden: true,
+		description: "Serves the desktop app in a browser, switched on and off with /webserver",
+	},
+	{
+		name: "sites",
+		factory: sitesExtension,
+		hidden: true,
+		description: "Builds a site here and hosts it on imagined.so, with Supabase as its backend",
 	},
 	// Last on purpose: the analyst records each turn's system prompt after
 	// every other extension has appended to it, so blocks can be credited to

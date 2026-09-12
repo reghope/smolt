@@ -129,6 +129,8 @@ Smolt ships these extensions itself. Each one can be switched off by listing its
 | `pool` | Several credentials per provider, with failover when one hits a limit |
 | `telegram` | Two-way bridge between this session and your own Telegram bot |
 | `cues` | House notes that enter the prompt only when their subject comes up |
+| `webserver` | Serves the desktop app in a browser, switched on and off with `/webserver` |
+| `sites` | Builds a site here and hosts it on imagined.so, with Supabase as its backend |
 
 ## Extension Locations
 

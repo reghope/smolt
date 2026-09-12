@@ -89,6 +89,10 @@ class FakeImagined {
 		authEmail: "ready",
 	};
 	completeFails = false;
+	supabaseConnected = false;
+	/** Status polls after the authorisation page opens; the flow reads as connected on this many. */
+	connectAfterPolls = 1;
+	private statusPolls = 0;
 	lastUpload:
 		| { metadata: Record<string, unknown>; files: { field: string; name: string; text: string }[] }
 		| undefined;
@@ -173,6 +177,28 @@ class FakeImagined {
 				liveUrl: "https://old-site.imagined.sh",
 				history: [],
 			});
+		if (path === "/api/supabase/status") {
+			this.statusPolls++;
+			const connected =
+				this.supabaseConnected || (this.connectAfterPolls > 0 && this.statusPolls > this.connectAfterPolls);
+			if (connected) this.supabaseConnected = true;
+			return json({
+				configured: true,
+				connected,
+				project: connected ? { url: "https://abc.supabase.co", anonKey: "k" } : null,
+				provisioning: false,
+			});
+		}
+		if (path === "/api/supabase/connect") {
+			return json({
+				url: `https://api.supabase.com/v1/oauth/authorize?state=s1&redirect=${encodeURIComponent(url.searchParams.get("returnTo") ?? "")}`,
+			});
+		}
+		if (path === "/api/supabase/disconnect") {
+			this.supabaseConnected = false;
+			this.statusPolls = 0;
+			return json({ ok: true });
+		}
 		if (path === "/api/supabase/database") return json(this.databaseAnswer);
 		if (path === "/api/supabase/sql") {
 			const sql = (body as { sql: string }).sql;
@@ -527,6 +553,54 @@ describe("the backend", () => {
 		>;
 		expect(String(result.error)).toMatch(/not linked/);
 		expect(imagined.requests.some((request) => request.path === "/api/supabase/sql")).toBe(false);
+	});
+});
+
+describe("the Supabase connection", () => {
+	beforeEach(() => {
+		signedIn();
+		build();
+	});
+
+	test("with nothing connected, the authorisation page opens and the wait ends on connected", async () => {
+		await smolt.command("supabase", context());
+		expect(opened[0]).toMatch(/^https:\/\/api.supabase.com\/v1\/oauth\/authorize\?state=s1/);
+		expect(opened[0]).toContain(encodeURIComponent("/settings/connections"));
+		expect(smolt.reports[0]).toMatch(/Connect Supabase/);
+		expect(smolt.reports.at(-1)).toMatch(/^Supabase is connected \(project https:\/\/abc.supabase.co\)/);
+	});
+
+	test("already connected, it reports and does not open anything", async () => {
+		imagined.supabaseConnected = true;
+		await smolt.command("supabase", context());
+		expect(opened).toEqual([]);
+		expect(smolt.reports.at(-1)).toMatch(/connected .*switch connects a different account/);
+	});
+
+	test("switch disconnects first, then authorises again", async () => {
+		imagined.supabaseConnected = true;
+		imagined.connectAfterPolls = 1;
+		await smolt.command("supabase switch", context());
+		const paths = imagined.requests.map((request) => request.path);
+		expect(paths.indexOf("/api/supabase/disconnect")).toBeGreaterThan(-1);
+		expect(paths.indexOf("/api/supabase/disconnect")).toBeLessThan(paths.indexOf("/api/supabase/connect"));
+		expect(opened).toHaveLength(1);
+		expect(smolt.reports.at(-1)).toMatch(/^Supabase is connected/);
+	});
+
+	test("a declined switch keeps the connection", async () => {
+		imagined.supabaseConnected = true;
+		await smolt.command("supabase switch", context({ ui: { ...context().ui, confirm: async () => false } }));
+		expect(imagined.requests.some((request) => request.path === "/api/supabase/disconnect")).toBe(false);
+		expect(smolt.reports.at(-1)).toBe("Kept the current Supabase connection.");
+	});
+
+	test("disconnect forgets the connection", async () => {
+		imagined.supabaseConnected = true;
+		imagined.connectAfterPolls = 0;
+		await smolt.command("supabase disconnect", context());
+		expect(imagined.requests.some((request) => request.path === "/api/supabase/disconnect")).toBe(true);
+		expect(smolt.reports.at(-1)).toMatch(/^Disconnected Supabase/);
 	});
 });
 

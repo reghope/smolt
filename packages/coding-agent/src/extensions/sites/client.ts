@@ -380,6 +380,22 @@ export class ImaginedClient {
 		};
 	}
 
+	/**
+	 * The Supabase authorisation page for this account, to open in a browser.
+	 * The callback lands on imagined.so and needs no session of its own: the
+	 * one-use state it carries names the account that started the flow.
+	 */
+	async supabaseConnectUrl(returnTo: string): Promise<string> {
+		const query = new URLSearchParams({ returnTo });
+		const raw = await this.request<{ url: string }>("GET", `/api/supabase/connect?${query}`);
+		return raw.url;
+	}
+
+	/** Forget the account's Supabase connection; its projects and data stay put. */
+	async supabaseDisconnect(): Promise<void> {
+		await this.request("POST", "/api/supabase/disconnect", {});
+	}
+
 	async database(owner: string, repo: string): Promise<DatabaseState> {
 		return this.request<DatabaseState>("POST", "/api/supabase/database", { owner, repo });
 	}

@@ -17,6 +17,7 @@ import {
 	type SiteLink,
 	type SitesCredentials,
 	type StorageBucket,
+	type SupabaseStatus,
 	saveCredentials,
 	saveSiteLink,
 } from "./client.ts";
@@ -59,6 +60,13 @@ const REPORT_DELIVERY = { triggerTurn: false } as const;
 /** Waiting longer than this for a device approval is waiting for nobody. */
 const MAX_LOGIN_WAIT_MS = 15 * 60 * 1000;
 
+/** How long a Supabase authorisation in the browser is waited for, and how often it is checked. */
+const CONNECT_WAIT_MS = 5 * 60 * 1000;
+const CONNECT_POLL_MS = 3000;
+
+/** Where the browser lands after Supabase hands the account back to imagined.so. */
+const CONNECT_RETURN_PATH = "/settings/connections";
+
 /** How long a build may take before it is abandoned as hung. */
 const BUILD_TIMEOUT_NOTE = "npm run build";
 
@@ -73,7 +81,9 @@ const USAGE = [
 	"/sites unpublish            take the site down",
 	"/sites open                 open the live site in a browser",
 	"/sites database             give the site its database and write its .env",
-	"/sites supabase             the account's Supabase connection; opens the page to connect",
+	"/sites supabase             the account's Supabase connection; connects it when there is none",
+	"/sites supabase switch      connect a different Supabase account (new databases go there)",
+	"/sites supabase disconnect  forget the connection; its projects and data stay where they are",
 ].join("\n");
 
 /** Words a request starts with that say nothing about what the site is. */
@@ -531,23 +541,90 @@ export function createSitesExtension(
 		}
 	}
 
-	async function supabase(cwd: string): Promise<string> {
+	function describeConnection(state: SupabaseStatus): string {
+		if (state.project) return `project ${state.project.url}`;
+		return state.provisioning ? "project still being created" : "no project yet";
+	}
+
+	/**
+	 * Send the reader through Supabase's authorisation page and wait for
+	 * imagined.so to report the account connected. The page is the same one
+	 * the site builder's Connect button opens; the round trip ends on
+	 * imagined.so, which is why the wait polls rather than listens.
+	 */
+	async function connectSupabase(api: ImaginedClient, ctx: ExtensionContext): Promise<string> {
+		const url = await api.supabaseConnectUrl(CONNECT_RETURN_PATH);
+		report(
+			[
+				"Connect Supabase: a browser page should have opened on Supabase's authorisation screen.",
+				`If it did not, open ${url} on any device. Sign in to the Supabase account you want to use and allow imagined.so.`,
+				"This chat continues on its own once the connection is made.",
+			].join("\n"),
+		);
+		ctx.ui.setStatus("sites", "waiting for Supabase to be authorised");
+		ctx.ui.setWidget("sites", ["Supabase: authorise imagined.so in the browser page that opened"]);
+		open(url);
+		try {
+			const deadline = Date.now() + CONNECT_WAIT_MS;
+			while (Date.now() < deadline) {
+				await sleep(CONNECT_POLL_MS);
+				const state = await api.supabaseStatus();
+				if (state.connected) {
+					return `Supabase is connected (${describeConnection(state)}). /sites database gives a linked site its schema and .env.`;
+				}
+			}
+			return "Supabase was not connected in time. Run /sites supabase again when you are ready.";
+		} finally {
+			ctx.ui.setStatus("sites", undefined);
+			ctx.ui.setWidget("sites", undefined);
+		}
+	}
+
+	async function supabase(cwd: string, action: string, ctx: ExtensionContext): Promise<string> {
 		const api = client();
 		if (!api) return "Not signed in to imagined.so. Run /sites login first.";
 		const state = await api.supabaseStatus();
 		if (!state.configured) return "imagined.so has no Supabase integration configured.";
-		if (state.connected) {
-			const detail = state.project
-				? `project ${state.project.url}`
-				: state.provisioning
-					? "project still being created"
-					: "no project yet";
-			const link = loadSiteLink(cwd);
-			return `Supabase is connected (${detail}).${link ? " /sites database gives this site its schema and .env." : ""}`;
+		switch (action) {
+			case "":
+			case "status": {
+				if (!state.connected) return connectSupabase(api, ctx);
+				const link = loadSiteLink(cwd);
+				return (
+					`Supabase is connected (${describeConnection(state)}).` +
+					(link ? " /sites database gives this site its schema and .env." : "") +
+					" /sites supabase switch connects a different account."
+				);
+			}
+			case "switch":
+			case "connect": {
+				if (state.connected) {
+					if (ctx.hasUI) {
+						const sure = await ctx.ui.confirm(
+							"Switch Supabase account?",
+							"New databases will be created in the account you connect next. Sites already using the current one keep their data there and keep working.",
+						);
+						if (!sure) return "Kept the current Supabase connection.";
+					}
+					await api.supabaseDisconnect();
+				}
+				return connectSupabase(api, ctx);
+			}
+			case "disconnect": {
+				if (!state.connected) return "Supabase is not connected.";
+				if (ctx.hasUI) {
+					const sure = await ctx.ui.confirm(
+						"Disconnect Supabase?",
+						"imagined.so forgets the connection. The project, its data and its keys stay in your Supabase account, and published sites keep working.",
+					);
+					if (!sure) return "Kept the Supabase connection.";
+				}
+				await api.supabaseDisconnect();
+				return "Disconnected Supabase from imagined.so. /sites supabase connects one again.";
+			}
+			default:
+				return "Usage: /sites supabase [switch | disconnect]";
 		}
-		const url = `${baseUrl()}/settings/connections`;
-		open(url);
-		return `Supabase is not connected. Opened ${url}; connect it there once, then run /sites database.`;
 	}
 
 	// ---- A request in one line ----
@@ -791,7 +868,7 @@ export function createSitesExtension(
 						report(databaseMessage(await database(cwd)));
 						return;
 					case "supabase":
-						report(await supabase(cwd));
+						report(await supabase(cwd, rest[0] ?? "", ctx));
 						return;
 					case "help":
 						ctx.ui.notify(USAGE, "info");

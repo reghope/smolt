@@ -81,7 +81,38 @@ class FakeSmolt {
 class FakeImagined {
 	requests: { method: string; path: string; auth: string | null; body: unknown }[] = [];
 	tokenAnswers: ("pending" | "ok" | "denied")[] = ["pending", "ok"];
+	databaseAnswer: Record<string, unknown> = {
+		state: "ready",
+		schema: "app_proj_1",
+		url: "https://abc.supabase.co",
+		anonKey: "anon-key",
+		authEmail: "ready",
+	};
 	completeFails = false;
+	/** Per service: whether the account has it connected, and how many status polls until it reads so. */
+	connections: Record<string, { connected: boolean; connectAfterPolls: number; polls: number }> = {
+		supabase: { connected: false, connectAfterPolls: 1, polls: 0 },
+		resend: { connected: false, connectAfterPolls: 1, polls: 0 },
+		stripe: { connected: false, connectAfterPolls: 1, polls: 0 },
+	};
+	emailAnswer: Record<string, unknown> = { state: "ready", function: "send-form", notifyEmail: "rob@example.com" };
+	paymentAnswer: Record<string, unknown> = {
+		state: "ready",
+		id: "plink_1",
+		url: "https://buy.stripe.com/test_1",
+		livemode: false,
+	};
+	checkoutAnswer: Record<string, unknown> = {
+		state: "ready",
+		function: "create-checkout",
+		items: [{ sku: "tee" }],
+		livemode: true,
+		deployment: "deployed",
+	};
+
+	connect(service: "supabase" | "resend" | "stripe", connected = true): void {
+		this.connections[service] = { connected, connectAfterPolls: connected ? 0 : 1, polls: 0 };
+	}
 	lastUpload:
 		| { metadata: Record<string, unknown>; files: { field: string; name: string; text: string }[] }
 		| undefined;
@@ -105,7 +136,6 @@ class FakeImagined {
 		} else if (typeof init?.body === "string") {
 			body = JSON.parse(init.body);
 		}
-		if (url.hostname === "api.supabase.com") return supabase.route(method, url, auth, body);
 		this.requests.push({ method, path: url.pathname, auth, body });
 		return this.route(method, url, auth, body);
 	};
@@ -167,53 +197,62 @@ class FakeImagined {
 				liveUrl: "https://old-site.imagined.sh",
 				history: [],
 			});
+		const service = /^\/api\/(supabase|resend|stripe-connect)\/(status|connect|disconnect)$/.exec(path);
+		if (service) {
+			const key = service[1] === "stripe-connect" ? "stripe" : service[1]!;
+			const record = this.connections[key]!;
+			if (service[2] === "status") {
+				record.polls++;
+				const connected =
+					record.connected || (record.connectAfterPolls > 0 && record.polls > record.connectAfterPolls);
+				if (connected) record.connected = true;
+				if (key === "supabase") {
+					return json({
+						configured: true,
+						connected,
+						project: connected ? { url: "https://abc.supabase.co", anonKey: "k" } : null,
+						provisioning: false,
+					});
+				}
+				if (key === "resend")
+					return json({
+						configured: true,
+						connected,
+						notifyEmail: connected ? "rob@example.com" : null,
+						fromDomain: null,
+					});
+				return json({
+					configured: true,
+					connected,
+					accountId: connected ? "acct_1" : null,
+					livemode: connected ? false : null,
+				});
+			}
+			if (service[2] === "connect") {
+				return json({
+					url: `https://auth.${key}.example/authorize?state=s1&redirect=${encodeURIComponent(url.searchParams.get("returnTo") ?? "")}`,
+				});
+			}
+			record.connected = false;
+			record.polls = 0;
+			return json({ ok: true });
+		}
+		if (path === "/api/resend/form-email") return json(this.emailAnswer);
+		if (path === "/api/stripe-connect/payment-link") return json(this.paymentAnswer);
+		if (path === "/api/stripe-connect/dynamic-checkout") return json(this.checkoutAnswer);
+		if (path === "/api/supabase/database") return json(this.databaseAnswer);
+		if (path === "/api/supabase/sql") {
+			const sql = (body as { sql: string }).sql;
+			if (/drop/i.test(sql))
+				return json({ error: "sql_failed", message: "App SQL cannot use destructive schema changes" }, 400);
+			return json({ ok: true });
+		}
+		if (path === "/api/supabase/storage")
+			return json({
+				ok: true,
+				buckets: [{ name: "avatars", id: "app_proj_1_avatars_abc", access: "user-private" }],
+			});
 		return json({ error: "Not found" }, 404);
-	}
-}
-
-/** The Supabase side: the Management API calls provisioning makes. */
-class FakeSupabase {
-	requests: { method: string; path: string; body: unknown }[] = [];
-	projects: { id: string; name: string; organization_id: string }[] = [];
-	healthy = true;
-	allowList = "https://existing.example/**";
-	postgrestSchemas = "public, graphql_public";
-
-	route(method: string, url: URL, auth: string | null, body: unknown): Response {
-		const json = (value: unknown, status = 200) => Response.json(value, { status });
-		const path = url.pathname;
-		this.requests.push({ method, path, body });
-		if (auth !== "Bearer sbp_test_token") return json({ message: "Unauthorized" }, 401);
-		if (path === "/v1/organizations") return json([{ id: "org-1", name: "Acme Org" }]);
-		if (path === "/v1/projects" && method === "GET") return json(this.projects);
-		if (path === "/v1/projects" && method === "POST") {
-			const created = { id: "newref", name: (body as { name: string }).name, organization_id: "org-1" };
-			this.projects.push(created);
-			return json({ id: created.id });
-		}
-		const project = /^\/v1\/projects\/([^/]+)\/(.+)$/.exec(path);
-		if (project) {
-			const rest = project[2]!;
-			if (rest.startsWith("health"))
-				return json([{ name: "db", status: this.healthy ? "ACTIVE_HEALTHY" : "COMING_UP" }]);
-			if (rest === "api-keys") return json([{ name: "anon", api_key: "anon-key" }]);
-			if (rest === "database/query") {
-				const sql = (body as { query: string }).query;
-				if (/drop table/i.test(sql)) return json({ message: "permission denied for drop" }, 400);
-				return json([]);
-			}
-			if (rest === "postgrest" && method === "GET") return json({ db_schema: this.postgrestSchemas });
-			if (rest === "postgrest" && method === "PATCH") {
-				this.postgrestSchemas = (body as { db_schema: string }).db_schema;
-				return json({ db_schema: this.postgrestSchemas });
-			}
-			if (rest === "config/auth" && method === "GET") return json({ uri_allow_list: this.allowList });
-			if (rest === "config/auth" && method === "PATCH") {
-				this.allowList = (body as { uri_allow_list: string }).uri_allow_list;
-				return json({ uri_allow_list: this.allowList });
-			}
-		}
-		return json({ message: "Not found" }, 404);
 	}
 }
 
@@ -221,7 +260,6 @@ let agentDir: string;
 let cwd: string;
 let smolt: FakeSmolt;
 let imagined: FakeImagined;
-let supabase: FakeSupabase;
 let handle: SitesHandle;
 let opened: string[];
 let commands: { command: string; args: string[] }[];
@@ -240,8 +278,7 @@ function context(overrides: Record<string, unknown> = {}) {
 			setWidget: () => {},
 			select: async (_title: string, options: string[]) => options[0],
 			confirm: async () => true,
-			input: async (title: string, placeholder?: string) =>
-				title.startsWith("Paste your Supabase access token") ? "sbp_test_token" : placeholder,
+			input: async (_title: string, placeholder?: string) => placeholder,
 		},
 		...overrides,
 	};
@@ -252,15 +289,6 @@ function signedIn(): void {
 		baseUrl: "https://imagined.test",
 		token: "session-token",
 		user: { id: "u1", email: "rob@example.com", name: "Rob" },
-	});
-}
-
-function supabaseConnected(projectRef?: string): void {
-	saveCredentials(credentialsPath(), {
-		baseUrl: "https://imagined.test",
-		token: "session-token",
-		user: { id: "u1", email: "rob@example.com", name: "Rob" },
-		supabase: projectRef ? { token: "sbp_test_token", projectRef } : { token: "sbp_test_token" },
 	});
 }
 
@@ -292,7 +320,6 @@ beforeEach(() => {
 	agentDir = mkdtempSync(join(tmpdir(), "smolt-sites-agent-"));
 	cwd = mkdtempSync(join(tmpdir(), "smolt-sites-cwd-"));
 	imagined = new FakeImagined();
-	supabase = new FakeSupabase();
 	opened = [];
 	commands = [];
 	process.env.SMOLT_SITES_URL = "https://imagined.test";
@@ -515,206 +542,217 @@ describe("publishing", () => {
 	});
 });
 
-describe("the Supabase connection", () => {
+describe("the backend", () => {
 	beforeEach(() => {
 		signedIn();
 		build();
-	});
-
-	test("with nothing connected, the tokens page opens and the pasted token is proved and kept", async () => {
-		await smolt.command("supabase", context());
-		expect(opened).toEqual(["https://supabase.com/dashboard/account/tokens"]);
-		expect(smolt.reports[0]).toMatch(/Connect Supabase/);
-		expect(smolt.reports[0]).toMatch(/Do not paste the token into this chat/);
-		expect(smolt.reports.at(-1)).toBe(
-			"Supabase is connected (Acme Org). /sites database gives a linked site its schema and .env.",
-		);
-		expect(loadCredentials(credentialsPath())?.supabase?.token).toBe("sbp_test_token");
-		expect(supabase.requests.some((request) => request.path === "/v1/organizations")).toBe(true);
-	});
-
-	test("a value that is not a token is refused before anything is sent", async () => {
-		await smolt.command("supabase", context({ ui: { ...context().ui, input: async () => "eyJhbGciOi..." } }));
-		expect(smolt.reports.at(-1)).toMatch(/does not look like a Supabase personal access token/);
-		expect(supabase.requests).toEqual([]);
-		expect(loadCredentials(credentialsPath())?.supabase).toBeUndefined();
-	});
-
-	test("a token Supabase rejects is not kept", async () => {
-		await smolt.command(
-			"supabase",
-			context({ ui: { ...context().ui, input: async () => "sbp_wrong_token_value_here" } }),
-		);
-		expect(smolt.reports.at(-1)).toMatch(/did not accept that token/);
-		expect(loadCredentials(credentialsPath())?.supabase).toBeUndefined();
-	});
-
-	test("the CLI's environment variable is honoured without a dialog", async () => {
-		process.env.SUPABASE_ACCESS_TOKEN = "sbp_test_token";
-		try {
-			await smolt.command("supabase", context({ hasUI: false }));
-		} finally {
-			delete process.env.SUPABASE_ACCESS_TOKEN;
-		}
-		expect(opened).toEqual([]);
-		expect(loadCredentials(credentialsPath())?.supabase?.token).toBe("sbp_test_token");
-	});
-
-	test("already connected, it reports and opens nothing", async () => {
-		supabaseConnected();
-		build();
-		await smolt.command("supabase", context());
-		expect(opened).toEqual([]);
-		expect(smolt.reports.at(-1)).toMatch(
-			/^Supabase: connected; the shared project is created on first \/sites database/,
-		);
-	});
-
-	test("switch forgets the token, then asks for another", async () => {
-		supabaseConnected("oldref");
-		build();
-		await smolt.command("supabase switch", context());
-		expect(opened).toEqual(["https://supabase.com/dashboard/account/tokens"]);
-		expect(smolt.reports.at(-1)).toMatch(/^Supabase is connected/);
-		expect(loadCredentials(credentialsPath())?.supabase?.projectRef).toBeUndefined();
-	});
-
-	test("a declined switch keeps the connection", async () => {
-		supabaseConnected("oldref");
-		build();
-		await smolt.command("supabase switch", context({ ui: { ...context().ui, confirm: async () => false } }));
-		expect(opened).toEqual([]);
-		expect(loadCredentials(credentialsPath())?.supabase?.projectRef).toBe("oldref");
-		expect(smolt.reports.at(-1)).toBe("Kept the current Supabase connection.");
-	});
-
-	test("disconnect forgets the token", async () => {
-		supabaseConnected("oldref");
-		build();
-		await smolt.command("supabase disconnect", context());
-		expect(loadCredentials(credentialsPath())?.supabase).toBeUndefined();
-		expect(smolt.reports.at(-1)).toMatch(/^Disconnected Supabase/);
-	});
-});
-
-describe("the backend", () => {
-	beforeEach(() => {
 		saveSiteLink(cwd, { owner: "~managed", repo: "proj-1", name: "Old Site" });
 	});
 
-	test("without Supabase, database says how to connect and writes nothing", async () => {
-		signedIn();
-		build();
-		const result = JSON.parse(await smolt.tool({ action: "database" }, context())) as Record<string, unknown>;
-		expect(result.state).toBe("not_connected");
-		expect(String(result.message)).toMatch(/\/sites supabase/);
-		expect(existsSync(join(cwd, ".env"))).toBe(false);
-	});
-
-	test("database adopts the shared project, gives the site its schema, and writes .env", async () => {
-		supabaseConnected();
-		supabase.projects = [{ id: "sharedref", name: "imagined", organization_id: "org-1" }];
-		build();
+	test("database writes the credentials into .env and names the schema", async () => {
 		writeFileSync(join(cwd, ".env"), "VITE_APP_TITLE=Shop\nVITE_SUPABASE_URL=old\n");
 		const result = JSON.parse(await smolt.tool({ action: "database" }, context())) as Record<string, unknown>;
 		expect(result.state).toBe("ready");
-		expect(result.schema).toBe("app_proj_1");
 		expect(String(result.message)).toContain("{ db: { schema: 'app_proj_1' } }");
 		expect(readFileSync(join(cwd, ".env"), "utf-8")).toBe(
-			"VITE_APP_TITLE=Shop\nVITE_SUPABASE_URL=https://sharedref.supabase.co\nVITE_SUPABASE_ANON_KEY=anon-key\n",
+			"VITE_APP_TITLE=Shop\nVITE_SUPABASE_URL=https://abc.supabase.co\nVITE_SUPABASE_ANON_KEY=anon-key\n",
 		);
-		const queries = supabase.requests
-			.filter((request) => request.path.endsWith("/database/query"))
-			.map((request) => (request.body as { query: string }).query);
-		expect(queries[0]).toContain("create schema if not exists app_proj_1");
-		expect(supabase.postgrestSchemas).toBe("public, graphql_public, app_proj_1");
-		expect(supabase.requests.some((request) => request.path === "/v1/projects" && request.method === "POST")).toBe(
-			false,
-		);
-		const kept = loadCredentials(credentialsPath())?.supabase;
-		expect(kept).toMatchObject({
-			projectRef: "sharedref",
-			projectUrl: "https://sharedref.supabase.co",
-			anonKey: "anon-key",
-		});
 	});
 
-	test("with no shared project yet, database creates one and reports provisioning until it is healthy", async () => {
-		supabaseConnected();
-		supabase.healthy = false;
-		build();
-		const first = JSON.parse(await smolt.tool({ action: "database" }, context())) as Record<string, unknown>;
-		expect(first.state).toBe("provisioning");
-		const created = supabase.requests.find((request) => request.path === "/v1/projects" && request.method === "POST");
-		expect(created?.body).toMatchObject({ organization_id: "org-1", name: "imagined" });
-		expect(loadCredentials(credentialsPath())?.supabase?.projectRef).toBe("newref");
-		supabase.healthy = true;
-		const second = JSON.parse(await smolt.tool({ action: "database" }, context())) as Record<string, unknown>;
-		expect(second.state).toBe("ready");
+	test("not connected points at the connection page and writes nothing", async () => {
+		imagined.databaseAnswer = { state: "not_connected" };
+		const result = JSON.parse(await smolt.tool({ action: "database" }, context())) as Record<string, unknown>;
+		expect(String(result.message)).toMatch(/Run \/sites supabase to connect it once/);
+		expect(existsSync(join(cwd, ".env"))).toBe(false);
 	});
 
-	test("sql runs inside the site's schema with the RLS audit, and refuses destructive SQL locally", async () => {
-		supabaseConnected("sharedref");
-		build();
+	test("sql runs inside the project and reports a refusal verbatim", async () => {
 		const ok = JSON.parse(
 			await smolt.tool({ action: "sql", sql: "create table if not exists t (id int)" }, context()),
 		);
 		expect(ok).toEqual({ ok: true });
-		const sent = (supabase.requests.at(-1)?.body as { query: string }).query;
-		expect(sent).toContain("set local search_path to app_proj_1, public;");
-		expect(sent).toContain("create table if not exists t (id int)");
-		expect(sent).toContain("Every app table needs RLS");
-		const before = supabase.requests.length;
+		expect(imagined.requests.at(-1)?.body).toMatchObject({ owner: "~managed", repo: "proj-1" });
 		const refused = JSON.parse(await smolt.tool({ action: "sql", sql: "drop table t" }, context())) as Record<
 			string,
 			unknown
 		>;
 		expect(refused).toEqual({ ok: false, error: "App SQL cannot use destructive schema changes" });
-		expect(supabase.requests.length).toBe(before);
-	});
-
-	test("sql before database says so", async () => {
-		supabaseConnected();
-		build();
-		const result = JSON.parse(await smolt.tool({ action: "sql", sql: "select 1" }, context())) as Record<
-			string,
-			unknown
-		>;
-		expect(String(result.error)).toMatch(/call the database action first/);
 	});
 
 	test("storage returns the physical bucket ids", async () => {
-		supabaseConnected("sharedref");
-		build();
 		const result = JSON.parse(
 			await smolt.tool({ action: "storage", buckets: [{ name: "avatars", access: "user-private" }] }, context()),
-		) as { ok: boolean; buckets: { id: string; name: string }[] };
-		expect(result.ok).toBe(true);
-		expect(result.buckets[0]?.name).toBe("avatars");
-		expect(result.buckets[0]?.id).toMatch(/^smolt-proj-1-[a-z0-9]{7}-avatars$/);
-		const sent = (supabase.requests.at(-1)?.body as { query: string }).query;
-		expect(sent).toContain("insert into storage.buckets");
-		expect(sent).toContain("(storage.foldername(name))[1] = (select auth.uid()::text)");
-	});
-
-	test("publishing puts the live origin on the auth allowlist", async () => {
-		supabaseConnected("sharedref");
-		build();
-		writeFileSync(join(cwd, "index.html"), "<html></html>");
-		await smolt.command("publish", context());
-		expect(supabase.allowList).toBe("https://existing.example/**,https://old-site.imagined.sh/**");
+		) as { buckets: { id: string }[] };
+		expect(result.buckets[0]?.id).toBe("app_proj_1_avatars_abc");
 	});
 
 	test("an unlinked directory is told so instead of calling out", async () => {
-		supabaseConnected("sharedref");
-		build();
 		rmSync(join(cwd, ".smolt"), { recursive: true, force: true });
 		const result = JSON.parse(await smolt.tool({ action: "sql", sql: "select 1" }, context())) as Record<
 			string,
 			unknown
 		>;
 		expect(String(result.error)).toMatch(/not linked/);
-		expect(supabase.requests).toEqual([]);
+		expect(imagined.requests.some((request) => request.path === "/api/supabase/sql")).toBe(false);
+	});
+});
+
+describe("account connections", () => {
+	beforeEach(() => {
+		signedIn();
+		build();
+	});
+
+	test("with nothing connected, the authorisation page opens and the wait ends on connected", async () => {
+		await smolt.command("supabase", context());
+		expect(opened[0]).toMatch(/^https:\/\/auth.supabase.example\/authorize\?state=s1/);
+		expect(opened[0]).toContain(encodeURIComponent("/settings/connections"));
+		expect(smolt.reports[0]).toMatch(/Connect Supabase/);
+		expect(smolt.reports.at(-1)).toBe(
+			"Supabase is connected, project https://abc.supabase.co. /sites database gives a linked site its schema and .env.",
+		);
+	});
+
+	test("resend and stripe connect the same way, each through its own routes", async () => {
+		await smolt.command("resend", context());
+		expect(opened[0]).toMatch(/^https:\/\/auth.resend.example\//);
+		expect(smolt.reports.at(-1)).toMatch(/^Resend is connected \(rob@example.com\)\. Forms can now email you/);
+		await smolt.command("stripe", context());
+		expect(opened[1]).toMatch(/^https:\/\/auth.stripe.example\//);
+		expect(smolt.reports.at(-1)).toMatch(/^Stripe is connected \(acct_1\)\. Payments can now be taken/);
+		const paths = imagined.requests.map((request) => request.path);
+		expect(paths).toContain("/api/resend/connect");
+		expect(paths).toContain("/api/stripe-connect/connect");
+	});
+
+	test("already connected, it reports and does not open anything", async () => {
+		imagined.connect("supabase");
+		await smolt.command("supabase", context());
+		expect(opened).toEqual([]);
+		expect(smolt.reports.at(-1)).toMatch(/^Supabase: connected, project .*switch connects a different account/);
+	});
+
+	test("switch disconnects first, then authorises again", async () => {
+		imagined.connect("stripe");
+		imagined.connections.stripe!.connectAfterPolls = 1;
+		await smolt.command("stripe switch", context());
+		const paths = imagined.requests.map((request) => request.path);
+		expect(paths.indexOf("/api/stripe-connect/disconnect")).toBeGreaterThan(-1);
+		expect(paths.indexOf("/api/stripe-connect/disconnect")).toBeLessThan(
+			paths.indexOf("/api/stripe-connect/connect"),
+		);
+		expect(opened).toHaveLength(1);
+		expect(smolt.reports.at(-1)).toMatch(/^Stripe is connected/);
+	});
+
+	test("a declined switch keeps the connection", async () => {
+		imagined.connect("supabase");
+		await smolt.command("supabase switch", context({ ui: { ...context().ui, confirm: async () => false } }));
+		expect(imagined.requests.some((request) => request.path === "/api/supabase/disconnect")).toBe(false);
+		expect(smolt.reports.at(-1)).toBe("Kept the current Supabase connection.");
+	});
+
+	test("disconnect forgets the connection", async () => {
+		imagined.connect("resend");
+		await smolt.command("resend disconnect", context());
+		expect(imagined.requests.some((request) => request.path === "/api/resend/disconnect")).toBe(true);
+		expect(smolt.reports.at(-1)).toMatch(/^Disconnected Resend/);
+	});
+
+	test("status lists every connection", async () => {
+		imagined.connect("supabase");
+		imagined.connect("stripe");
+		await smolt.command("", context());
+		const report = smolt.reports.at(-1) ?? "";
+		expect(report).toContain("Supabase: connected, project https://abc.supabase.co.");
+		expect(report).toContain("Resend: not connected.");
+		expect(report).toContain("Stripe: connected (acct_1).");
+	});
+});
+
+describe("email and payments", () => {
+	beforeEach(() => {
+		signedIn();
+		build();
+		saveSiteLink(cwd, { owner: "~managed", repo: "proj-1", name: "Old Site" });
+	});
+
+	test("email reports the function to invoke and where mail lands", async () => {
+		const result = JSON.parse(await smolt.tool({ action: "email" }, context())) as Record<string, unknown>;
+		expect(result.state).toBe("ready");
+		expect(String(result.message)).toContain("supabase.functions.invoke('send-form'");
+		expect(String(result.message)).toContain("emailed to rob@example.com");
+		expect(imagined.requests.at(-1)?.body).toEqual({ owner: "~managed", repo: "proj-1" });
+	});
+
+	test("email not connected says to run /sites resend and to wire the form anyway", async () => {
+		imagined.emailAnswer = { state: "needs_resend" };
+		const result = JSON.parse(await smolt.tool({ action: "email" }, context())) as Record<string, unknown>;
+		expect(String(result.message)).toMatch(/run \/sites resend/);
+		expect(String(result.message)).toMatch(/WIRE THE FORM ANYWAY/);
+	});
+
+	test("payment_link sends the item and returns the hosted checkout", async () => {
+		const result = JSON.parse(
+			await smolt.tool(
+				{ action: "payment_link", name: "Pro plan", unit_amount: 2900, currency: "gbp", interval: "month" },
+				context(),
+			),
+		) as Record<string, unknown>;
+		expect(result.state).toBe("ready");
+		expect(String(result.message)).toContain("https://buy.stripe.com/test_1");
+		expect(String(result.message)).toContain("(test mode)");
+		expect(imagined.requests.at(-1)?.body).toEqual({
+			owner: "~managed",
+			repo: "proj-1",
+			name: "Pro plan",
+			unit_amount: 2900,
+			currency: "gbp",
+			interval: "month",
+		});
+	});
+
+	test("payment_link without the required fields is refused before any call", async () => {
+		const before = imagined.requests.length;
+		const result = JSON.parse(await smolt.tool({ action: "payment_link", name: "Pro plan" }, context())) as Record<
+			string,
+			unknown
+		>;
+		expect(String(result.message)).toMatch(/name, unit_amount and currency are required/);
+		expect(imagined.requests.length).toBe(before);
+	});
+
+	test("checkout provisions the function and names it", async () => {
+		const result = JSON.parse(
+			await smolt.tool(
+				{
+					action: "checkout",
+					items: [{ sku: "tee", name: "Tee", unit_amount: 1500, currency: "gbp" }],
+					success_path: "/thanks",
+				},
+				context(),
+			),
+		) as Record<string, unknown>;
+		expect(result.state).toBe("ready");
+		expect(String(result.message)).toContain('"create-checkout" is ACTIVE');
+		expect(String(result.message)).toContain("deployed now");
+		expect(imagined.requests.at(-1)?.body).toMatchObject({
+			owner: "~managed",
+			repo: "proj-1",
+			success_path: "/thanks",
+		});
+	});
+
+	test("checkout with Stripe missing says which connection and keeps the UI honest", async () => {
+		imagined.checkoutAnswer = { state: "needs_stripe" };
+		const result = JSON.parse(
+			await smolt.tool(
+				{ action: "checkout", items: [{ sku: "tee", name: "Tee", unit_amount: 1500, currency: "gbp" }] },
+				context(),
+			),
+		) as Record<string, unknown>;
+		expect(String(result.message)).toMatch(/run \/sites stripe/);
+		expect(String(result.message)).toMatch(/Payments not enabled/);
 	});
 });
 

@@ -1,6 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { SupabaseCredentials } from "./supabase.ts";
 
 /**
  * The imagined.so side of the sites extension: the credential a device
@@ -17,15 +16,11 @@ export const DEFAULT_BASE_URL = "https://imagined.so";
 /** The client id imagined.so's device-authorisation flow knows this program by. */
 export const CLIENT_ID = "smolt";
 
-/**
- * What a device authorisation leaves behind: one session token for one
- * account, plus the Supabase connection smolt holds itself once made.
- */
+/** What a device authorisation leaves behind: one session token for one account. */
 export interface SitesCredentials {
 	baseUrl: string;
 	token: string;
 	user: { id: string; email: string; name: string };
-	supabase?: SupabaseCredentials;
 }
 
 /** A working directory's hosted project. Lives in `.smolt/sites.json`; holds no secret. */
@@ -43,7 +38,6 @@ export function loadCredentials(path: string): SitesCredentials | undefined {
 		const raw = JSON.parse(readFileSync(path, "utf-8")) as Partial<SitesCredentials>;
 		if (typeof raw.token !== "string" || raw.token === "") return undefined;
 		const user: Partial<SitesCredentials["user"]> = raw.user ?? {};
-		const supabase: Partial<SupabaseCredentials> | undefined = raw.supabase;
 		return {
 			baseUrl: typeof raw.baseUrl === "string" && raw.baseUrl !== "" ? raw.baseUrl : DEFAULT_BASE_URL,
 			token: raw.token,
@@ -52,16 +46,6 @@ export function loadCredentials(path: string): SitesCredentials | undefined {
 				email: typeof user.email === "string" ? user.email : "",
 				name: typeof user.name === "string" ? user.name : "",
 			},
-			supabase:
-				supabase && typeof supabase.token === "string" && supabase.token !== ""
-					? {
-							token: supabase.token,
-							orgId: typeof supabase.orgId === "string" ? supabase.orgId : undefined,
-							projectRef: typeof supabase.projectRef === "string" ? supabase.projectRef : undefined,
-							projectUrl: typeof supabase.projectUrl === "string" ? supabase.projectUrl : undefined,
-							anonKey: typeof supabase.anonKey === "string" ? supabase.anonKey : undefined,
-						}
-					: undefined,
 		};
 	} catch {
 		return undefined;
@@ -162,6 +146,95 @@ export interface PublishStatus {
 	url: string | null;
 	liveUrl: string | null;
 	history: { deploy: string; deployedAt: number }[];
+}
+
+/** The account connections imagined.so holds for the apps it hosts. */
+export type Service = "supabase" | "resend" | "stripe";
+
+/** The route prefix each service's status, connect and disconnect live under. */
+export const SERVICE_PATHS: Record<Service, string> = {
+	supabase: "/api/supabase",
+	resend: "/api/resend",
+	stripe: "/api/stripe-connect",
+};
+
+/** Whether the server offers a service at all, whether this account has connected it, and a word on what. */
+export interface ConnectionStatus {
+	configured: boolean;
+	connected: boolean;
+	/** Supabase: the project URL; Resend: the notify address; Stripe: the account id. */
+	detail: string | null;
+	/** Supabase only: connected but the project is still being created. */
+	provisioning: boolean;
+}
+
+export type EmailState =
+	| { state: "ready"; function: string; notifyEmail: string }
+	| { state: "no_repo" }
+	| { state: "needs_supabase" }
+	| { state: "needs_resend" }
+	| { state: "provisioning" }
+	| { state: "error"; message: string };
+
+export interface PaymentLinkInput {
+	name: string;
+	description?: string;
+	unit_amount: number;
+	currency: string;
+	interval?: "day" | "week" | "month" | "year";
+}
+
+export type PaymentLinkState =
+	| { state: "ready"; id: string; url: string; livemode: boolean }
+	| { state: "no_repo" }
+	| { state: "needs_stripe" }
+	| { state: "error"; message: string };
+
+export interface CheckoutItem {
+	sku: string;
+	name: string;
+	description?: string;
+	unit_amount: number;
+	currency: string;
+}
+
+export interface CheckoutInput {
+	items: CheckoutItem[];
+	success_path?: string;
+	cancel_path?: string;
+}
+
+export type CheckoutState =
+	| {
+			state: "ready";
+			function: string;
+			items: { sku: string }[];
+			livemode: boolean;
+			deployment: "unchanged" | "deployed";
+	  }
+	| { state: "no_repo" }
+	| { state: "needs_supabase" }
+	| { state: "needs_stripe" }
+	| { state: "provisioning" }
+	| { state: "error"; message: string };
+
+export type DatabaseState =
+	| { state: "ready"; schema: string; url: string; anonKey: string; authEmail: string }
+	| { state: "not_connected" }
+	| { state: "provisioning" }
+	| { state: "unavailable" }
+	| { state: "needs_capacity"; message: string; occupied: string[] }
+	| { state: "error"; message: string };
+
+export interface StorageBucket {
+	name: string;
+	access: "public-read" | "authenticated" | "user-private";
+	maxFileSize?: number;
+	allowedMimeTypes?: string[];
+}
+
+export interface StorageResult {
+	buckets: { name: string; id: string; access: StorageBucket["access"] }[];
 }
 
 /** One file of a built site, ready to upload. */
@@ -356,5 +429,76 @@ export class ImaginedClient {
 
 	async unpublish(owner: string, repo: string): Promise<void> {
 		await this.request("DELETE", "/api/publish", { owner, repo });
+	}
+
+	// ---- The backend: the account's connections, through imagined.so ----
+
+	async connectionStatus(service: Service): Promise<ConnectionStatus> {
+		const raw = await this.request<Record<string, unknown>>("GET", `${SERVICE_PATHS[service]}/status`);
+		const project = raw.project as { url?: string } | null | undefined;
+		const detail =
+			service === "supabase"
+				? (project?.url ?? null)
+				: service === "resend"
+					? ((raw.notifyEmail as string | null | undefined) ?? null)
+					: ((raw.accountId as string | null | undefined) ?? null);
+		return {
+			configured: raw.configured === true,
+			connected: raw.connected === true,
+			detail,
+			provisioning: raw.provisioning === true,
+		};
+	}
+
+	/**
+	 * The service's authorisation page for this account, to open in a browser.
+	 * The callback lands on imagined.so and needs no session of its own: the
+	 * one-use state it carries names the account that started the flow.
+	 */
+	async connectUrl(service: Service, returnTo: string): Promise<string> {
+		const query = new URLSearchParams({ returnTo });
+		const raw = await this.request<{ url: string }>("GET", `${SERVICE_PATHS[service]}/connect?${query}`);
+		return raw.url;
+	}
+
+	/** Forget the account's connection; whatever lives in that service stays put. */
+	async disconnect(service: Service): Promise<void> {
+		await this.request("POST", `${SERVICE_PATHS[service]}/disconnect`, {});
+	}
+
+	/** Form email in the project's own backend, ready or not. */
+	async formEmail(owner: string, repo: string): Promise<EmailState> {
+		return this.request<EmailState>("POST", "/api/resend/form-email", { owner, repo });
+	}
+
+	/** A Stripe-hosted Payment Link for one fixed-price item or plan. */
+	async paymentLink(owner: string, repo: string, input: PaymentLinkInput): Promise<PaymentLinkState> {
+		return this.request<PaymentLinkState>("POST", "/api/stripe-connect/payment-link", { owner, repo, ...input });
+	}
+
+	/** The trusted Checkout Session function for a dynamic cart. */
+	async dynamicCheckout(owner: string, repo: string, input: CheckoutInput): Promise<CheckoutState> {
+		return this.request<CheckoutState>("POST", "/api/stripe-connect/dynamic-checkout", { owner, repo, ...input });
+	}
+
+	async database(owner: string, repo: string): Promise<DatabaseState> {
+		return this.request<DatabaseState>("POST", "/api/supabase/database", { owner, repo });
+	}
+
+	async sql(owner: string, repo: string, sql: string): Promise<{ ok: true } | { ok: false; error: string }> {
+		try {
+			await this.request("POST", "/api/supabase/sql", { owner, repo, sql });
+			return { ok: true };
+		} catch (error) {
+			if (error instanceof ImaginedError && (error.code === "sql_failed" || error.code === "not_connected")) {
+				return { ok: false, error: error.message };
+			}
+			throw error;
+		}
+	}
+
+	async storage(owner: string, repo: string, buckets: StorageBucket[]): Promise<StorageResult> {
+		const raw = await this.request<StorageResult>("POST", "/api/supabase/storage", { owner, repo, buckets });
+		return { buckets: Array.isArray(raw.buckets) ? raw.buckets : [] };
 	}
 }

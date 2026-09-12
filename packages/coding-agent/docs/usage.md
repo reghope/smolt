@@ -78,7 +78,7 @@ Built-in extensions register these commands as well:
 | `/pool` | Credential pools: failover keys per provider |
 | `/telegram` | Link Telegram: the agent can message you, and your replies reach the session |
 | `/webserver` | Serve the desktop app in a browser, and show the link |
-| `/sites` | Build a site here and host it on imagined.so: describe the site to build, or `login`, `new`, `link`, `preview`, `publish`, `database`, `supabase [switch\|disconnect]` |
+| `/sites` | Build a site here and host it on imagined.so: describe the site to build, or `login`, `new`, `link`, `preview`, `publish`, `database`, `supabase`, `resend`, `stripe` (each with `switch`, `disconnect`) |
 
 ## Message Queue
 

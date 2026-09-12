@@ -64,6 +64,17 @@ const MAX_LOGIN_WAIT_MS = 15 * 60 * 1000;
 const CONNECT_WAIT_MS = 5 * 60 * 1000;
 const CONNECT_POLL_MS = 3000;
 
+/**
+ * The Supabase integration is a switch on the imagined.so server, not on the
+ * account: it is off until the server carries a Supabase OAuth app's id and
+ * secret. Nothing smolt or the account can do turns it on, so say where the
+ * switch is.
+ */
+const SUPABASE_OFF =
+	"The Supabase integration is switched off on the imagined.so server: SUPABASE_OAUTH_CLIENT_ID and " +
+	"SUPABASE_OAUTH_CLIENT_SECRET are not set in its environment. Set them from the Supabase OAuth app " +
+	"(callback https://imagined.so/api/supabase/callback), restart the server, then run /sites supabase again.";
+
 /** Where the browser lands after Supabase hands the account back to imagined.so. */
 const CONNECT_RETURN_PATH = "/settings/connections";
 
@@ -535,7 +546,7 @@ export function createSitesExtension(
 			case "needs_capacity":
 				return `${state.message} Projects in the way: ${state.occupied.join(", ") || "none listed"}.`;
 			case "unavailable":
-				return "imagined.so has no Supabase integration configured, so no database can be provided.";
+				return SUPABASE_OFF;
 			case "error":
 				return state.message;
 		}
@@ -584,7 +595,7 @@ export function createSitesExtension(
 		const api = client();
 		if (!api) return "Not signed in to imagined.so. Run /sites login first.";
 		const state = await api.supabaseStatus();
-		if (!state.configured) return "imagined.so has no Supabase integration configured.";
+		if (!state.configured) return SUPABASE_OFF;
 		switch (action) {
 			case "":
 			case "status": {

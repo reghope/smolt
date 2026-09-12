@@ -7,7 +7,6 @@ import { openBrowser } from "../../utils/open-browser.ts";
 import { type BuildRunner, collectSite, detectLayout, formatBytes, prepareSite, runCommand } from "./build.ts";
 import {
 	clearCredentials,
-	type DatabaseState,
 	DEFAULT_BASE_URL,
 	ImaginedClient,
 	ImaginedError,
@@ -16,13 +15,23 @@ import {
 	type Project,
 	type SiteLink,
 	type SitesCredentials,
-	type StorageBucket,
-	type SupabaseStatus,
 	saveCredentials,
 	saveSiteLink,
 } from "./client.ts";
 import { type Preview, startPreview } from "./preview.ts";
 import { SITES_GUIDANCE } from "./prompt.ts";
+import {
+	type DatabaseState,
+	ensureAuthRedirect,
+	ensureDatabase,
+	ensureStorage,
+	looksLikeAccessToken,
+	runAppSql,
+	type StorageBucket,
+	SupabaseManagement,
+	TOKEN_ENV,
+	TOKENS_PAGE,
+} from "./supabase.ts";
 
 /**
  * Sites: build a site here, host it on imagined.so.
@@ -60,23 +69,7 @@ const REPORT_DELIVERY = { triggerTurn: false } as const;
 /** Waiting longer than this for a device approval is waiting for nobody. */
 const MAX_LOGIN_WAIT_MS = 15 * 60 * 1000;
 
-/** How long a Supabase authorisation in the browser is waited for, and how often it is checked. */
-const CONNECT_WAIT_MS = 5 * 60 * 1000;
-const CONNECT_POLL_MS = 3000;
-
-/**
- * The Supabase integration is a switch on the imagined.so server, not on the
- * account: it is off until the server carries a Supabase OAuth app's id and
- * secret. Nothing smolt or the account can do turns it on, so say where the
- * switch is.
- */
-const SUPABASE_OFF =
-	"The Supabase integration is switched off on the imagined.so server: SUPABASE_OAUTH_CLIENT_ID and " +
-	"SUPABASE_OAUTH_CLIENT_SECRET are not set in its environment. Set them from the Supabase OAuth app " +
-	"(callback https://imagined.so/api/supabase/callback), restart the server, then run /sites supabase again.";
-
-/** Where the browser lands after Supabase hands the account back to imagined.so. */
-const CONNECT_RETURN_PATH = "/settings/connections";
+const NOT_CONNECTED = "Supabase is not connected. Run /sites supabase to sign in to the Supabase account to use.";
 
 /** How long a build may take before it is abandoned as hung. */
 const BUILD_TIMEOUT_NOTE = "npm run build";
@@ -92,7 +85,7 @@ const USAGE = [
 	"/sites unpublish            take the site down",
 	"/sites open                 open the live site in a browser",
 	"/sites database             give the site its database and write its .env",
-	"/sites supabase             the account's Supabase connection; connects it when there is none",
+	"/sites supabase             your Supabase connection; asks for an access token when there is none",
 	"/sites supabase switch      connect a different Supabase account (new databases go there)",
 	"/sites supabase disconnect  forget the connection; its projects and data stay where they are",
 ].join("\n");
@@ -428,6 +421,7 @@ export function createSitesExtension(
 					? "Build: none; index.html and everything beside it is published as is."
 					: "Build: nothing to publish here yet.",
 		);
+		if (credentials) lines.push(`Supabase: ${describeSupabase()}.`);
 		if (preview) lines.push(`Preview: ${preview.url} (serving ${preview.dir}).`);
 		return lines.join("\n");
 	}
@@ -501,6 +495,14 @@ export function createSitesExtension(
 		try {
 			const done = await target.api.publishComplete(start, collected.files);
 			saveSiteLink(cwd, { ...target.link, url: done.url });
+			// Sign-up confirmation and reset links have to land back on the live
+			// site, so its origin joins Auth's allowlist. Best effort: a site
+			// without a database has nothing to allow, and one whose token has
+			// lapsed still published.
+			const supabase = supabaseApi();
+			if (supabase && credentials?.supabase?.projectRef) {
+				await ensureAuthRedirect(supabase, credentials.supabase.projectRef, done.url).catch(() => {});
+			}
 			return { url: done.url, files: collected.files.length, bytes };
 		} catch (error) {
 			await target.api.publishAbort(start.attemptId);
@@ -516,100 +518,133 @@ export function createSitesExtension(
 		return `Took "${target.link.name}" down. /sites publish puts it back.`;
 	}
 
-	// ---- The backend ----
+	// ---- The backend: Supabase, held by smolt ----
 
-	async function database(cwd: string): Promise<DatabaseState | { state: "error"; message: string }> {
-		const target = linked(cwd);
-		if ("error" in target) return { state: "error", message: target.error };
-		const state = await target.api.database(target.link.owner, target.link.repo);
+	function supabaseApi(): SupabaseManagement | undefined {
+		return credentials?.supabase ? new SupabaseManagement(credentials.supabase.token, fetchImpl) : undefined;
+	}
+
+	function persistCredentials(): void {
+		if (credentials) saveCredentials(paths.credentialsPath, credentials);
+	}
+
+	/** The connected Supabase and this directory's site, or what is missing. */
+	function backend(cwd: string): { api: SupabaseManagement; app: string; link: SiteLink } | { error: string } {
+		if (!credentials) return { error: "Not signed in to imagined.so. Run /sites login." };
+		const api = supabaseApi();
+		if (!api) return { error: NOT_CONNECTED };
+		const link = loadSiteLink(cwd);
+		if (!link)
+			return { error: "This directory is not linked to a hosted project. Run /sites new <name> or /sites link." };
+		return { api, app: link.repo, link };
+	}
+
+	async function database(cwd: string): Promise<DatabaseState | { state: "not_connected" }> {
+		const target = backend(cwd);
+		if ("error" in target) {
+			return credentials && !credentials.supabase
+				? { state: "not_connected" }
+				: { state: "error", message: target.error };
+		}
+		const supabase = credentials!.supabase!;
+		const state = await ensureDatabase(target.api, supabase, target.app);
+		// ensureDatabase learns the project ref, URL and key as it goes; keep them.
+		persistCredentials();
 		if (state.state === "ready") {
 			upsertEnv(join(cwd, ".env"), { VITE_SUPABASE_URL: state.url, VITE_SUPABASE_ANON_KEY: state.anonKey });
+			if (target.link.url && supabase.projectRef) {
+				await ensureAuthRedirect(target.api, supabase.projectRef, target.link.url).catch(() => {});
+			}
 		}
 		return state;
 	}
 
-	function databaseMessage(state: DatabaseState | { state: "error"; message: string }): string {
+	function databaseMessage(state: DatabaseState | { state: "not_connected" }): string {
 		switch (state.state) {
 			case "ready":
 				return (
 					`The backend is ready. Schema: ${state.schema}. VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are in .env. ` +
 					"Create tables with the sql action (idempotent; every table needs RLS enabled with policies in the same call). " +
 					`Configure createClient with { db: { schema: '${state.schema}' } } and never query the public schema. ` +
-					(state.authEmail === "ready"
-						? "Email confirmation and password-reset delivery is configured."
-						: "Email confirmation and password-reset delivery is not verified; do not claim sign-up email works.")
+					"Email confirmation and password-reset delivery uses Supabase's default sender unless the user has configured SMTP; do not promise more than that."
 				);
 			case "not_connected":
-				return `Supabase is not connected to this imagined.so account. Connect it once at ${baseUrl()}/settings/connections (or /sites supabase), then ask again.`;
+				return NOT_CONNECTED;
 			case "provisioning":
 				return "The database is still being created; this takes a minute or two on first use. Build the UI now and ask again shortly.";
 			case "needs_capacity":
-				return `${state.message} Projects in the way: ${state.occupied.join(", ") || "none listed"}.`;
-			case "unavailable":
-				return SUPABASE_OFF;
+				return `Supabase has no free project slot for the shared database. Projects in the way: ${state.occupied.join(", ") || "none listed"}. Free one in the Supabase dashboard, or connect another account with /sites supabase switch.`;
 			case "error":
 				return state.message;
 		}
 	}
 
-	function describeConnection(state: SupabaseStatus): string {
-		if (state.project) return `project ${state.project.url}`;
-		return state.provisioning ? "project still being created" : "no project yet";
+	/**
+	 * Connect a Supabase account with a personal access token.
+	 *
+	 * The token comes from the person's own dashboard, through a dialog, so it
+	 * never enters the conversation; the model is not involved. Without a
+	 * dialog, the environment variable Supabase's CLI reads is honoured. The
+	 * token is proved against the API before it is kept.
+	 */
+	async function connectSupabase(ctx: ExtensionContext): Promise<string> {
+		if (!credentials) return "Not signed in to imagined.so. Run /sites login first.";
+		let token = process.env[TOKEN_ENV]?.trim() ?? "";
+		if (!looksLikeAccessToken(token)) {
+			if (!ctx.hasUI)
+				return `No Supabase token. Set ${TOKEN_ENV} to a personal access token, or run /sites supabase in the app.`;
+			report(
+				[
+					"Connect Supabase: a browser page should have opened on your Supabase access tokens.",
+					`If it did not, open ${TOKENS_PAGE}. Generate a new token, name it "smolt", copy it, and paste it into the dialog here.`,
+					"Do not paste the token into this chat; the dialog keeps it out of the conversation.",
+				].join("\n"),
+			);
+			open(TOKENS_PAGE);
+			const pasted = await ctx.ui.input("Paste your Supabase access token (starts with sbp_)", "sbp_");
+			if (pasted === undefined || pasted.trim() === "") return "Nothing connected.";
+			token = pasted.trim();
+			if (!looksLikeAccessToken(token)) {
+				return "That does not look like a Supabase personal access token; they start with sbp_. Nothing was kept.";
+			}
+		}
+		const api = new SupabaseManagement(token, fetchImpl);
+		let orgs: { id: string; name: string }[];
+		try {
+			orgs = await api.organizations();
+		} catch (error) {
+			return `Supabase did not accept that token (${describe(error)}). Nothing was kept.`;
+		}
+		credentials.supabase = { token };
+		persistCredentials();
+		const where = orgs.length > 0 ? ` (${orgs.map((org) => org.name).join(", ")})` : "";
+		return `Supabase is connected${where}. /sites database gives a linked site its schema and .env.`;
 	}
 
-	/**
-	 * Send the reader through Supabase's authorisation page and wait for
-	 * imagined.so to report the account connected. The page is the same one
-	 * the site builder's Connect button opens; the round trip ends on
-	 * imagined.so, which is why the wait polls rather than listens.
-	 */
-	async function connectSupabase(api: ImaginedClient, ctx: ExtensionContext): Promise<string> {
-		const url = await api.supabaseConnectUrl(CONNECT_RETURN_PATH);
-		report(
-			[
-				"Connect Supabase: a browser page should have opened on Supabase's authorisation screen.",
-				`If it did not, open ${url} on any device. Sign in to the Supabase account you want to use and allow imagined.so.`,
-				"This chat continues on its own once the connection is made.",
-			].join("\n"),
-		);
-		ctx.ui.setStatus("sites", "waiting for Supabase to be authorised");
-		ctx.ui.setWidget("sites", ["Supabase: authorise imagined.so in the browser page that opened"]);
-		open(url);
-		try {
-			const deadline = Date.now() + CONNECT_WAIT_MS;
-			while (Date.now() < deadline) {
-				await sleep(CONNECT_POLL_MS);
-				const state = await api.supabaseStatus();
-				if (state.connected) {
-					return `Supabase is connected (${describeConnection(state)}). /sites database gives a linked site its schema and .env.`;
-				}
-			}
-			return "Supabase was not connected in time. Run /sites supabase again when you are ready.";
-		} finally {
-			ctx.ui.setStatus("sites", undefined);
-			ctx.ui.setWidget("sites", undefined);
-		}
+	function describeSupabase(): string {
+		const supabase = credentials?.supabase;
+		if (!supabase) return "not connected";
+		if (supabase.projectUrl) return `connected, project ${supabase.projectUrl}`;
+		if (supabase.projectRef) return `connected, project ${supabase.projectRef} still being created`;
+		return "connected; the shared project is created on first /sites database";
 	}
 
 	async function supabase(cwd: string, action: string, ctx: ExtensionContext): Promise<string> {
-		const api = client();
-		if (!api) return "Not signed in to imagined.so. Run /sites login first.";
-		const state = await api.supabaseStatus();
-		if (!state.configured) return SUPABASE_OFF;
+		if (!credentials) return "Not signed in to imagined.so. Run /sites login first.";
 		switch (action) {
 			case "":
 			case "status": {
-				if (!state.connected) return connectSupabase(api, ctx);
+				if (!credentials.supabase) return connectSupabase(ctx);
 				const link = loadSiteLink(cwd);
 				return (
-					`Supabase is connected (${describeConnection(state)}).` +
+					`Supabase: ${describeSupabase()}.` +
 					(link ? " /sites database gives this site its schema and .env." : "") +
 					" /sites supabase switch connects a different account."
 				);
 			}
 			case "switch":
 			case "connect": {
-				if (state.connected) {
+				if (credentials.supabase) {
 					if (ctx.hasUI) {
 						const sure = await ctx.ui.confirm(
 							"Switch Supabase account?",
@@ -617,21 +652,23 @@ export function createSitesExtension(
 						);
 						if (!sure) return "Kept the current Supabase connection.";
 					}
-					await api.supabaseDisconnect();
+					credentials.supabase = undefined;
+					persistCredentials();
 				}
-				return connectSupabase(api, ctx);
+				return connectSupabase(ctx);
 			}
 			case "disconnect": {
-				if (!state.connected) return "Supabase is not connected.";
+				if (!credentials.supabase) return "Supabase is not connected.";
 				if (ctx.hasUI) {
 					const sure = await ctx.ui.confirm(
 						"Disconnect Supabase?",
-						"imagined.so forgets the connection. The project, its data and its keys stay in your Supabase account, and published sites keep working.",
+						`smolt forgets the token. The project, its data and its keys stay in your Supabase account, and published sites keep working. Revoke the token itself at ${TOKENS_PAGE}.`,
 					);
 					if (!sure) return "Kept the Supabase connection.";
 				}
-				await api.supabaseDisconnect();
-				return "Disconnected Supabase from imagined.so. /sites supabase connects one again.";
+				credentials.supabase = undefined;
+				persistCredentials();
+				return "Disconnected Supabase from smolt. /sites supabase connects one again.";
 			}
 			default:
 				return "Usage: /sites supabase [switch | disconnect]";
@@ -708,7 +745,7 @@ export function createSitesExtension(
 			"signed in, and live. 'preview' builds the site (npm run build) and serves the exact publish bundle on " +
 			"localhost, returning the URL; 'preview_stop' stops it. 'publish' builds and puts the site live, returning the " +
 			"live URL: use it only when the user explicitly asked to publish. 'database' is the required live preflight " +
-			"before any Supabase code: it gives the site its own schema in the account's Supabase project, writes " +
+			"before any Supabase code: it gives the site its own schema in the Supabase project smolt is connected to, writes " +
 			"VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY into .env, and reports the state; call it again rather than " +
 			"trusting an earlier answer. 'sql' runs idempotent app SQL inside that schema (unqualified table names; every " +
 			"table must enable row level security and get policies in the same call). 'storage' creates app-scoped " +
@@ -771,23 +808,24 @@ export function createSitesExtension(
 						return jsonResult({ ...state, message: databaseMessage(state) });
 					}
 					case "sql": {
-						const target = linked(ctx.cwd);
+						const target = backend(ctx.cwd);
 						if ("error" in target) return jsonResult({ ok: false, error: target.error });
+						const ref = credentials?.supabase?.projectRef;
+						if (!ref) return jsonResult({ ok: false, error: "No database yet: call the database action first." });
 						if (!params.sql || params.sql.trim() === "")
 							return jsonResult({ ok: false, error: "sql is required." });
-						return jsonResult(await target.api.sql(target.link.owner, target.link.repo, params.sql));
+						return jsonResult(await runAppSql(target.api, ref, target.app, params.sql));
 					}
 					case "storage": {
-						const target = linked(ctx.cwd);
+						const target = backend(ctx.cwd);
 						if ("error" in target) return jsonResult({ ok: false, error: target.error });
+						const ref = credentials?.supabase?.projectRef;
+						if (!ref) return jsonResult({ ok: false, error: "No database yet: call the database action first." });
 						if (!params.buckets || params.buckets.length === 0)
 							return jsonResult({ ok: false, error: "buckets is required." });
-						const result = await target.api.storage(
-							target.link.owner,
-							target.link.repo,
-							params.buckets as StorageBucket[],
+						return jsonResult(
+							await ensureStorage(target.api, ref, target.app, params.buckets as StorageBucket[]),
 						);
-						return jsonResult({ ok: true, buckets: result.buckets });
 					}
 				}
 			} catch (error) {

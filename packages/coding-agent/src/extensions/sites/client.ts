@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { SupabaseCredentials } from "./supabase.ts";
 
 /**
  * The imagined.so side of the sites extension: the credential a device
@@ -16,11 +17,15 @@ export const DEFAULT_BASE_URL = "https://imagined.so";
 /** The client id imagined.so's device-authorisation flow knows this program by. */
 export const CLIENT_ID = "smolt";
 
-/** What a device authorisation leaves behind: one session token for one account. */
+/**
+ * What a device authorisation leaves behind: one session token for one
+ * account, plus the Supabase connection smolt holds itself once made.
+ */
 export interface SitesCredentials {
 	baseUrl: string;
 	token: string;
 	user: { id: string; email: string; name: string };
+	supabase?: SupabaseCredentials;
 }
 
 /** A working directory's hosted project. Lives in `.smolt/sites.json`; holds no secret. */
@@ -38,6 +43,7 @@ export function loadCredentials(path: string): SitesCredentials | undefined {
 		const raw = JSON.parse(readFileSync(path, "utf-8")) as Partial<SitesCredentials>;
 		if (typeof raw.token !== "string" || raw.token === "") return undefined;
 		const user: Partial<SitesCredentials["user"]> = raw.user ?? {};
+		const supabase: Partial<SupabaseCredentials> | undefined = raw.supabase;
 		return {
 			baseUrl: typeof raw.baseUrl === "string" && raw.baseUrl !== "" ? raw.baseUrl : DEFAULT_BASE_URL,
 			token: raw.token,
@@ -46,6 +52,16 @@ export function loadCredentials(path: string): SitesCredentials | undefined {
 				email: typeof user.email === "string" ? user.email : "",
 				name: typeof user.name === "string" ? user.name : "",
 			},
+			supabase:
+				supabase && typeof supabase.token === "string" && supabase.token !== ""
+					? {
+							token: supabase.token,
+							orgId: typeof supabase.orgId === "string" ? supabase.orgId : undefined,
+							projectRef: typeof supabase.projectRef === "string" ? supabase.projectRef : undefined,
+							projectUrl: typeof supabase.projectUrl === "string" ? supabase.projectUrl : undefined,
+							anonKey: typeof supabase.anonKey === "string" ? supabase.anonKey : undefined,
+						}
+					: undefined,
 		};
 	} catch {
 		return undefined;
@@ -146,32 +162,6 @@ export interface PublishStatus {
 	url: string | null;
 	liveUrl: string | null;
 	history: { deploy: string; deployedAt: number }[];
-}
-
-export interface SupabaseStatus {
-	configured: boolean;
-	connected: boolean;
-	project: { url: string; anonKey: string } | null;
-	provisioning: boolean;
-}
-
-export type DatabaseState =
-	| { state: "ready"; schema: string; url: string; anonKey: string; authEmail: string }
-	| { state: "not_connected" }
-	| { state: "provisioning" }
-	| { state: "unavailable" }
-	| { state: "needs_capacity"; message: string; occupied: string[] }
-	| { state: "error"; message: string };
-
-export interface StorageBucket {
-	name: string;
-	access: "public-read" | "authenticated" | "user-private";
-	maxFileSize?: number;
-	allowedMimeTypes?: string[];
-}
-
-export interface StorageResult {
-	buckets: { name: string; id: string; access: StorageBucket["access"] }[];
 }
 
 /** One file of a built site, ready to upload. */
@@ -366,54 +356,5 @@ export class ImaginedClient {
 
 	async unpublish(owner: string, repo: string): Promise<void> {
 		await this.request("DELETE", "/api/publish", { owner, repo });
-	}
-
-	// ---- The backend: Supabase, through the account's own connection ----
-
-	async supabaseStatus(): Promise<SupabaseStatus> {
-		const raw = await this.request<Partial<SupabaseStatus>>("GET", "/api/supabase/status");
-		return {
-			configured: raw.configured === true,
-			connected: raw.connected === true,
-			project: raw.project ?? null,
-			provisioning: raw.provisioning === true,
-		};
-	}
-
-	/**
-	 * The Supabase authorisation page for this account, to open in a browser.
-	 * The callback lands on imagined.so and needs no session of its own: the
-	 * one-use state it carries names the account that started the flow.
-	 */
-	async supabaseConnectUrl(returnTo: string): Promise<string> {
-		const query = new URLSearchParams({ returnTo });
-		const raw = await this.request<{ url: string }>("GET", `/api/supabase/connect?${query}`);
-		return raw.url;
-	}
-
-	/** Forget the account's Supabase connection; its projects and data stay put. */
-	async supabaseDisconnect(): Promise<void> {
-		await this.request("POST", "/api/supabase/disconnect", {});
-	}
-
-	async database(owner: string, repo: string): Promise<DatabaseState> {
-		return this.request<DatabaseState>("POST", "/api/supabase/database", { owner, repo });
-	}
-
-	async sql(owner: string, repo: string, sql: string): Promise<{ ok: true } | { ok: false; error: string }> {
-		try {
-			await this.request("POST", "/api/supabase/sql", { owner, repo, sql });
-			return { ok: true };
-		} catch (error) {
-			if (error instanceof ImaginedError && (error.code === "sql_failed" || error.code === "not_connected")) {
-				return { ok: false, error: error.message };
-			}
-			throw error;
-		}
-	}
-
-	async storage(owner: string, repo: string, buckets: StorageBucket[]): Promise<StorageResult> {
-		const raw = await this.request<StorageResult>("POST", "/api/supabase/storage", { owner, repo, buckets });
-		return { buckets: Array.isArray(raw.buckets) ? raw.buckets : [] };
 	}
 }
